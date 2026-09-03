@@ -6,11 +6,12 @@ use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use rand_core::{OsRng, RngCore};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const REPORT_SCHEMA: &str = "computearena-benchmark/1";
 const HARNESS_SCHEMA: &str = "basert-harness/1";
@@ -37,6 +38,10 @@ struct Cli {
     /// Override the benchmark harness executable.
     #[arg(long, global = true)]
     harness: Option<PathBuf>,
+
+    /// Override the ComputeArena API base URL.
+    #[arg(long, global = true)]
+    api_url: Option<String>,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -78,7 +83,7 @@ enum Command {
     Login,
     /// Remove the local computearena.ai session.
     Logout,
-    /// Submit saved reports (enabled when the server API lands).
+    /// Submit one or more saved reports. Prompts for reports when omitted.
     Submit { reports: Vec<String> },
 }
 
@@ -266,13 +271,14 @@ fn run() -> Result<()> {
         },
     };
     let paths = Paths::resolve(data_dir)?;
+    let api_url = resolve_api_url(cli.api_url)?;
     match cli.command {
-        Some(command) => execute(command, &paths, cli.harness),
-        None => interactive(&paths, cli.harness),
+        Some(command) => execute(command, &paths, cli.harness, &api_url),
+        None => interactive(&paths, cli.harness, &api_url),
     }
 }
 
-fn execute(command: Command, paths: &Paths, harness: Option<PathBuf>) -> Result<()> {
+fn execute(command: Command, paths: &Paths, harness: Option<PathBuf>, api_url: &str) -> Result<()> {
     match command {
         Command::Run {
             model,
@@ -310,15 +316,13 @@ fn execute(command: Command, paths: &Paths, harness: Option<PathBuf>) -> Result<
         Command::Login => server_deferred("login"),
         Command::Logout => server_deferred("logout"),
         Command::Submit { reports } => {
-            if reports.is_empty() {
-                list_reports(paths, false)?;
-            }
-            server_deferred("submission")
+            let reports = select_reports_for_submission(paths, &reports, TerminalUi::detect())?;
+            submit_reports(&reports, api_url)
         }
     }
 }
 
-fn interactive(paths: &Paths, harness: Option<PathBuf>) -> Result<()> {
+fn interactive(paths: &Paths, harness: Option<PathBuf>, api_url: &str) -> Result<()> {
     let ui = TerminalUi::detect();
     ui.banner();
     loop {
@@ -381,8 +385,15 @@ fn interactive(paths: &Paths, harness: Option<PathBuf>) -> Result<()> {
             }
             "3" => {
                 ui.section("Submit previous benchmarks");
-                list_reports(paths, false)?;
-                println!("Submission will be enabled with the computearena.ai server API.");
+                match select_reports_for_submission(paths, &[], ui) {
+                    Ok(reports) if !reports.is_empty() => {
+                        if let Err(error) = submit_reports(&reports, api_url) {
+                            eprintln!("{} {error:#}", ui.error("Submission failed:"));
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => eprintln!("{} {error:#}", ui.error("Could not select reports:")),
+                }
             }
             "4" => {
                 ui.section("Local benchmarks");
@@ -488,6 +499,220 @@ fn prompt_report_choice(paths: &Paths, ui: TerminalUi) -> Result<Option<PathBuf>
             ),
         }
     }
+}
+
+fn resolve_api_url(override_url: Option<String>) -> Result<String> {
+    let value = override_url
+        .or_else(|| std::env::var("BASERT_COMPUTEARENA_API_URL").ok())
+        .unwrap_or_else(|| "https://computearena.ai/api/v1".to_string());
+    let value = value.trim().trim_end_matches('/');
+    if value.is_empty() {
+        bail!("ComputeArena API URL cannot be empty");
+    }
+    let parsed = reqwest::Url::parse(value).context("invalid ComputeArena API URL")?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        bail!("ComputeArena API URL must use http or https");
+    }
+    Ok(value.to_string())
+}
+
+fn select_reports_for_submission(
+    paths: &Paths,
+    requested: &[String],
+    ui: TerminalUi,
+) -> Result<Vec<PathBuf>> {
+    if !requested.is_empty() {
+        let mut selected = Vec::with_capacity(requested.len());
+        let mut seen = HashSet::new();
+        for report in requested {
+            let path = resolve_report(paths, report)?;
+            if seen.insert(path.clone()) {
+                selected.push(path);
+            }
+        }
+        return Ok(selected);
+    }
+
+    let started = start_activity(ui, "Loading and verifying saved benchmarks…");
+    let reports = report_summaries(paths)?;
+    finish_activity(
+        ui,
+        started,
+        format!("Found {} saved benchmark(s)", reports.len()),
+    );
+    if reports.is_empty() {
+        println!("No local benchmarks are available yet. Run a benchmark first.");
+        return Ok(Vec::new());
+    }
+
+    println!("Choose one or more saved benchmarks:\n");
+    for (index, report) in reports.iter().enumerate() {
+        let status = if report["status"].as_str() == Some("valid") {
+            ui.success("VALID")
+        } else {
+            ui.error("INVALID")
+        };
+        println!(
+            "  {} {}  [{}]",
+            ui.paint(BRAND_LIME_BOLD, format!("{}.", index + 1)),
+            report["model"].as_str().unwrap_or("Unknown model"),
+            status
+        );
+        println!(
+            "     {}  •  report {}",
+            report["created_at"].as_str().unwrap_or("Unknown time"),
+            report["short_id"].as_str().unwrap_or("unknown")
+        );
+    }
+    println!("\nEnter numbers separated by commas, `all`, or `0` to go back.");
+
+    loop {
+        let input = prompt("Benchmarks to submit: ")?;
+        let input = input.trim();
+        if matches!(input, "0" | "q" | "quit" | "back") {
+            return Ok(Vec::new());
+        }
+        let indexes = match parse_report_selection(input, reports.len()) {
+            Ok(indexes) => indexes,
+            Err(error) => {
+                println!("{} {error}", ui.warning("!"));
+                continue;
+            }
+        };
+        return indexes
+            .into_iter()
+            .map(|index| {
+                reports[index]["path"]
+                    .as_str()
+                    .map(PathBuf::from)
+                    .context("saved benchmark has no file path")
+            })
+            .collect();
+    }
+}
+
+fn parse_report_selection(input: &str, count: usize) -> Result<Vec<usize>> {
+    if input.eq_ignore_ascii_case("all") {
+        return Ok((0..count).collect());
+    }
+    let mut selected = Vec::new();
+    let mut seen = HashSet::new();
+    for part in input
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        let number: usize = part
+            .parse()
+            .with_context(|| format!("{part:?} is not a benchmark number"))?;
+        let index = number
+            .checked_sub(1)
+            .filter(|index| *index < count)
+            .with_context(|| format!("choose numbers from 1 to {count}"))?;
+        if seen.insert(index) {
+            selected.push(index);
+        }
+    }
+    if selected.is_empty() {
+        bail!("choose at least one benchmark");
+    }
+    Ok(selected)
+}
+
+fn submit_reports(reports: &[PathBuf], api_url: &str) -> Result<()> {
+    if reports.is_empty() {
+        return Ok(());
+    }
+    let ui = TerminalUi::detect();
+    let endpoint = format!("{api_url}/submissions");
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
+        .user_agent(format!("basert-computearena/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("building ComputeArena HTTP client")?;
+    let mut failures = Vec::new();
+
+    println!("Submitting {} benchmark(s) to {api_url}", reports.len());
+    for (index, path) in reports.iter().enumerate() {
+        let value = read_report(path)?;
+        verify_report(&value).with_context(|| format!("verifying {}", path.display()))?;
+        let run_id = value
+            .get("run_id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let started = start_activity(
+            ui,
+            format!(
+                "[{}/{}] Submitting report {}…",
+                index + 1,
+                reports.len(),
+                short_id(run_id)
+            ),
+        );
+        let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        match client
+            .post(&endpoint)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::ACCEPT, "application/json")
+            .body(bytes)
+            .send()
+        {
+            Ok(response) => {
+                let status = response.status();
+                let body = response.text().unwrap_or_default();
+                if status.is_success() {
+                    let duplicate = status.as_u16() == 200;
+                    let submission_id =
+                        serde_json::from_str::<Value>(&body).ok().and_then(|value| {
+                            value.get("id").and_then(Value::as_str).map(str::to_owned)
+                        });
+                    finish_activity(
+                        ui,
+                        started,
+                        if duplicate {
+                            "Already submitted".to_string()
+                        } else {
+                            "Benchmark submitted".to_string()
+                        },
+                    );
+                    if let Some(submission_id) = submission_id {
+                        println!("  Submission ID: {submission_id}");
+                    }
+                } else {
+                    let message = api_error_message(&body)
+                        .unwrap_or_else(|| format!("server returned HTTP {}", status.as_u16()));
+                    eprintln!("{} {message}", ui.error("✗"));
+                    failures.push(format!("{}: {message}", path.display()));
+                }
+            }
+            Err(error) => {
+                eprintln!("{} {error}", ui.error("✗"));
+                failures.push(format!("{}: {error}", path.display()));
+            }
+        }
+    }
+    if !failures.is_empty() {
+        bail!(
+            "{} of {} benchmark submissions failed:\n{}",
+            failures.len(),
+            reports.len(),
+            failures.join("\n")
+        );
+    }
+    println!(
+        "{} All selected benchmarks are available on ComputeArena.",
+        ui.success("✓")
+    );
+    Ok(())
+}
+
+fn api_error_message(body: &str) -> Option<String> {
+    serde_json::from_str::<Value>(body)
+        .ok()?
+        .pointer("/error/message")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 fn server_deferred(feature: &str) -> Result<()> {
@@ -1462,6 +1687,23 @@ mod tests {
             String::from_utf8(output).unwrap(),
             r#"{"a":{"b":[2,1],"y":true},"z":1}"#
         );
+    }
+
+    #[test]
+    fn report_selection_supports_multiple_values_and_all() {
+        assert_eq!(parse_report_selection("3, 1,3", 4).unwrap(), vec![2, 0]);
+        assert_eq!(parse_report_selection("all", 3).unwrap(), vec![0, 1, 2]);
+        assert!(parse_report_selection("0", 3).is_err());
+        assert!(parse_report_selection("4", 3).is_err());
+    }
+
+    #[test]
+    fn api_url_is_normalized_and_validated() {
+        assert_eq!(
+            resolve_api_url(Some("http://127.0.0.1:8080/api/v1/".to_string())).unwrap(),
+            "http://127.0.0.1:8080/api/v1"
+        );
+        assert!(resolve_api_url(Some("file:///tmp/server".to_string())).is_err());
     }
 
     #[test]
