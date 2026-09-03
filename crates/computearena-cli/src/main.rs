@@ -546,12 +546,25 @@ fn resolve_api_url(override_url: Option<String>) -> Result<String> {
 fn login(paths: &Paths, api_url: &str) -> Result<()> {
     let ui = TerminalUi::detect();
     if let Some(session) = load_api_session(paths, api_url)? {
-        println!(
-            "Already logged in to {api_url} as {}.",
-            ui.success(format!("@{}", session.username))
-        );
-        println!("Run `basert computearena logout` before switching accounts.");
-        return Ok(());
+        let started = start_activity(ui, format!("Checking the saved login with {api_url}…"));
+        match validate_api_session(api_url, &session)? {
+            Some(username) => {
+                finish_activity(ui, started, "Saved login is valid");
+                println!(
+                    "Logged in to {api_url} as {}.",
+                    ui.success(format!("@{username}"))
+                );
+                println!("Run `basert computearena logout` before switching accounts.");
+                return Ok(());
+            }
+            None => {
+                println!(
+                    "{} The saved login is expired or revoked; starting a new login.",
+                    ui.warning("!")
+                );
+                remove_api_session(paths, api_url)?;
+            }
+        }
     }
 
     let client = reqwest::blocking::Client::builder()
@@ -637,6 +650,36 @@ fn login(paths: &Paths, api_url: &str) -> Result<()> {
         );
     }
     bail!("login code expired; run `basert computearena login` again")
+}
+
+fn validate_api_session(api_url: &str, session: &ApiSession) -> Result<Option<String>> {
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(15))
+        .user_agent(format!("basert-computearena/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("building ComputeArena HTTP client")?;
+    let response = client
+        .get(format!("{api_url}/auth/session"))
+        .header(reqwest::header::ACCEPT, "application/json")
+        .bearer_auth(&session.access_token)
+        .send()
+        .context("validating the saved ComputeArena login")?;
+    let status = response.status();
+    let body = response.text().unwrap_or_default();
+    if status.is_success() {
+        let value: Value =
+            serde_json::from_str(&body).context("parsing login validation response")?;
+        return Ok(Some(required_json_string(&value, "username")?));
+    }
+    if status.as_u16() == 401 {
+        return Ok(None);
+    }
+    bail!(
+        "could not validate saved login: {}",
+        api_error_message(&body)
+            .unwrap_or_else(|| format!("server returned HTTP {}", status.as_u16()))
+    )
 }
 
 fn logout(paths: &Paths, api_url: &str) -> Result<()> {
