@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = ["crates/computearena-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/basecompute/baseRT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Temporary BaseRT adapter dependencies. Keeping these two paths explicit makes
+# the remaining extraction work visible; the CLI does not link the BaseRT
+# engine and communicates with it only through the basert-harness process.
+base-format = { path = "../tools/base-convert/crates/base-format" }
+base-sign = { path = "../tools/base-convert/crates/base-sign" }
+
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+dirs = "5"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+tempfile = "3"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
