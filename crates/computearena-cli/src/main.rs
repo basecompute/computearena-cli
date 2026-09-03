@@ -18,6 +18,7 @@ const HARNESS_SCHEMA: &str = "basert-harness/1";
 const SIGNATURE_DOMAIN: &[u8] = b"computearena-benchmark/1\0";
 const BRAND_LIME: &str = "38;2;195;255;77";
 const BRAND_LIME_BOLD: &str = "1;38;2;195;255;77";
+const NEUTRAL_TEXT: &str = "38;2;156;163;175";
 // BaseRT supplies the branded launcher build. A future standalone repository
 // can replace this one compile-time asset without changing the CLI or report
 // implementation.
@@ -84,7 +85,12 @@ enum Command {
     /// Revoke and remove the session for the selected API URL.
     Logout,
     /// Submit one or more saved reports. Prompts for reports when omitted.
-    Submit { reports: Vec<String> },
+    Submit {
+        reports: Vec<String>,
+        /// Submit without the preview and confirmation prompts.
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -109,6 +115,13 @@ struct ApiSession {
     access_token: String,
     username: String,
     expires_at: String,
+}
+
+#[derive(Debug)]
+struct PreparedSubmission {
+    path: PathBuf,
+    value: Value,
+    bytes: Vec<u8>,
 }
 
 #[derive(Clone, Copy)]
@@ -161,6 +174,10 @@ impl TerminalUi {
 
     fn error(self, text: impl std::fmt::Display) -> String {
         self.paint("1;38;2;255;95;95", text)
+    }
+
+    fn neutral(self, text: impl std::fmt::Display) -> String {
+        self.paint(NEUTRAL_TEXT, text)
     }
 
     fn banner(self) {
@@ -324,9 +341,9 @@ fn execute(command: Command, paths: &Paths, harness: Option<PathBuf>, api_url: &
         }
         Command::Login => login(paths, api_url),
         Command::Logout => logout(paths, api_url),
-        Command::Submit { reports } => {
+        Command::Submit { reports, yes } => {
             let reports = select_reports_for_submission(paths, &reports, TerminalUi::detect())?;
-            submit_reports(paths, &reports, api_url)
+            submit_reports(paths, &reports, api_url, yes)
         }
     }
 }
@@ -414,7 +431,7 @@ fn interactive(paths: &Paths, harness: Option<PathBuf>, api_url: &str) -> Result
                 ui.section("Submit previous benchmarks");
                 match select_reports_for_submission(paths, &[], ui) {
                     Ok(reports) if !reports.is_empty() => {
-                        if let Err(error) = submit_reports(paths, &reports, api_url) {
+                        if let Err(error) = submit_reports(paths, &reports, api_url, false) {
                             eprintln!("{} {error:#}", ui.error("Submission failed:"));
                         }
                     }
@@ -929,11 +946,54 @@ fn parse_report_selection(input: &str, count: usize) -> Result<Vec<usize>> {
     Ok(selected)
 }
 
-fn submit_reports(paths: &Paths, reports: &[PathBuf], api_url: &str) -> Result<()> {
+fn submit_reports(
+    paths: &Paths,
+    reports: &[PathBuf],
+    api_url: &str,
+    assume_yes: bool,
+) -> Result<()> {
     if reports.is_empty() {
         return Ok(());
     }
     let ui = TerminalUi::detect();
+    let checking_started = start_activity(ui, "Reading and verifying selected benchmarks…");
+    let prepared = prepare_submissions(reports)?;
+    finish_activity(
+        ui,
+        checking_started,
+        format!("Verified {} benchmark(s)", prepared.len()),
+    );
+    let session = load_api_session(paths, api_url)?;
+
+    println!();
+    match &session {
+        Some(session) => println!(
+            "Ready to submit {} benchmark(s) to {api_url} as @{}.",
+            prepared.len(),
+            session.username
+        ),
+        None => println!(
+            "Ready to submit {} benchmark(s) to {api_url} anonymously.",
+            prepared.len()
+        ),
+    }
+
+    if !assume_yes {
+        if !io::stdin().is_terminal() {
+            bail!("submission confirmation requires a terminal; pass --yes to submit non-interactively");
+        }
+        if prompt_yes_no("Preview the JSON data before submitting?", true)? {
+            print_submission_preview(ui, &prepared)?;
+        }
+        if !prompt_yes_no("Submit these benchmarks now?", false)? {
+            println!(
+                "{} Nothing was uploaded.",
+                ui.neutral("Submission cancelled.")
+            );
+            return Ok(());
+        }
+    }
+
     let endpoint = format!("{api_url}/submissions");
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(10))
@@ -942,41 +1002,28 @@ fn submit_reports(paths: &Paths, reports: &[PathBuf], api_url: &str) -> Result<(
         .build()
         .context("building ComputeArena HTTP client")?;
     let mut failures = Vec::new();
-    let session = load_api_session(paths, api_url)?;
-
-    match &session {
-        Some(session) => println!(
-            "Submitting {} benchmark(s) to {api_url} as @{}",
-            reports.len(),
-            session.username
-        ),
-        None => println!(
-            "Submitting {} benchmark(s) to {api_url} anonymously",
-            reports.len()
-        ),
-    }
-    for (index, path) in reports.iter().enumerate() {
-        let value = read_report(path)?;
-        verify_report(&value).with_context(|| format!("verifying {}", path.display()))?;
-        let run_id = value
+    let report_count = prepared.len();
+    for (index, report) in prepared.into_iter().enumerate() {
+        let run_id = report
+            .value
             .get("run_id")
             .and_then(Value::as_str)
-            .unwrap_or("unknown");
+            .unwrap_or("unknown")
+            .to_string();
         let started = start_activity(
             ui,
             format!(
                 "[{}/{}] Submitting report {}…",
                 index + 1,
-                reports.len(),
-                short_id(run_id)
+                report_count,
+                short_id(&run_id)
             ),
         );
-        let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let mut request = client
             .post(&endpoint)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header(reqwest::header::ACCEPT, "application/json")
-            .body(bytes);
+            .body(report.bytes);
         if let Some(session) = &session {
             request = request.bearer_auth(&session.access_token);
         }
@@ -1006,12 +1053,12 @@ fn submit_reports(paths: &Paths, reports: &[PathBuf], api_url: &str) -> Result<(
                     let message = api_error_message(&body)
                         .unwrap_or_else(|| format!("server returned HTTP {}", status.as_u16()));
                     eprintln!("{} {message}", ui.error("✗"));
-                    failures.push(format!("{}: {message}", path.display()));
+                    failures.push(format!("{}: {message}", report.path.display()));
                 }
             }
             Err(error) => {
                 eprintln!("{} {error}", ui.error("✗"));
-                failures.push(format!("{}: {error}", path.display()));
+                failures.push(format!("{}: {error}", report.path.display()));
             }
         }
     }
@@ -1019,7 +1066,7 @@ fn submit_reports(paths: &Paths, reports: &[PathBuf], api_url: &str) -> Result<(
         bail!(
             "{} of {} benchmark submissions failed:\n{}",
             failures.len(),
-            reports.len(),
+            report_count,
             failures.join("\n")
         );
     }
@@ -1028,6 +1075,74 @@ fn submit_reports(paths: &Paths, reports: &[PathBuf], api_url: &str) -> Result<(
         ui.success("✓")
     );
     Ok(())
+}
+
+fn prepare_submissions(reports: &[PathBuf]) -> Result<Vec<PreparedSubmission>> {
+    reports
+        .iter()
+        .map(|path| {
+            let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+            let value: Value = serde_json::from_slice(&bytes)
+                .with_context(|| format!("parsing report {}", path.display()))?;
+            verify_report(&value).with_context(|| format!("checking {}", path.display()))?;
+            Ok(PreparedSubmission {
+                path: path.clone(),
+                value,
+                bytes,
+            })
+        })
+        .collect()
+}
+
+fn print_submission_preview(ui: TerminalUi, reports: &[PreparedSubmission]) -> Result<()> {
+    println!();
+    println!(
+        "{}",
+        ui.neutral("──────────────── SUBMISSION PREVIEW · NOT YET UPLOADED ────────────────")
+    );
+    println!(
+        "{}",
+        ui.neutral(
+            "The JSON fields below are sent to ComputeArena. Local file paths are not sent."
+        )
+    );
+    for (index, report) in reports.iter().enumerate() {
+        println!();
+        println!(
+            "{}",
+            ui.neutral(format!("Report {}/{}", index + 1, reports.len()))
+        );
+        println!(
+            "{} {}",
+            ui.paint("2", "Local source (not submitted):"),
+            ui.paint("2", report.path.display())
+        );
+        println!(
+            "{}",
+            ui.neutral(serde_json::to_string_pretty(&report.value)?)
+        );
+    }
+    println!(
+        "{}",
+        ui.neutral("──────────────────────── END PREVIEW ────────────────────────")
+    );
+    Ok(())
+}
+
+fn prompt_yes_no(message: &str, default: bool) -> Result<bool> {
+    let hint = if default { "[Y/n]" } else { "[y/N]" };
+    loop {
+        let answer = prompt(&format!("{message} {hint}: "))?;
+        match answer.trim().to_ascii_lowercase().as_str() {
+            "" => return Ok(default),
+            "y" | "yes" => return Ok(true),
+            "n" | "no" => return Ok(false),
+            _ => println!(
+                "{} Enter `y` for yes or `n` for no.",
+                TerminalUi::detect().warning("!")
+            ),
+        }
+    }
 }
 
 fn api_error_message(body: &str) -> Option<String> {
@@ -1411,7 +1526,11 @@ fn verify_report(report: &Value) -> Result<String> {
         .context("report must be a JSON object")?
         .remove("signature");
     let payload = signature_payload(&unsigned)?;
-    verify_payload(&public, &payload, &signature)?;
+    verify_payload(&public, &payload, &signature).map_err(|_| {
+        anyhow::anyhow!(
+            "signature verification failed; the report was modified after signing or has an invalid signature"
+        )
+    })?;
     Ok(key_id.to_string())
 }
 
@@ -2023,6 +2142,19 @@ mod tests {
     }
 
     #[test]
+    fn submit_yes_flag_allows_non_interactive_submission() {
+        let cli =
+            Cli::try_parse_from(["basert-computearena", "submit", "--yes", "report.json"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Submit {
+                reports,
+                yes: true
+            }) if reports == ["report.json"]
+        ));
+    }
+
+    #[test]
     fn api_url_is_normalized_and_validated() {
         assert_eq!(
             resolve_api_url(Some("http://127.0.0.1:8080/api/v1/".to_string())).unwrap(),
@@ -2094,7 +2226,10 @@ mod tests {
         assert!(verify_report(&report).is_ok());
 
         report["model"]["size_bytes"] = json!(2);
-        assert!(verify_report(&report).is_err());
+        assert_eq!(
+            verify_report(&report).unwrap_err().to_string(),
+            "signature verification failed; the report was modified after signing or has an invalid signature"
+        );
     }
 
     #[test]
