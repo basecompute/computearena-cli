@@ -79,9 +79,9 @@ enum Command {
     Inspect { report: String },
     /// Verify one report's Ed25519 signature.
     Verify { report: String },
-    /// Log in to computearena.ai (enabled when the server API lands).
+    /// Log in through a browser and connect this installation.
     Login,
-    /// Remove the local computearena.ai session.
+    /// Revoke and remove the session for the selected API URL.
     Logout,
     /// Submit one or more saved reports. Prompts for reports when omitted.
     Submit { reports: Vec<String> },
@@ -92,6 +92,7 @@ struct Paths {
     root: PathBuf,
     reports: PathBuf,
     secret_key: PathBuf,
+    auth: PathBuf,
 }
 
 #[derive(Clone, Debug)]
@@ -101,6 +102,13 @@ struct InstalledModel {
     variant: String,
     architecture: String,
     quantization: String,
+}
+
+#[derive(Clone, Debug)]
+struct ApiSession {
+    access_token: String,
+    username: String,
+    expires_at: String,
 }
 
 #[derive(Clone, Copy)]
@@ -236,6 +244,7 @@ impl Paths {
         Ok(Self {
             reports: root.join("reports"),
             secret_key: root.join("keys").join("installation.ed25519"),
+            auth: root.join("auth.json"),
             root,
         })
     }
@@ -313,11 +322,11 @@ fn execute(command: Command, paths: &Paths, harness: Option<PathBuf>, api_url: &
             println!("Installation key: {key_id}");
             Ok(())
         }
-        Command::Login => server_deferred("login"),
-        Command::Logout => server_deferred("logout"),
+        Command::Login => login(paths, api_url),
+        Command::Logout => logout(paths, api_url),
         Command::Submit { reports } => {
             let reports = select_reports_for_submission(paths, &reports, TerminalUi::detect())?;
-            submit_reports(&reports, api_url)
+            submit_reports(paths, &reports, api_url)
         }
     }
 }
@@ -346,7 +355,16 @@ fn interactive(paths: &Paths, harness: Option<PathBuf>, api_url: &str) -> Result
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             )
         );
-        println!("  {} Log in", ui.paint(BRAND_LIME_BOLD, "1."));
+        let session = load_api_session(paths, api_url)?;
+        if let Some(session) = &session {
+            println!(
+                "  {} Log out ({})",
+                ui.paint(BRAND_LIME_BOLD, "1."),
+                ui.paint(BRAND_LIME, format!("@{}", session.username))
+            );
+        } else {
+            println!("  {} Log in", ui.paint(BRAND_LIME_BOLD, "1."));
+        }
         println!("  {} Run benchmarks", ui.paint(BRAND_LIME_BOLD, "2."));
         println!(
             "  {} Submit previous benchmarks",
@@ -364,8 +382,17 @@ fn interactive(paths: &Paths, harness: Option<PathBuf>, api_url: &str) -> Result
         let choice = prompt("Choose an option: ")?;
         match choice.trim() {
             "1" => {
-                ui.section("Log in");
-                println!("Login will be enabled with the computearena.ai server API.");
+                if session.is_some() {
+                    ui.section("Log out");
+                    if let Err(error) = logout(paths, api_url) {
+                        eprintln!("{} {error:#}", ui.error("Logout failed:"));
+                    }
+                } else {
+                    ui.section("Log in");
+                    if let Err(error) = login(paths, api_url) {
+                        eprintln!("{} {error:#}", ui.error("Login failed:"));
+                    }
+                }
             }
             "2" => {
                 ui.section("Run a benchmark");
@@ -387,7 +414,7 @@ fn interactive(paths: &Paths, harness: Option<PathBuf>, api_url: &str) -> Result
                 ui.section("Submit previous benchmarks");
                 match select_reports_for_submission(paths, &[], ui) {
                     Ok(reports) if !reports.is_empty() => {
-                        if let Err(error) = submit_reports(&reports, api_url) {
+                        if let Err(error) = submit_reports(paths, &reports, api_url) {
                             eprintln!("{} {error:#}", ui.error("Submission failed:"));
                         }
                     }
@@ -516,6 +543,246 @@ fn resolve_api_url(override_url: Option<String>) -> Result<String> {
     Ok(value.to_string())
 }
 
+fn login(paths: &Paths, api_url: &str) -> Result<()> {
+    let ui = TerminalUi::detect();
+    if let Some(session) = load_api_session(paths, api_url)? {
+        println!(
+            "Already logged in to {api_url} as {}.",
+            ui.success(format!("@{}", session.username))
+        );
+        println!("Run `basert computearena logout` before switching accounts.");
+        return Ok(());
+    }
+
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(15))
+        .user_agent(format!("basert-computearena/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("building ComputeArena HTTP client")?;
+    let started = start_activity(ui, format!("Requesting a login code from {api_url}…"));
+    let response = client
+        .post(format!("{api_url}/auth/device"))
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .context("requesting a ComputeArena login code")?;
+    let status = response.status();
+    let body = response.text().unwrap_or_default();
+    if !status.is_success() {
+        bail!(
+            "{}",
+            api_error_message(&body)
+                .unwrap_or_else(|| format!("server returned HTTP {}", status.as_u16()))
+        );
+    }
+    let device: Value = serde_json::from_str(&body).context("parsing login response")?;
+    let device_code = required_json_string(&device, "deviceCode")?;
+    let user_code = required_json_string(&device, "userCode")?;
+    let verification_url = required_json_string(&device, "verificationUriComplete")?;
+    let interval = device
+        .get("interval")
+        .and_then(Value::as_u64)
+        .unwrap_or(3)
+        .max(1);
+    let expires_in = device
+        .get("expiresIn")
+        .and_then(Value::as_u64)
+        .unwrap_or(600);
+    finish_activity(ui, started, "Login code ready");
+    println!("\n  Open: {}", ui.paint(BRAND_LIME, &verification_url));
+    println!("  Confirm code: {}", ui.paint(BRAND_LIME_BOLD, &user_code));
+    if open_browser(&verification_url) {
+        println!("\nYour browser was opened. Approve the device there.");
+    } else {
+        println!("\nOpen the URL in a browser, then approve the device.");
+    }
+    println!("Waiting for approval (Ctrl-C to cancel)…");
+    let deadline = Instant::now() + Duration::from_secs(expires_in);
+    let token_endpoint = format!("{api_url}/auth/device/token");
+
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_secs(interval));
+        let request_body = serde_json::to_vec(&json!({ "deviceCode": device_code }))?;
+        let response = client
+            .post(&token_endpoint)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::ACCEPT, "application/json")
+            .body(request_body)
+            .send()
+            .context("checking ComputeArena login approval")?;
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+        if status.is_success() {
+            let token: Value = serde_json::from_str(&body).context("parsing login token")?;
+            let session = ApiSession {
+                access_token: required_json_string(&token, "accessToken")?,
+                username: required_json_string(&token, "username")?,
+                expires_at: required_json_string(&token, "expiresAt")?,
+            };
+            save_api_session(paths, api_url, &session)?;
+            println!(
+                "{} Logged in to {api_url} as @{}.",
+                ui.success("✓"),
+                session.username
+            );
+            return Ok(());
+        }
+        if api_error_code(&body).as_deref() == Some("authorization_pending") {
+            continue;
+        }
+        bail!(
+            "{}",
+            api_error_message(&body)
+                .unwrap_or_else(|| format!("server returned HTTP {}", status.as_u16()))
+        );
+    }
+    bail!("login code expired; run `basert computearena login` again")
+}
+
+fn logout(paths: &Paths, api_url: &str) -> Result<()> {
+    let ui = TerminalUi::detect();
+    let Some(session) = load_api_session(paths, api_url)? else {
+        println!("Not logged in to {api_url}.");
+        return Ok(());
+    };
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(15))
+        .user_agent(format!("basert-computearena/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("building ComputeArena HTTP client")?;
+    let revoke_result = client
+        .post(format!("{api_url}/auth/logout"))
+        .header(reqwest::header::ACCEPT, "application/json")
+        .bearer_auth(&session.access_token)
+        .send();
+    match revoke_result {
+        Ok(response) if response.status().is_success() => {}
+        Ok(response) => eprintln!(
+            "{} Server returned HTTP {}; removing the local session anyway.",
+            ui.warning("!"),
+            response.status().as_u16()
+        ),
+        Err(error) => eprintln!(
+            "{} Could not reach the server ({error}); removing the local session anyway.",
+            ui.warning("!")
+        ),
+    }
+    remove_api_session(paths, api_url)?;
+    println!(
+        "{} Logged out @{} from {api_url}.",
+        ui.success("✓"),
+        session.username
+    );
+    Ok(())
+}
+
+fn required_json_string(value: &Value, field: &str) -> Result<String> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .with_context(|| format!("server response is missing {field}"))
+}
+
+fn open_browser(url: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = ProcessCommand::new("open");
+        command.arg(url);
+        command
+    };
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = ProcessCommand::new("cmd");
+        command.args(["/C", "start", "", url]);
+        command
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut command = ProcessCommand::new("xdg-open");
+        command.arg(url);
+        command
+    };
+    #[cfg(not(any(unix, target_os = "windows")))]
+    return false;
+
+    command
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .is_ok()
+}
+
+fn load_api_session(paths: &Paths, api_url: &str) -> Result<Option<ApiSession>> {
+    if !paths.auth.is_file() {
+        return Ok(None);
+    }
+    let document = read_report(&paths.auth).context("reading saved ComputeArena login")?;
+    let Some(value) = document.pointer(&format!("/origins/{}", json_pointer_escape(api_url)))
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ApiSession {
+        access_token: required_json_string(value, "access_token")?,
+        username: required_json_string(value, "username")?,
+        expires_at: required_json_string(value, "expires_at")?,
+    }))
+}
+
+fn save_api_session(paths: &Paths, api_url: &str, session: &ApiSession) -> Result<()> {
+    let mut document = if paths.auth.is_file() {
+        read_report(&paths.auth).context("reading saved ComputeArena login")?
+    } else {
+        json!({ "version": 1, "origins": {} })
+    };
+    let origins = document
+        .get_mut("origins")
+        .and_then(Value::as_object_mut)
+        .context("saved ComputeArena login has an invalid origins object")?;
+    origins.insert(
+        api_url.to_string(),
+        json!({
+            "access_token": session.access_token,
+            "username": session.username,
+            "expires_at": session.expires_at
+        }),
+    );
+    write_private_json(&paths.auth, &document)
+}
+
+fn remove_api_session(paths: &Paths, api_url: &str) -> Result<()> {
+    if !paths.auth.is_file() {
+        return Ok(());
+    }
+    let mut document = read_report(&paths.auth).context("reading saved ComputeArena login")?;
+    let origins = document
+        .get_mut("origins")
+        .and_then(Value::as_object_mut)
+        .context("saved ComputeArena login has an invalid origins object")?;
+    origins.remove(api_url);
+    write_private_json(&paths.auth, &document)
+}
+
+fn json_pointer_escape(value: &str) -> String {
+    value.replace('~', "~0").replace('/', "~1")
+}
+
+fn write_private_json(path: &Path, value: &Value) -> Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("creating private file under {}", parent.display()))?;
+    set_private_permissions(temp.as_file())?;
+    serde_json::to_writer_pretty(&mut temp, value)?;
+    temp.write_all(b"\n")?;
+    temp.as_file().sync_all()?;
+    temp.persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("saving {}", path.display()))?;
+    Ok(())
+}
+
 fn select_reports_for_submission(
     paths: &Paths,
     requested: &[String],
@@ -619,7 +886,7 @@ fn parse_report_selection(input: &str, count: usize) -> Result<Vec<usize>> {
     Ok(selected)
 }
 
-fn submit_reports(reports: &[PathBuf], api_url: &str) -> Result<()> {
+fn submit_reports(paths: &Paths, reports: &[PathBuf], api_url: &str) -> Result<()> {
     if reports.is_empty() {
         return Ok(());
     }
@@ -632,8 +899,19 @@ fn submit_reports(reports: &[PathBuf], api_url: &str) -> Result<()> {
         .build()
         .context("building ComputeArena HTTP client")?;
     let mut failures = Vec::new();
+    let session = load_api_session(paths, api_url)?;
 
-    println!("Submitting {} benchmark(s) to {api_url}", reports.len());
+    match &session {
+        Some(session) => println!(
+            "Submitting {} benchmark(s) to {api_url} as @{}",
+            reports.len(),
+            session.username
+        ),
+        None => println!(
+            "Submitting {} benchmark(s) to {api_url} anonymously",
+            reports.len()
+        ),
+    }
     for (index, path) in reports.iter().enumerate() {
         let value = read_report(path)?;
         verify_report(&value).with_context(|| format!("verifying {}", path.display()))?;
@@ -651,13 +929,15 @@ fn submit_reports(reports: &[PathBuf], api_url: &str) -> Result<()> {
             ),
         );
         let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-        match client
+        let mut request = client
             .post(&endpoint)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header(reqwest::header::ACCEPT, "application/json")
-            .body(bytes)
-            .send()
-        {
+            .body(bytes);
+        if let Some(session) = &session {
+            request = request.bearer_auth(&session.access_token);
+        }
+        match request.send() {
             Ok(response) => {
                 let status = response.status();
                 let body = response.text().unwrap_or_default();
@@ -715,10 +995,12 @@ fn api_error_message(body: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn server_deferred(feature: &str) -> Result<()> {
-    bail!(
-        "ComputeArena {feature} is not enabled yet; offline run/list/inspect/verify are available"
-    )
+fn api_error_code(body: &str) -> Option<String> {
+    serde_json::from_str::<Value>(body)
+        .ok()?
+        .pointer("/error/code")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1704,6 +1986,56 @@ mod tests {
             "http://127.0.0.1:8080/api/v1"
         );
         assert!(resolve_api_url(Some("file:///tmp/server".to_string())).is_err());
+    }
+
+    #[test]
+    fn login_sessions_are_isolated_by_api_url() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = Paths::resolve(Some(temporary.path().to_path_buf())).unwrap();
+        let local = ApiSession {
+            access_token: "ca_cli_local-test-token".to_string(),
+            username: "local-user".to_string(),
+            expires_at: "2027-01-01T00:00:00.000Z".to_string(),
+        };
+        let production = ApiSession {
+            access_token: "ca_cli_production-test-token".to_string(),
+            username: "production-user".to_string(),
+            expires_at: "2027-01-01T00:00:00.000Z".to_string(),
+        };
+
+        save_api_session(&paths, "http://localhost:3000/api/v1", &local).unwrap();
+        save_api_session(&paths, "https://computearena.ai/api/v1", &production).unwrap();
+        assert_eq!(
+            load_api_session(&paths, "http://localhost:3000/api/v1")
+                .unwrap()
+                .unwrap()
+                .username,
+            "local-user"
+        );
+        assert_eq!(
+            load_api_session(&paths, "https://computearena.ai/api/v1")
+                .unwrap()
+                .unwrap()
+                .username,
+            "production-user"
+        );
+
+        remove_api_session(&paths, "http://localhost:3000/api/v1").unwrap();
+        assert!(load_api_session(&paths, "http://localhost:3000/api/v1")
+            .unwrap()
+            .is_none());
+        assert!(load_api_session(&paths, "https://computearena.ai/api/v1")
+            .unwrap()
+            .is_some());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&paths.auth).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 
     #[test]
