@@ -977,6 +977,12 @@ fn submit_reports(
             prepared.len()
         ),
     }
+    println!(
+        "{}",
+        ui.neutral(
+            "If submitted, this benchmark data will be publicly accessible on ComputeArena."
+        )
+    );
 
     if !assume_yes {
         if !io::stdin().is_terminal() {
@@ -1103,7 +1109,7 @@ fn print_submission_preview(ui: TerminalUi, reports: &[PreparedSubmission]) -> R
     println!(
         "{}",
         ui.neutral(
-            "The JSON fields below are sent to ComputeArena. Local file paths are not sent."
+            "The JSON fields below will be publicly accessible on ComputeArena. Local file paths are not sent."
         )
     );
     for (index, report) in reports.iter().enumerate() {
