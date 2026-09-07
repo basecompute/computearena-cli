@@ -2,6 +2,11 @@ use anyhow::{bail, Context, Result};
 use base_format::BaseReader;
 use base_sign::{b64_decode, b64_encode, sign_payload, signing_key_from_bytes, verify_payload};
 use clap::{Parser, Subcommand};
+use dialoguer::{
+    console::{style, Style},
+    theme::ColorfulTheme,
+    FuzzySelect,
+};
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use rand_core::{OsRng, RngCore};
 use serde_json::{json, Value};
@@ -316,7 +321,10 @@ fn execute(command: Command, paths: &Paths, harness: Option<PathBuf>, api_url: &
         } => {
             let model = match model {
                 Some(path) => path,
-                None => prompt_model_path()?,
+                None => match prompt_model_path()? {
+                    Some(path) => path,
+                    None => return Ok(()),
+                },
             };
             run_benchmark(paths, harness, &model, &pp, tg, reps, warmup, output)?;
             Ok(())
@@ -413,7 +421,9 @@ fn interactive(paths: &Paths, harness: Option<PathBuf>, api_url: &str) -> Result
             }
             "2" => {
                 ui.section("Run a benchmark");
-                let model = prompt_model_path()?;
+                let Some(model) = prompt_model_path()? else {
+                    continue;
+                };
                 if let Err(error) = run_benchmark(
                     paths,
                     harness.clone(),
@@ -1949,7 +1959,7 @@ fn prompt(message: &str) -> Result<String> {
     Ok(input.trim().to_string())
 }
 
-fn prompt_model_path() -> Result<PathBuf> {
+fn prompt_model_path() -> Result<Option<PathBuf>> {
     let ui = TerminalUi::detect();
     let started = start_activity(ui, "Scanning installed BaseRT model metadata…");
     let installed = discover_installed_models()?;
@@ -1958,36 +1968,173 @@ fn prompt_model_path() -> Result<PathBuf> {
         started,
         format!("Found {} compatible model(s)", installed.len()),
     );
-    if !installed.is_empty() {
-        println!("Installed BaseRT models:");
-        for (index, model) in installed.iter().enumerate() {
-            println!(
-                "  {} {}/{} — {} / {}",
-                ui.paint(BRAND_LIME_BOLD, format!("{}.", index + 1)),
-                model.id,
-                model.variant,
-                model.architecture,
-                model.quantization
-            );
-            println!("     {}", model.path.display());
-        }
-        println!(
-            "  {} Enter another model path",
-            ui.paint(BRAND_LIME_BOLD, "p.")
-        );
-        let input = prompt("Choose a model number or enter a path: ")?;
-        if let Ok(index) = input.parse::<usize>() {
-            if let Some(model) = index.checked_sub(1).and_then(|i| installed.get(i)) {
-                return Ok(model.path.clone());
-            }
-            bail!("model selection is out of range");
-        }
-        if input.eq_ignore_ascii_case("p") {
-            return model_path_from_input(prompt("Model path: ")?);
-        }
-        return model_path_from_input(input);
+    if installed.is_empty() {
+        return model_path_from_input(prompt("Model path: ")?).map(Some);
     }
-    model_path_from_input(prompt("Model path: ")?)
+
+    if io::stdin().is_terminal() && io::stderr().is_terminal() {
+        prompt_model_path_interactive(&installed, ui)
+    } else {
+        prompt_model_path_numbered(&installed, ui)
+    }
+}
+
+fn prompt_model_path_interactive(
+    installed: &[InstalledModel],
+    ui: TerminalUi,
+) -> Result<Option<PathBuf>> {
+    let mut choices = model_choice_labels(installed);
+    choices.push("Enter another model path…".to_string());
+    println!(
+        "{}",
+        ui.neutral("Type to filter · ↑/↓ move · Enter select · Esc back")
+    );
+    io::stdout().flush()?;
+
+    let theme = model_selector_theme();
+    let selected = FuzzySelect::with_theme(&theme)
+        .with_prompt(format!("Select a model · {} installed", installed.len()))
+        .items(&choices)
+        .max_length(10)
+        .report(false)
+        .interact_opt()
+        .context("reading model selection")?;
+
+    let Some(index) = selected else {
+        println!("{} Model selection cancelled", ui.neutral("←"));
+        return Ok(None);
+    };
+    let Some(model) = installed.get(index) else {
+        return model_path_from_input(prompt("Model path: ")?).map(Some);
+    };
+    print_selected_model(model, ui);
+    Ok(Some(model.path.clone()))
+}
+
+fn prompt_model_path_numbered(
+    installed: &[InstalledModel],
+    ui: TerminalUi,
+) -> Result<Option<PathBuf>> {
+    println!("Installed BaseRT models:");
+    for (index, label) in model_choice_labels(installed).iter().enumerate() {
+        println!(
+            "  {} {label}",
+            ui.paint(BRAND_LIME_BOLD, format!("{}.", index + 1))
+        );
+    }
+    println!(
+        "  {} Enter another model path",
+        ui.paint(BRAND_LIME_BOLD, "p.")
+    );
+    let input = prompt("Choose a model number or enter a path: ")?;
+    if matches!(input.to_ascii_lowercase().as_str(), "q" | "quit" | "back") {
+        return Ok(None);
+    }
+    if let Ok(index) = input.parse::<usize>() {
+        let model = index
+            .checked_sub(1)
+            .and_then(|i| installed.get(i))
+            .context("model selection is out of range")?;
+        print_selected_model(model, ui);
+        return Ok(Some(model.path.clone()));
+    }
+    if input.eq_ignore_ascii_case("p") {
+        return model_path_from_input(prompt("Model path: ")?).map(Some);
+    }
+    model_path_from_input(input).map(Some)
+}
+
+fn model_choice_labels(installed: &[InstalledModel]) -> Vec<String> {
+    let id_width = installed
+        .iter()
+        .map(|model| model.id.chars().count())
+        .max()
+        .unwrap_or_default()
+        .min(42);
+    let variant_width = installed
+        .iter()
+        .map(|model| model.variant.chars().count())
+        .max()
+        .unwrap_or_default()
+        .min(20);
+    let quantizations: Vec<String> = installed
+        .iter()
+        .map(|model| display_quantization(&model.quantization))
+        .collect();
+    let quant_width = quantizations
+        .iter()
+        .map(|quantization| quantization.chars().count())
+        .max()
+        .unwrap_or_default()
+        .min(12);
+
+    installed
+        .iter()
+        .zip(quantizations)
+        .map(|(model, quantization)| {
+            format!(
+                "{:<id_width$}  {:<variant_width$}  {:<quant_width$}  {}",
+                model.id, model.variant, quantization, model.architecture
+            )
+        })
+        .collect()
+}
+
+fn display_quantization(value: &str) -> String {
+    value
+        .strip_prefix("base_q")
+        .filter(|bits| !bits.is_empty() && bits.chars().all(|character| character.is_ascii_digit()))
+        .map_or_else(|| value.to_string(), |bits| format!("Q{bits}"))
+}
+
+fn print_selected_model(model: &InstalledModel, ui: TerminalUi) {
+    println!(
+        "\n{} {}/{}",
+        ui.success("Selected"),
+        model.id,
+        model.variant
+    );
+    println!("  Architecture  {}", model.architecture);
+    println!(
+        "  Quantisation  {}",
+        display_quantization(&model.quantization)
+    );
+    println!("  Path          {}", compact_home_path(&model.path));
+}
+
+fn compact_home_path(path: &Path) -> String {
+    dirs::home_dir()
+        .and_then(|home| path.strip_prefix(home).ok().map(Path::to_path_buf))
+        .map_or_else(
+            || path.display().to_string(),
+            |relative| format!("~/{}", relative.display()),
+        )
+}
+
+fn model_selector_theme() -> ColorfulTheme {
+    ColorfulTheme {
+        prompt_style: Style::new().for_stderr().true_color(195, 255, 77).bold(),
+        prompt_prefix: style("›".to_string())
+            .for_stderr()
+            .true_color(195, 255, 77)
+            .bold(),
+        success_prefix: style("✓".to_string())
+            .for_stderr()
+            .true_color(195, 255, 77)
+            .bold(),
+        values_style: Style::new().for_stderr().true_color(195, 255, 77),
+        active_item_style: Style::new().for_stderr().true_color(195, 255, 77),
+        active_item_prefix: style("›".to_string())
+            .for_stderr()
+            .true_color(195, 255, 77)
+            .bold(),
+        fuzzy_cursor_style: Style::new()
+            .for_stderr()
+            .true_color(195, 255, 77)
+            .on_true_color(0, 18, 27),
+        fuzzy_match_highlight_style: Style::new().for_stderr().true_color(124, 192, 222).bold(),
+        ..ColorfulTheme::default()
+    }
 }
 
 fn model_path_from_input(input: String) -> Result<PathBuf> {
@@ -2309,6 +2456,48 @@ mod tests {
         assert_eq!(
             fallback_model_name(Path::new("/models/custom-model.base")),
             "custom-model"
+        );
+    }
+
+    #[test]
+    fn model_selector_labels_are_compact_and_searchable() {
+        let models = vec![
+            InstalledModel {
+                path: PathBuf::from("/models/qwen/model.base"),
+                id: "Qwen/Qwen3-4B".to_string(),
+                variant: "default-q4".to_string(),
+                architecture: "qwen".to_string(),
+                quantization: "base_q4".to_string(),
+            },
+            InstalledModel {
+                path: PathBuf::from("/models/gemma/model.base"),
+                id: "basecompute/gemma-4-E2B-it".to_string(),
+                variant: "default-q8".to_string(),
+                architecture: "gemma4".to_string(),
+                quantization: "base_q8".to_string(),
+            },
+        ];
+        let labels = model_choice_labels(&models);
+        assert_eq!(labels.len(), 2);
+        assert!(labels[0].contains("Qwen/Qwen3-4B"));
+        assert!(labels[0].contains("default-q4"));
+        assert!(labels[0].contains("Q4"));
+        assert!(labels[0].contains("qwen"));
+        assert!(!labels.iter().any(|label| label.contains("/models/")));
+        assert_eq!(display_quantization("base_q8"), "Q8");
+        assert_eq!(display_quantization("custom-fp8"), "custom-fp8");
+    }
+
+    #[test]
+    fn selected_model_paths_abbreviate_the_home_directory() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(
+            compact_home_path(&home.join("models/model.base")),
+            "~/models/model.base"
+        );
+        assert_eq!(
+            compact_home_path(Path::new("/var/models/model.base")),
+            "/var/models/model.base"
         );
     }
 

@@ -15,6 +15,7 @@ anyhow.workspace = true
 base-format.workspace = true
 base-sign.workspace = true
 clap.workspace = true
+dialoguer.workspace = true
 dirs.workspace = true
 ed25519-dalek.workspace = true
 rand_core.workspace = true
