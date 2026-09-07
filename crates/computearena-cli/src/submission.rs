@@ -1,8 +1,9 @@
-use crate::config::{HTTP_CONNECT_TIMEOUT, SUBMISSION_HTTP_TIMEOUT};
+use crate::api::{client as api_client, error_message as api_error_message};
+use crate::auth::load_api_session;
+use crate::config::SUBMISSION_HTTP_TIMEOUT;
 use crate::ui::{finish_activity, prompt, prompt_yes_no, start_activity, TerminalUi};
 use crate::{
-    api_error_message, load_api_session, model_identity_for_report, report_summaries,
-    resolve_report, short_id, verify_report, Paths,
+    model_identity_for_report, report_summaries, resolve_report, short_id, verify_report, Paths,
 };
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -221,12 +222,7 @@ pub(crate) fn submit_reports(
     }
 
     let endpoint = format!("{api_url}/submissions");
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(HTTP_CONNECT_TIMEOUT)
-        .timeout(SUBMISSION_HTTP_TIMEOUT)
-        .user_agent(format!("basert-computearena/{}", env!("CARGO_PKG_VERSION")))
-        .build()
-        .context("building ComputeArena HTTP client")?;
+    let client = api_client(SUBMISSION_HTTP_TIMEOUT)?;
     let report_count = preflight.ready.len();
     let mut outcomes = Vec::with_capacity(report_count);
     let mut queue = preflight.ready.into_iter().enumerate();
