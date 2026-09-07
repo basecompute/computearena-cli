@@ -1,12 +1,18 @@
+mod config;
+mod protocol;
+mod theme;
+mod ui;
+
+use config::*;
+use protocol::*;
+use theme::model_selector_theme;
+use ui::{finish_activity, prompt, prompt_yes_no, start_activity, TerminalUi};
+
 use anyhow::{bail, Context, Result};
 use base_format::BaseReader;
 use base_sign::{b64_decode, b64_encode, sign_payload, signing_key_from_bytes, verify_payload};
 use clap::{Parser, Subcommand};
-use dialoguer::{
-    console::{style, Style},
-    theme::ColorfulTheme,
-    FuzzySelect,
-};
+use dialoguer::FuzzySelect;
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use rand_core::{OsRng, RngCore};
 use serde_json::{json, Value};
@@ -17,17 +23,6 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-const REPORT_SCHEMA: &str = "computearena-benchmark/1";
-const HARNESS_SCHEMA: &str = "basert-harness/1";
-const SIGNATURE_DOMAIN: &[u8] = b"computearena-benchmark/1\0";
-const BRAND_LIME: &str = "38;2;195;255;77";
-const BRAND_LIME_BOLD: &str = "1;38;2;195;255;77";
-const NEUTRAL_TEXT: &str = "38;2;156;163;175";
-// BaseRT supplies the branded launcher build. A future standalone repository
-// can replace this one compile-time asset without changing the CLI or report
-// implementation.
-const BASERT_BANNER_HEADER: &str = include_str!("../../../../tools/basert_banner.h");
 
 #[derive(Parser, Debug)]
 #[command(
@@ -60,16 +55,16 @@ enum Command {
         /// Path to a local `.base` model. Prompted for when omitted.
         model: Option<PathBuf>,
         /// Comma-separated prefill token counts.
-        #[arg(long, default_value = "128,256,512,1024,2048")]
+        #[arg(long, default_value = DEFAULT_PREFILL_TOKENS)]
         pp: String,
         /// Decode token count per repetition.
-        #[arg(long, default_value_t = 128)]
+        #[arg(long, default_value_t = DEFAULT_DECODE_TOKENS)]
         tg: u32,
         /// Recorded repetitions.
-        #[arg(short = 'r', long, default_value_t = 3)]
+        #[arg(short = 'r', long, default_value_t = DEFAULT_REPETITIONS)]
         reps: u32,
         /// Warmup repetitions (not recorded).
-        #[arg(short = 'w', long, default_value_t = 3)]
+        #[arg(short = 'w', long, default_value_t = DEFAULT_WARMUP_REPETITIONS)]
         warmup: u32,
         /// Write to this path instead of the local report directory.
         #[arg(short, long)]
@@ -158,131 +153,6 @@ struct SubmissionOutcome {
     label: String,
     kind: SubmissionOutcomeKind,
     detail: Option<String>,
-}
-
-#[derive(Clone, Copy)]
-struct TerminalUi {
-    color: bool,
-}
-
-impl TerminalUi {
-    fn detect() -> Self {
-        Self {
-            color: io::stdout().is_terminal()
-                && std::env::var_os("NO_COLOR").is_none()
-                && std::env::var("TERM").as_deref() != Ok("dumb"),
-        }
-    }
-
-    fn paint(self, code: &str, text: impl std::fmt::Display) -> String {
-        if self.color {
-            format!("\x1b[{code}m{text}\x1b[0m")
-        } else {
-            text.to_string()
-        }
-    }
-
-    fn section(self, title: &str) {
-        println!(
-            "\n{}",
-            self.paint(
-                "2",
-                "────────────────────────────────────────────────────────────"
-            )
-        );
-        println!("{}", self.paint(BRAND_LIME_BOLD, title));
-        println!(
-            "{}",
-            self.paint(
-                "2",
-                "────────────────────────────────────────────────────────────"
-            )
-        );
-    }
-
-    fn success(self, text: impl std::fmt::Display) -> String {
-        self.paint(BRAND_LIME_BOLD, text)
-    }
-
-    fn warning(self, text: impl std::fmt::Display) -> String {
-        self.paint("1;33", text)
-    }
-
-    fn error(self, text: impl std::fmt::Display) -> String {
-        self.paint("1;38;2;255;95;95", text)
-    }
-
-    fn neutral(self, text: impl std::fmt::Display) -> String {
-        self.paint(NEUTRAL_TEXT, text)
-    }
-
-    fn banner(self) {
-        println!();
-        for (line, color) in shared_banner_art()
-            .into_iter()
-            .zip(shared_banner_gradient())
-        {
-            println!("  {}", self.paint(color, line));
-        }
-        println!(
-            "\n  {} {} {}\n",
-            self.paint("2;38;2;195;255;77", "https://basecompute.co"),
-            self.paint("2", "·"),
-            self.paint("2;38;2;195;255;77", "https://discord.gg/tB9YFTKZUV")
-        );
-    }
-}
-
-fn shared_banner_array(marker: &str) -> Vec<&'static str> {
-    let block = BASERT_BANNER_HEADER
-        .split_once(marker)
-        .unwrap_or_else(|| panic!("missing {marker:?} in tools/basert_banner.h"))
-        .1
-        .split_once("};")
-        .unwrap_or_else(|| panic!("unterminated {marker:?} in tools/basert_banner.h"))
-        .0;
-    let mut values = Vec::new();
-    let mut rest = block;
-    while let Some((_, after_opening_quote)) = rest.split_once('"') {
-        let Some((value, after_closing_quote)) = after_opening_quote.split_once('"') else {
-            break;
-        };
-        values.push(value);
-        rest = after_closing_quote;
-    }
-    values
-}
-
-fn shared_banner_art() -> Vec<&'static str> {
-    shared_banner_array("static const char *art[8] = {")
-}
-
-fn shared_banner_gradient() -> Vec<&'static str> {
-    shared_banner_array("static const char *grad[8] = {")
-        .into_iter()
-        .map(|color| {
-            color
-                .strip_prefix("\\x1b[")
-                .and_then(|color| color.strip_suffix('m'))
-                .expect("invalid gradient entry in tools/basert_banner.h")
-        })
-        .collect()
-}
-
-fn start_activity(ui: TerminalUi, message: impl std::fmt::Display) -> Instant {
-    println!("{} {message}", ui.paint(BRAND_LIME_BOLD, "…"));
-    let _ = io::stdout().flush();
-    Instant::now()
-}
-
-fn finish_activity(ui: TerminalUi, started: Instant, message: impl std::fmt::Display) {
-    let elapsed = started.elapsed().as_secs_f64();
-    let timing = if elapsed >= 0.1 {
-        format!(" ({elapsed:.1}s)")
-    } else {
-        String::new()
-    };
-    println!("{} {message}{}", ui.success("✓"), ui.paint("2", timing));
 }
 
 impl Paths {
@@ -398,47 +268,32 @@ fn interactive(paths: &Paths, harness: Option<PathBuf>, api_url: &str) -> Result
         println!();
         println!(
             "{}",
-            ui.paint(
-                BRAND_LIME,
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            )
+            ui.brand("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         );
         println!(
             "  {}  {}",
-            ui.paint(BRAND_LIME_BOLD, "ComputeArena"),
-            ui.paint("2", "computearena.ai")
+            ui.brand_bold("ComputeArena"),
+            ui.muted("computearena.ai")
         );
         println!(
             "{}",
-            ui.paint(
-                BRAND_LIME,
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            )
+            ui.brand("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         );
         let session = load_api_session(paths, api_url)?;
         if let Some(session) = &session {
             println!(
                 "  {} Log out ({})",
-                ui.paint(BRAND_LIME_BOLD, "1."),
-                ui.paint(BRAND_LIME, format!("@{}", session.username))
+                ui.brand_bold("1."),
+                ui.brand(format!("@{}", session.username))
             );
         } else {
-            println!("  {} Log in", ui.paint(BRAND_LIME_BOLD, "1."));
+            println!("  {} Log in", ui.brand_bold("1."));
         }
-        println!("  {} Run benchmarks", ui.paint(BRAND_LIME_BOLD, "2."));
-        println!(
-            "  {} Submit previous benchmarks",
-            ui.paint(BRAND_LIME_BOLD, "3.")
-        );
-        println!(
-            "  {} List local benchmarks",
-            ui.paint(BRAND_LIME_BOLD, "4.")
-        );
-        println!(
-            "  {} Verify a local benchmark",
-            ui.paint(BRAND_LIME_BOLD, "5.")
-        );
-        println!("  {} Exit", ui.paint(BRAND_LIME_BOLD, "6."));
+        println!("  {} Run benchmarks", ui.brand_bold("2."));
+        println!("  {} Submit previous benchmarks", ui.brand_bold("3."));
+        println!("  {} List local benchmarks", ui.brand_bold("4."));
+        println!("  {} Verify a local benchmark", ui.brand_bold("5."));
+        println!("  {} Exit", ui.brand_bold("6."));
         let choice = prompt("Choose an option: ")?;
         match choice.trim() {
             "1" => {
@@ -463,10 +318,10 @@ fn interactive(paths: &Paths, harness: Option<PathBuf>, api_url: &str) -> Result
                     paths,
                     harness.clone(),
                     &model,
-                    "128,256,512,1024,2048",
-                    128,
-                    3,
-                    3,
+                    DEFAULT_PREFILL_TOKENS,
+                    DEFAULT_DECODE_TOKENS,
+                    DEFAULT_REPETITIONS,
+                    DEFAULT_WARMUP_REPETITIONS,
                     None,
                 ) {
                     eprintln!("{} {error:#}", ui.error("Benchmark failed:"));
@@ -546,7 +401,7 @@ fn prompt_report_choice(paths: &Paths, ui: TerminalUi) -> Result<Option<PathBuf>
         };
         println!(
             "  {} {}  [{}]",
-            ui.paint(BRAND_LIME_BOLD, format!("{}.", index + 1)),
+            ui.brand_bold(format!("{}.", index + 1)),
             report["model"].as_str().unwrap_or("Unknown model"),
             status
         );
@@ -556,7 +411,7 @@ fn prompt_report_choice(paths: &Paths, ui: TerminalUi) -> Result<Option<PathBuf>
             report["short_id"].as_str().unwrap_or("unknown")
         );
     }
-    println!("\n  {} Back", ui.paint(BRAND_LIME_BOLD, "0."));
+    println!("\n  {} Back", ui.brand_bold("0."));
 
     loop {
         let input = prompt("Choose a benchmark: ")?;
@@ -593,7 +448,7 @@ fn prompt_report_choice(paths: &Paths, ui: TerminalUi) -> Result<Option<PathBuf>
 fn resolve_api_url(override_url: Option<String>) -> Result<String> {
     let value = override_url
         .or_else(|| std::env::var("BASERT_COMPUTEARENA_API_URL").ok())
-        .unwrap_or_else(|| "https://computearena.ai/api/v1".to_string());
+        .unwrap_or_else(|| DEFAULT_API_URL.to_string());
     let value = value.trim().trim_end_matches('/');
     if value.is_empty() {
         bail!("ComputeArena API URL cannot be empty");
@@ -630,8 +485,8 @@ fn login(paths: &Paths, api_url: &str) -> Result<()> {
     }
 
     let client = reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(15))
+        .connect_timeout(HTTP_CONNECT_TIMEOUT)
+        .timeout(AUTH_HTTP_TIMEOUT)
         .user_agent(format!("basert-computearena/{}", env!("CARGO_PKG_VERSION")))
         .build()
         .context("building ComputeArena HTTP client")?;
@@ -657,15 +512,15 @@ fn login(paths: &Paths, api_url: &str) -> Result<()> {
     let interval = device
         .get("interval")
         .and_then(Value::as_u64)
-        .unwrap_or(3)
-        .max(1);
+        .unwrap_or(DEFAULT_DEVICE_AUTH_POLL_INTERVAL_SECS)
+        .max(MIN_DEVICE_AUTH_POLL_INTERVAL_SECS);
     let expires_in = device
         .get("expiresIn")
         .and_then(Value::as_u64)
-        .unwrap_or(600);
+        .unwrap_or(DEFAULT_DEVICE_AUTH_EXPIRES_SECS);
     finish_activity(ui, started, "Login code ready");
-    println!("\n  Open: {}", ui.paint(BRAND_LIME, &verification_url));
-    println!("  Confirm code: {}", ui.paint(BRAND_LIME_BOLD, &user_code));
+    println!("\n  Open: {}", ui.brand(&verification_url));
+    println!("  Confirm code: {}", ui.brand_bold(&user_code));
     if open_browser(&verification_url) {
         println!("\nYour browser was opened. Approve the device there.");
     } else {
@@ -716,8 +571,8 @@ fn login(paths: &Paths, api_url: &str) -> Result<()> {
 
 fn validate_api_session(api_url: &str, session: &ApiSession) -> Result<Option<String>> {
     let client = reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(15))
+        .connect_timeout(HTTP_CONNECT_TIMEOUT)
+        .timeout(AUTH_HTTP_TIMEOUT)
         .user_agent(format!("basert-computearena/{}", env!("CARGO_PKG_VERSION")))
         .build()
         .context("building ComputeArena HTTP client")?;
@@ -734,7 +589,7 @@ fn validate_api_session(api_url: &str, session: &ApiSession) -> Result<Option<St
             serde_json::from_str(&body).context("parsing login validation response")?;
         return Ok(Some(required_json_string(&value, "username")?));
     }
-    if status.as_u16() == 401 {
+    if status == reqwest::StatusCode::UNAUTHORIZED {
         return Ok(None);
     }
     bail!(
@@ -751,8 +606,8 @@ fn logout(paths: &Paths, api_url: &str) -> Result<()> {
         return Ok(());
     };
     let client = reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(15))
+        .connect_timeout(HTTP_CONNECT_TIMEOUT)
+        .timeout(AUTH_HTTP_TIMEOUT)
         .user_agent(format!("basert-computearena/{}", env!("CARGO_PKG_VERSION")))
         .build()
         .context("building ComputeArena HTTP client")?;
@@ -926,7 +781,7 @@ fn select_reports_for_submission(
         };
         println!(
             "  {} {}  [{}]",
-            ui.paint(BRAND_LIME_BOLD, format!("{}.", index + 1)),
+            ui.brand_bold(format!("{}.", index + 1)),
             report["model"].as_str().unwrap_or("Unknown model"),
             status
         );
@@ -1065,8 +920,8 @@ fn submit_reports(
 
     let endpoint = format!("{api_url}/submissions");
     let client = reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(60))
+        .connect_timeout(HTTP_CONNECT_TIMEOUT)
+        .timeout(SUBMISSION_HTTP_TIMEOUT)
         .user_agent(format!("basert-computearena/{}", env!("CARGO_PKG_VERSION")))
         .build()
         .context("building ComputeArena HTTP client")?;
@@ -1103,7 +958,7 @@ fn submit_reports(
                 let status = response.status();
                 let body = response.text().unwrap_or_default();
                 if status.is_success() {
-                    let duplicate = status.as_u16() == 200;
+                    let duplicate = status == reqwest::StatusCode::OK;
                     let submission_id =
                         serde_json::from_str::<Value>(&body).ok().and_then(|value| {
                             value.get("id").and_then(Value::as_str).map(str::to_owned)
@@ -1242,7 +1097,7 @@ fn preflight_submissions(reports: &[PathBuf]) -> SubmissionPreflight {
 
 fn print_submission_preflight(ui: TerminalUi, preflight: &SubmissionPreflight) {
     println!();
-    println!("{}", ui.paint(BRAND_LIME_BOLD, "Submission check complete"));
+    println!("{}", ui.brand_bold("Submission check complete"));
     println!(
         "  {:<22} {}",
         "Ready to submit",
@@ -1264,7 +1119,7 @@ fn print_submission_preflight(ui: TerminalUi, preflight: &SubmissionPreflight) {
         for invalid in &preflight.invalid {
             println!("  {} {}", ui.error("✗"), invalid.label);
             println!("    {}", ui.neutral(&invalid.reason));
-            println!("    {}", ui.paint("2", invalid.path.display()));
+            println!("    {}", ui.muted(invalid.path.display()));
         }
     }
 }
@@ -1339,8 +1194,8 @@ fn print_submission_preview(ui: TerminalUi, reports: &[PreparedSubmission]) -> R
         );
         println!(
             "{} {}",
-            ui.paint("2", "Local source (not submitted):"),
-            ui.paint("2", report.path.display())
+            ui.muted("Local source (not submitted):"),
+            ui.muted(report.path.display())
         );
         println!(
             "{}",
@@ -1352,22 +1207,6 @@ fn print_submission_preview(ui: TerminalUi, reports: &[PreparedSubmission]) -> R
         ui.neutral("──────────────────────── END PREVIEW ────────────────────────")
     );
     Ok(())
-}
-
-fn prompt_yes_no(message: &str, default: bool) -> Result<bool> {
-    let hint = if default { "[Y/n]" } else { "[y/N]" };
-    loop {
-        let answer = prompt(&format!("{message} {hint}: "))?;
-        match answer.trim().to_ascii_lowercase().as_str() {
-            "" => return Ok(default),
-            "y" | "yes" => return Ok(true),
-            "n" | "no" => return Ok(false),
-            _ => println!(
-                "{} Enter `y` for yes or `n` for no.",
-                TerminalUi::detect().warning("!")
-            ),
-        }
-    }
 }
 
 fn api_error_message(body: &str) -> Option<String> {
@@ -1449,7 +1288,7 @@ fn run_benchmark(
         "run_id": run_id,
         "created_at_unix_ms": unix_ms(),
         "runtime": {
-            "name": "basert",
+            "name": RUNTIME_NAME,
             "computearena_version": env!("CARGO_PKG_VERSION")
         },
         "installation": {
@@ -1587,7 +1426,7 @@ fn resolve_harness(override_path: Option<PathBuf>) -> Result<PathBuf> {
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
-            let sibling = parent.join("basert-harness");
+            let sibling = parent.join(PRIMARY_HARNESS_NAME);
             if sibling.is_file() {
                 return Ok(sibling);
             }
@@ -1597,7 +1436,7 @@ fn resolve_harness(override_path: Option<PathBuf>) -> Result<PathBuf> {
         // the repository's build/. Walk ancestors so invocation does not
         // depend on the caller's current directory.
         for ancestor in exe.ancestors() {
-            for name in ["basert-harness", "baseRT_bench_multidevice"] {
+            for name in [PRIMARY_HARNESS_NAME, LEGACY_HARNESS_NAME] {
                 let candidate = ancestor.join("build").join(name);
                 if candidate.is_file() {
                     return Ok(candidate);
@@ -1605,19 +1444,19 @@ fn resolve_harness(override_path: Option<PathBuf>) -> Result<PathBuf> {
             }
         }
     }
-    for development in ["build/basert-harness", "build/baseRT_bench_multidevice"] {
+    for development in DEVELOPMENT_HARNESS_PATHS {
         let path = PathBuf::from(development);
         if path.is_file() {
             return Ok(path);
         }
     }
-    if let Some(path) = executable_on_path("basert-harness") {
+    if let Some(path) = executable_on_path(PRIMARY_HARNESS_NAME) {
         return Ok(path);
     }
     bail!(
         "benchmark harness was not found; from the BaseRT repository root, run:\n  \
          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release\n  \
-         cmake --build build --target baseRT_bench_multidevice"
+         cmake --build build --target {LEGACY_HARNESS_NAME}"
     )
 }
 
@@ -1671,7 +1510,7 @@ fn load_installation_key(path: &Path) -> Result<SigningKey> {
 #[cfg(unix)]
 fn set_private_permissions(file: &fs::File) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    file.set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
     Ok(())
 }
 
@@ -1692,8 +1531,8 @@ fn sign_report(report: &mut Value, key: &SigningKey) -> Result<()> {
         .insert(
             "signature".to_string(),
             json!({
-                "algorithm": "ed25519",
-                "canonicalization": "computearena-json-v1",
+                "algorithm": SIGNATURE_ALGORITHM,
+                "canonicalization": SIGNATURE_CANONICALIZATION,
                 "value": b64_encode(&signature.to_bytes())
             }),
         );
@@ -1705,13 +1544,13 @@ fn verify_report(report: &Value) -> Result<String> {
         bail!("unsupported or missing report schema (expected {REPORT_SCHEMA})");
     }
     let signature_value = report.get("signature").context("report is unsigned")?;
-    if signature_value.get("algorithm").and_then(Value::as_str) != Some("ed25519") {
+    if signature_value.get("algorithm").and_then(Value::as_str) != Some(SIGNATURE_ALGORITHM) {
         bail!("unsupported signature algorithm");
     }
     if signature_value
         .get("canonicalization")
         .and_then(Value::as_str)
-        != Some("computearena-json-v1")
+        != Some(SIGNATURE_CANONICALIZATION)
     {
         bail!("unsupported signature canonicalization");
     }
@@ -1844,10 +1683,7 @@ fn list_reports(paths: &Paths, as_json: bool) -> Result<()> {
     }
     println!(
         "{}",
-        ui.paint(
-            BRAND_LIME_BOLD,
-            format!("Local benchmarks ({})", reports.len())
-        )
+        ui.brand_bold(format!("Local benchmarks ({})", reports.len()))
     );
     for (index, report) in reports.iter().enumerate() {
         let status = report["status"].as_str().unwrap_or("invalid");
@@ -1858,7 +1694,7 @@ fn list_reports(paths: &Paths, as_json: bool) -> Result<()> {
         };
         println!(
             "\n  {} {}  [{}]",
-            ui.paint(BRAND_LIME_BOLD, format!("{}.", index + 1)),
+            ui.brand_bold(format!("{}.", index + 1)),
             report["model"].as_str().unwrap_or("Unknown model"),
             status_label
         );
@@ -2159,15 +1995,6 @@ fn read_report(path: &Path) -> Result<Value> {
     serde_json::from_slice(&bytes).with_context(|| format!("parsing report {}", path.display()))
 }
 
-fn prompt(message: &str) -> Result<String> {
-    let ui = TerminalUi::detect();
-    print!("\n{} {message}", ui.paint(BRAND_LIME_BOLD, "›"));
-    io::stdout().flush()?;
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    Ok(input.trim().to_string())
-}
-
 fn prompt_model_path() -> Result<Option<PathBuf>> {
     let ui = TerminalUi::detect();
     let started = start_activity(ui, "Scanning installed BaseRT model metadata…");
@@ -2204,7 +2031,7 @@ fn prompt_model_path_interactive(
     let selected = FuzzySelect::with_theme(&theme)
         .with_prompt(format!("Select a model · {} installed", installed.len()))
         .items(&choices)
-        .max_length(10)
+        .max_length(MODEL_SELECTOR_VISIBLE_ROWS)
         .report(false)
         .interact_opt()
         .context("reading model selection")?;
@@ -2226,15 +2053,9 @@ fn prompt_model_path_numbered(
 ) -> Result<Option<PathBuf>> {
     println!("Installed BaseRT models:");
     for (index, label) in model_choice_labels(installed).iter().enumerate() {
-        println!(
-            "  {} {label}",
-            ui.paint(BRAND_LIME_BOLD, format!("{}.", index + 1))
-        );
+        println!("  {} {label}", ui.brand_bold(format!("{}.", index + 1)));
     }
-    println!(
-        "  {} Enter another model path",
-        ui.paint(BRAND_LIME_BOLD, "p.")
-    );
+    println!("  {} Enter another model path", ui.brand_bold("p."));
     let input = prompt("Choose a model number or enter a path: ")?;
     if matches!(input.to_ascii_lowercase().as_str(), "q" | "quit" | "back") {
         return Ok(None);
@@ -2259,13 +2080,13 @@ fn model_choice_labels(installed: &[InstalledModel]) -> Vec<String> {
         .map(|model| model.id.chars().count())
         .max()
         .unwrap_or_default()
-        .min(42);
+        .min(MODEL_ID_COLUMN_WIDTH);
     let variant_width = installed
         .iter()
         .map(|model| model.variant.chars().count())
         .max()
         .unwrap_or_default()
-        .min(20);
+        .min(MODEL_VARIANT_COLUMN_WIDTH);
     let quantizations: Vec<String> = installed
         .iter()
         .map(|model| display_quantization(&model.quantization))
@@ -2275,7 +2096,7 @@ fn model_choice_labels(installed: &[InstalledModel]) -> Vec<String> {
         .map(|quantization| quantization.chars().count())
         .max()
         .unwrap_or_default()
-        .min(12);
+        .min(MODEL_QUANT_COLUMN_WIDTH);
 
     installed
         .iter()
@@ -2318,32 +2139,6 @@ fn compact_home_path(path: &Path) -> String {
             || path.display().to_string(),
             |relative| format!("~/{}", relative.display()),
         )
-}
-
-fn model_selector_theme() -> ColorfulTheme {
-    ColorfulTheme {
-        prompt_style: Style::new().for_stderr().true_color(195, 255, 77).bold(),
-        prompt_prefix: style("›".to_string())
-            .for_stderr()
-            .true_color(195, 255, 77)
-            .bold(),
-        success_prefix: style("✓".to_string())
-            .for_stderr()
-            .true_color(195, 255, 77)
-            .bold(),
-        values_style: Style::new().for_stderr().true_color(195, 255, 77),
-        active_item_style: Style::new().for_stderr().true_color(195, 255, 77),
-        active_item_prefix: style("›".to_string())
-            .for_stderr()
-            .true_color(195, 255, 77)
-            .bold(),
-        fuzzy_cursor_style: Style::new()
-            .for_stderr()
-            .true_color(195, 255, 77)
-            .on_true_color(0, 18, 27),
-        fuzzy_match_highlight_style: Style::new().for_stderr().true_color(124, 192, 222).bold(),
-        ..ColorfulTheme::default()
-    }
 }
 
 fn model_path_from_input(input: String) -> Result<PathBuf> {
@@ -2473,7 +2268,7 @@ mod tests {
             "schema": REPORT_SCHEMA,
             "run_id": "test-run",
             "created_at_unix_ms": 1,
-            "runtime": {"name": "basert"},
+            "runtime": {"name": RUNTIME_NAME},
             "installation": {},
             "model": {"file_name": "test.base", "size_bytes": 1},
             "benchmark": {
@@ -2783,14 +2578,5 @@ mod tests {
             compact_home_path(Path::new("/var/models/model.base")),
             "/var/models/model.base"
         );
-    }
-
-    #[test]
-    fn shared_basert_banner_header_is_parseable() {
-        let art = shared_banner_art();
-        let gradient = shared_banner_gradient();
-        assert_eq!(art.len(), 8);
-        assert_eq!(gradient.len(), art.len());
-        assert_eq!(gradient.last().copied(), Some(BRAND_LIME));
     }
 }
