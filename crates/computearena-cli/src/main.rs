@@ -1,6 +1,8 @@
 mod api;
 mod auth;
+mod benchmark;
 mod config;
+mod models;
 mod protocol;
 mod reports;
 mod submission;
@@ -10,35 +12,47 @@ mod ui;
 use auth::{load_api_session, login, logout, resolve_api_url};
 #[cfg(test)]
 use auth::{remove_api_session, save_api_session, ApiSession};
+use benchmark::run_benchmark;
+#[cfg(test)]
+use benchmark::{validate_harness_result, validate_pp};
 use config::*;
-use protocol::*;
-use reports::{
-    atomic_write_json, hex, list_reports, load_or_create_installation_key,
-    model_identity_for_report, read_report, report_summaries, resolve_report, sha256_hex, short_id,
-    sign_report, verify_report, Paths,
+use models::prompt_model_path;
+#[cfg(test)]
+use models::{
+    compact_home_path, display_quantization, fallback_model_name, model_choice_labels,
+    InstalledModel,
 };
 #[cfg(test)]
-use reports::{format_unix_ms, throughput_for_report, write_canonical_json};
+use protocol::*;
+#[cfg(test)]
+use reports::{
+    format_unix_ms, sha256_hex, sign_report, throughput_for_report, write_canonical_json,
+};
+use reports::{
+    list_reports, model_identity_for_report, read_report, report_summaries, resolve_report,
+    short_id, verify_report, Paths,
+};
 #[cfg(test)]
 use submission::{parse_report_selection, preflight_submissions, should_stop_submission};
 use submission::{select_reports_for_submission, submit_reports};
-use theme::model_selector_theme;
 use ui::{finish_activity, prompt, start_activity, TerminalUi};
 
 use anyhow::{bail, Context, Result};
-use base_format::BaseReader;
+#[cfg(test)]
 use base_sign::b64_encode;
 use clap::{Parser, Subcommand};
-use dialoguer::FuzzySelect;
 #[cfg(test)]
 use ed25519_dalek::SigningKey;
-use rand_core::{OsRng, RngCore};
-use serde_json::{json, Value};
+#[cfg(test)]
+use rand_core::OsRng;
+#[cfg(test)]
+use serde_json::json;
+use serde_json::Value;
+#[cfg(test)]
 use std::fs;
-use std::io::{self, IsTerminal, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -110,15 +124,6 @@ enum Command {
         #[arg(long, requires = "yes")]
         skip_invalid: bool,
     },
-}
-
-#[derive(Clone, Debug)]
-struct InstalledModel {
-    path: PathBuf,
-    id: String,
-    variant: String,
-    architecture: String,
-    quantization: String,
 }
 
 fn main() {
@@ -379,510 +384,6 @@ fn prompt_report_choice(paths: &Paths, ui: TerminalUi) -> Result<Option<PathBuf>
             ),
         }
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_benchmark(
-    paths: &Paths,
-    harness_override: Option<PathBuf>,
-    model: &Path,
-    pp: &str,
-    tg: u32,
-    reps: u32,
-    warmup: u32,
-    output: Option<PathBuf>,
-) -> Result<PathBuf> {
-    if !model.is_file() {
-        bail!("model does not exist or is not a file: {}", model.display());
-    }
-    validate_pp(pp)?;
-    if tg == 0 || reps == 0 {
-        bail!("--tg and --reps must be greater than zero");
-    }
-
-    paths.prepare()?;
-    let harness = resolve_harness(harness_override)?;
-    let ui = TerminalUi::detect();
-    let benchmark_started = start_activity(
-        ui,
-        format!(
-            "Running the BaseRT prefill/decode benchmark with {}…",
-            harness.display()
-        ),
-    );
-    let result = ProcessCommand::new(&harness)
-        .arg(model)
-        .args(["--mode", "text", "-p", pp, "-n"])
-        .arg(tg.to_string())
-        .args(["-r"])
-        .arg(reps.to_string())
-        .args(["-w"])
-        .arg(warmup.to_string())
-        .stderr(Stdio::inherit())
-        .output()
-        .with_context(|| format!("launching benchmark harness {}", harness.display()))?;
-    if !result.status.success() {
-        bail!("benchmark harness exited with {}", result.status);
-    }
-    let benchmark: Value = serde_json::from_slice(&result.stdout)
-        .context("benchmark harness did not return one valid JSON object")?;
-    validate_harness_result(&benchmark)?;
-    finish_activity(ui, benchmark_started, "Benchmark measurements complete");
-
-    let finalizing_started = start_activity(ui, "Reading model metadata and signing the report…");
-    let key = load_or_create_installation_key(paths)?;
-    let public = key.verifying_key();
-    let public_bytes = public.to_bytes();
-    let key_id = sha256_hex(&public_bytes);
-    let run_id = random_id();
-    let model_metadata = inspect_model(model)?;
-
-    // Intentionally omit the user's account and local model path: a benchmark
-    // can be created offline and attached to an authenticated account later.
-    let mut report = json!({
-        "schema": REPORT_SCHEMA,
-        "run_id": run_id,
-        "created_at_unix_ms": unix_ms(),
-        "runtime": {
-            "name": RUNTIME_NAME,
-            "computearena_version": env!("CARGO_PKG_VERSION")
-        },
-        "installation": {
-            "key_id": key_id,
-            "public_key": b64_encode(&public_bytes)
-        },
-        "model": model_metadata,
-        "benchmark": benchmark
-    });
-    sign_report(&mut report, &key)?;
-
-    let path = output.unwrap_or_else(|| paths.reports.join(format!("{run_id}.json")));
-    atomic_write_json(&path, &report)?;
-    let digest = sha256_hex(&fs::read(&path)?);
-    finish_activity(ui, finalizing_started, "Report finalized and signed");
-    println!("Saved signed benchmark: {}", path.display());
-    println!("Run ID: {run_id}");
-    println!("Report SHA-256: {digest}");
-    Ok(path)
-}
-
-fn inspect_model(path: &Path) -> Result<Value> {
-    let file = fs::metadata(path)
-        .with_context(|| format!("reading model metadata for {}", path.display()))?;
-    let header = BaseReader::read_header(path)
-        .with_context(|| format!("reading BaseRT model header from {}", path.display()))?;
-    let fallback_name = fallback_model_name(path);
-    let mut model = json!({
-        "name": fallback_name,
-        "file_name": path.file_name().and_then(|name| name.to_str()).unwrap_or("unknown"),
-        "size_bytes": file.len(),
-        "format_schema": header.schema,
-        "architecture": header.arch,
-        "quantization": header.quant_scheme,
-        "quant_profile": header.quant_profile,
-        "target_backend": header.target_backend,
-        "source_sha256": header.source.sha256
-    });
-    if let Some((id, variant)) = model_identity_from_path(path)? {
-        model["name"] = json!(id);
-        model["id"] = json!(id);
-        model["variant"] = json!(variant);
-    }
-    Ok(model)
-}
-
-fn fallback_model_name(path: &Path) -> String {
-    let file_name = path.file_name().and_then(|name| name.to_str());
-    if file_name == Some("model.base") {
-        return path
-            .parent()
-            .and_then(Path::parent)
-            .and_then(Path::file_name)
-            .or_else(|| path.parent().and_then(Path::file_name))
-            .and_then(|name| name.to_str())
-            .unwrap_or("Unknown model")
-            .to_string();
-    }
-    path.file_stem()
-        .and_then(|name| name.to_str())
-        .unwrap_or("Unknown model")
-        .to_string()
-}
-
-fn validate_pp(pp: &str) -> Result<()> {
-    let values: Result<Vec<u32>, _> = pp.split(',').map(str::parse::<u32>).collect();
-    let values = values.context("--pp must be a comma-separated list of positive integers")?;
-    if values.is_empty() || values.contains(&0) {
-        bail!("--pp values must be greater than zero");
-    }
-    Ok(())
-}
-
-fn validate_harness_result(value: &Value) -> Result<()> {
-    if let Some(reason) = value.get("skip").and_then(Value::as_str) {
-        bail!("benchmark skipped: {reason}");
-    }
-    if value.get("schema").and_then(Value::as_str) != Some(HARNESS_SCHEMA) {
-        bail!("unsupported or missing harness schema (expected {HARNESS_SCHEMA})");
-    }
-    if value.get("mode").and_then(Value::as_str) != Some("text") {
-        bail!("harness returned a non-text benchmark");
-    }
-    let raw = value
-        .get("raw_samples")
-        .context("harness result is missing raw_samples")?;
-    let prefill = raw
-        .get("prefill")
-        .and_then(Value::as_object)
-        .context("harness result is missing prefill samples")?;
-    if prefill.is_empty() {
-        bail!("harness returned no prefill sample groups");
-    }
-    for samples in prefill.values() {
-        validate_duration_samples(samples, "tokens")?;
-    }
-    validate_duration_samples(
-        raw.get("decode")
-            .context("harness result is missing decode samples")?,
-        "generated_tokens",
-    )?;
-    Ok(())
-}
-
-fn validate_duration_samples(value: &Value, token_key: &str) -> Result<()> {
-    let samples = value.as_array().context("raw samples must be an array")?;
-    if samples.is_empty() {
-        bail!("raw sample array is empty");
-    }
-    for sample in samples {
-        if sample.get(token_key).and_then(Value::as_u64).unwrap_or(0) == 0 {
-            bail!("raw sample has an invalid {token_key}");
-        }
-        if sample
-            .get("elapsed_ns")
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-            == 0
-        {
-            bail!("raw sample has an invalid elapsed_ns");
-        }
-    }
-    Ok(())
-}
-
-fn resolve_harness(override_path: Option<PathBuf>) -> Result<PathBuf> {
-    if let Some(path) = override_path {
-        return executable_path(path);
-    }
-    if let Some(path) = std::env::var_os("BASERT_COMPUTEARENA_HARNESS") {
-        if path.is_empty() {
-            bail!("BASERT_COMPUTEARENA_HARNESS is set but empty");
-        }
-        return executable_path(PathBuf::from(path));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let sibling = parent.join(PRIMARY_HARNESS_NAME);
-            if sibling.is_file() {
-                return Ok(sibling);
-            }
-        }
-        // Source-tree builds place the Rust binary under
-        // tools/base-convert/target/{debug,release} and the C++ harness under
-        // the repository's build/. Walk ancestors so invocation does not
-        // depend on the caller's current directory.
-        for ancestor in exe.ancestors() {
-            for name in [PRIMARY_HARNESS_NAME, LEGACY_HARNESS_NAME] {
-                let candidate = ancestor.join("build").join(name);
-                if candidate.is_file() {
-                    return Ok(candidate);
-                }
-            }
-        }
-    }
-    for development in DEVELOPMENT_HARNESS_PATHS {
-        let path = PathBuf::from(development);
-        if path.is_file() {
-            return Ok(path);
-        }
-    }
-    if let Some(path) = executable_on_path(PRIMARY_HARNESS_NAME) {
-        return Ok(path);
-    }
-    bail!(
-        "benchmark harness was not found; from the BaseRT repository root, run:\n  \
-         cmake -S . -B build -DCMAKE_BUILD_TYPE=Release\n  \
-         cmake --build build --target {LEGACY_HARNESS_NAME}"
-    )
-}
-
-fn executable_on_path(name: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|path| {
-        std::env::split_paths(&path)
-            .map(|directory| directory.join(name))
-            .find(|candidate| candidate.is_file())
-    })
-}
-
-fn executable_path(path: PathBuf) -> Result<PathBuf> {
-    if path.components().count() == 1 {
-        return Ok(path);
-    }
-    if !path.is_file() {
-        bail!("benchmark harness not found: {}", path.display());
-    }
-    Ok(path)
-}
-
-fn prompt_model_path() -> Result<Option<PathBuf>> {
-    let ui = TerminalUi::detect();
-    let started = start_activity(ui, "Scanning installed BaseRT model metadata…");
-    let installed = discover_installed_models()?;
-    finish_activity(
-        ui,
-        started,
-        format!("Found {} compatible model(s)", installed.len()),
-    );
-    if installed.is_empty() {
-        return model_path_from_input(prompt("Model path: ")?).map(Some);
-    }
-
-    if io::stdin().is_terminal() && io::stderr().is_terminal() {
-        prompt_model_path_interactive(&installed, ui)
-    } else {
-        prompt_model_path_numbered(&installed, ui)
-    }
-}
-
-fn prompt_model_path_interactive(
-    installed: &[InstalledModel],
-    ui: TerminalUi,
-) -> Result<Option<PathBuf>> {
-    let mut choices = model_choice_labels(installed);
-    choices.push("Enter another model path…".to_string());
-    println!(
-        "{}",
-        ui.neutral("Type to filter · ↑/↓ move · Enter select · Esc back")
-    );
-    io::stdout().flush()?;
-
-    let theme = model_selector_theme();
-    let selected = FuzzySelect::with_theme(&theme)
-        .with_prompt(format!("Select a model · {} installed", installed.len()))
-        .items(&choices)
-        .max_length(MODEL_SELECTOR_VISIBLE_ROWS)
-        .report(false)
-        .interact_opt()
-        .context("reading model selection")?;
-
-    let Some(index) = selected else {
-        println!("{} Model selection cancelled", ui.neutral("←"));
-        return Ok(None);
-    };
-    let Some(model) = installed.get(index) else {
-        return model_path_from_input(prompt("Model path: ")?).map(Some);
-    };
-    print_selected_model(model, ui);
-    Ok(Some(model.path.clone()))
-}
-
-fn prompt_model_path_numbered(
-    installed: &[InstalledModel],
-    ui: TerminalUi,
-) -> Result<Option<PathBuf>> {
-    println!("Installed BaseRT models:");
-    for (index, label) in model_choice_labels(installed).iter().enumerate() {
-        println!("  {} {label}", ui.brand_bold(format!("{}.", index + 1)));
-    }
-    println!("  {} Enter another model path", ui.brand_bold("p."));
-    let input = prompt("Choose a model number or enter a path: ")?;
-    if matches!(input.to_ascii_lowercase().as_str(), "q" | "quit" | "back") {
-        return Ok(None);
-    }
-    if let Ok(index) = input.parse::<usize>() {
-        let model = index
-            .checked_sub(1)
-            .and_then(|i| installed.get(i))
-            .context("model selection is out of range")?;
-        print_selected_model(model, ui);
-        return Ok(Some(model.path.clone()));
-    }
-    if input.eq_ignore_ascii_case("p") {
-        return model_path_from_input(prompt("Model path: ")?).map(Some);
-    }
-    model_path_from_input(input).map(Some)
-}
-
-fn model_choice_labels(installed: &[InstalledModel]) -> Vec<String> {
-    let id_width = installed
-        .iter()
-        .map(|model| model.id.chars().count())
-        .max()
-        .unwrap_or_default()
-        .min(MODEL_ID_COLUMN_WIDTH);
-    let variant_width = installed
-        .iter()
-        .map(|model| model.variant.chars().count())
-        .max()
-        .unwrap_or_default()
-        .min(MODEL_VARIANT_COLUMN_WIDTH);
-    let quantizations: Vec<String> = installed
-        .iter()
-        .map(|model| display_quantization(&model.quantization))
-        .collect();
-    let quant_width = quantizations
-        .iter()
-        .map(|quantization| quantization.chars().count())
-        .max()
-        .unwrap_or_default()
-        .min(MODEL_QUANT_COLUMN_WIDTH);
-
-    installed
-        .iter()
-        .zip(quantizations)
-        .map(|(model, quantization)| {
-            format!(
-                "{:<id_width$}  {:<variant_width$}  {:<quant_width$}  {}",
-                model.id, model.variant, quantization, model.architecture
-            )
-        })
-        .collect()
-}
-
-fn display_quantization(value: &str) -> String {
-    value
-        .strip_prefix("base_q")
-        .filter(|bits| !bits.is_empty() && bits.chars().all(|character| character.is_ascii_digit()))
-        .map_or_else(|| value.to_string(), |bits| format!("Q{bits}"))
-}
-
-fn print_selected_model(model: &InstalledModel, ui: TerminalUi) {
-    println!(
-        "\n{} {}/{}",
-        ui.success("Selected"),
-        model.id,
-        model.variant
-    );
-    println!("  Architecture  {}", model.architecture);
-    println!(
-        "  Quantisation  {}",
-        display_quantization(&model.quantization)
-    );
-    println!("  Path          {}", compact_home_path(&model.path));
-}
-
-fn compact_home_path(path: &Path) -> String {
-    dirs::home_dir()
-        .and_then(|home| path.strip_prefix(home).ok().map(Path::to_path_buf))
-        .map_or_else(
-            || path.display().to_string(),
-            |relative| format!("~/{}", relative.display()),
-        )
-}
-
-fn model_path_from_input(input: String) -> Result<PathBuf> {
-    if input.is_empty() {
-        bail!("a model path is required");
-    }
-    Ok(PathBuf::from(input))
-}
-
-fn model_cache_root() -> Result<PathBuf> {
-    let root = match std::env::var_os("BASERT_MODELS_DIR") {
-        Some(path) if !path.is_empty() => PathBuf::from(path),
-        Some(_) => bail!("BASERT_MODELS_DIR is set but empty"),
-        None => dirs::cache_dir()
-            .context("could not determine the BaseRT model cache")?
-            .join("baseRT")
-            .join("models"),
-    };
-    Ok(root)
-}
-
-fn model_identity_from_path(path: &Path) -> Result<Option<(String, String)>> {
-    let root = model_cache_root()?;
-    let Some(parent) = path.parent() else {
-        return Ok(None);
-    };
-    let Ok(relative) = parent.strip_prefix(root) else {
-        return Ok(None);
-    };
-    let mut components: Vec<String> = relative
-        .components()
-        .filter_map(|component| component.as_os_str().to_str().map(str::to_string))
-        .collect();
-    if components.len() < 2 {
-        return Ok(None);
-    }
-    let variant = components.pop().unwrap_or_default();
-    Ok(Some((components.join("/"), variant)))
-}
-
-fn discover_installed_models() -> Result<Vec<InstalledModel>> {
-    let root = model_cache_root()?;
-    if !root.is_dir() {
-        return Ok(Vec::new());
-    }
-
-    let mut directories = vec![root.clone()];
-    let mut models = Vec::new();
-    while let Some(directory) = directories.pop() {
-        let entries = match fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let file_type = match entry.file_type() {
-                Ok(file_type) => file_type,
-                Err(_) => continue,
-            };
-            if file_type.is_dir() {
-                if path.file_name().and_then(|name| name.to_str()) != Some(".src") {
-                    directories.push(path);
-                }
-            } else if file_type.is_file()
-                && path.file_name().and_then(|name| name.to_str()) == Some("model.base")
-            {
-                let header = match BaseReader::read_header(&path) {
-                    Ok(header) => header,
-                    Err(_) => continue,
-                };
-                if header.arch == "whisper" {
-                    continue;
-                }
-                let quantization = serde_json::to_value(header.quant_scheme)?
-                    .as_str()
-                    .unwrap_or("unknown")
-                    .to_string();
-                let Some((id, variant)) = model_identity_from_path(&path)? else {
-                    continue;
-                };
-                models.push(InstalledModel {
-                    architecture: header.arch,
-                    quantization,
-                    variant,
-                    id,
-                    path,
-                });
-            }
-        }
-    }
-    models.sort_by(|left, right| (&left.id, &left.variant).cmp(&(&right.id, &right.variant)));
-    Ok(models)
-}
-
-fn unix_ms() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-}
-
-fn random_id() -> String {
-    let mut bytes = [0u8; 16];
-    OsRng.fill_bytes(&mut bytes);
-    hex(&bytes)
 }
 
 #[cfg(test)]
