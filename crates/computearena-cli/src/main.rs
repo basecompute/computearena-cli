@@ -95,6 +95,9 @@ enum Command {
         /// Submit without the preview and confirmation prompts.
         #[arg(short = 'y', long)]
         yes: bool,
+        /// With --yes, exclude invalid reports instead of refusing a partial submission.
+        #[arg(long, requires = "yes")]
+        skip_invalid: bool,
     },
 }
 
@@ -127,6 +130,34 @@ struct PreparedSubmission {
     path: PathBuf,
     value: Value,
     bytes: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct InvalidSubmission {
+    path: PathBuf,
+    label: String,
+    reason: String,
+}
+
+#[derive(Debug, Default)]
+struct SubmissionPreflight {
+    ready: Vec<PreparedSubmission>,
+    invalid: Vec<InvalidSubmission>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubmissionOutcomeKind {
+    Submitted,
+    Duplicate,
+    Rejected,
+    NotAttempted,
+}
+
+#[derive(Debug)]
+struct SubmissionOutcome {
+    label: String,
+    kind: SubmissionOutcomeKind,
+    detail: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -349,9 +380,13 @@ fn execute(command: Command, paths: &Paths, harness: Option<PathBuf>, api_url: &
         }
         Command::Login => login(paths, api_url),
         Command::Logout => logout(paths, api_url),
-        Command::Submit { reports, yes } => {
+        Command::Submit {
+            reports,
+            yes,
+            skip_invalid,
+        } => {
             let reports = select_reports_for_submission(paths, &reports, TerminalUi::detect())?;
-            submit_reports(paths, &reports, api_url, yes)
+            submit_reports(paths, &reports, api_url, yes, skip_invalid)
         }
     }
 }
@@ -441,7 +476,7 @@ fn interactive(paths: &Paths, harness: Option<PathBuf>, api_url: &str) -> Result
                 ui.section("Submit previous benchmarks");
                 match select_reports_for_submission(paths, &[], ui) {
                     Ok(reports) if !reports.is_empty() => {
-                        if let Err(error) = submit_reports(paths, &reports, api_url, false) {
+                        if let Err(error) = submit_reports(paths, &reports, api_url, false, false) {
                             eprintln!("{} {error:#}", ui.error("Submission failed:"));
                         }
                     }
@@ -961,36 +996,48 @@ fn submit_reports(
     reports: &[PathBuf],
     api_url: &str,
     assume_yes: bool,
+    skip_invalid: bool,
 ) -> Result<()> {
     if reports.is_empty() {
         return Ok(());
     }
     let ui = TerminalUi::detect();
-    let checking_started = start_activity(ui, "Reading and verifying selected benchmarks…");
-    let prepared = prepare_submissions(reports)?;
+    let checking_started = start_activity(ui, "Checking selected benchmarks…");
+    let preflight = preflight_submissions(reports);
     finish_activity(
         ui,
         checking_started,
-        format!("Verified {} benchmark(s)", prepared.len()),
+        format!("Checked {} benchmark(s)", reports.len()),
     );
+    print_submission_preflight(ui, &preflight);
+
+    if assume_yes && !skip_invalid && !preflight.invalid.is_empty() {
+        bail!(
+            "refusing a partial non-interactive submission; review the invalid reports or pass --yes --skip-invalid"
+        );
+    }
+    if preflight.ready.is_empty() {
+        bail!("no valid benchmarks were selected; nothing was uploaded");
+    }
+
     let session = load_api_session(paths, api_url)?;
 
     println!();
     match &session {
         Some(session) => println!(
             "Ready to submit {} benchmark(s) to {api_url} as @{}.",
-            prepared.len(),
+            preflight.ready.len(),
             session.username
         ),
         None => println!(
             "Ready to submit {} benchmark(s) to {api_url} anonymously.",
-            prepared.len()
+            preflight.ready.len()
         ),
     }
     println!(
         "{}",
         ui.neutral(
-            "If submitted, this benchmark data will be publicly accessible on ComputeArena."
+            "Only the valid benchmarks listed as ready will be uploaded. Their data will be publicly accessible on ComputeArena."
         )
     );
 
@@ -999,9 +1046,15 @@ fn submit_reports(
             bail!("submission confirmation requires a terminal; pass --yes to submit non-interactively");
         }
         if prompt_yes_no("Preview the JSON data before submitting?", true)? {
-            print_submission_preview(ui, &prepared)?;
+            print_submission_preview(ui, &preflight.ready)?;
         }
-        if !prompt_yes_no("Submit these benchmarks now?", false)? {
+        if !prompt_yes_no(
+            &format!(
+                "Submit the {} valid benchmark(s) now?",
+                preflight.ready.len()
+            ),
+            false,
+        )? {
             println!(
                 "{} Nothing was uploaded.",
                 ui.neutral("Submission cancelled.")
@@ -1017,15 +1070,17 @@ fn submit_reports(
         .user_agent(format!("basert-computearena/{}", env!("CARGO_PKG_VERSION")))
         .build()
         .context("building ComputeArena HTTP client")?;
-    let mut failures = Vec::new();
-    let report_count = prepared.len();
-    for (index, report) in prepared.into_iter().enumerate() {
+    let report_count = preflight.ready.len();
+    let mut outcomes = Vec::with_capacity(report_count);
+    let mut queue = preflight.ready.into_iter().enumerate();
+    while let Some((index, report)) = queue.next() {
         let run_id = report
             .value
             .get("run_id")
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_string();
+        let label = submission_label(&report.value, &report.path);
         let started = start_activity(
             ui,
             format!(
@@ -1062,52 +1117,206 @@ fn submit_reports(
                             "Benchmark submitted".to_string()
                         },
                     );
-                    if let Some(submission_id) = submission_id {
-                        println!("  Submission ID: {submission_id}");
-                    }
+                    outcomes.push(SubmissionOutcome {
+                        label,
+                        kind: if duplicate {
+                            SubmissionOutcomeKind::Duplicate
+                        } else {
+                            SubmissionOutcomeKind::Submitted
+                        },
+                        detail: submission_id.map(|id| format!("Submission ID: {id}")),
+                    });
                 } else {
                     let message = api_error_message(&body)
                         .unwrap_or_else(|| format!("server returned HTTP {}", status.as_u16()));
                     eprintln!("{} {message}", ui.error("✗"));
-                    failures.push(format!("{}: {message}", report.path.display()));
+                    outcomes.push(SubmissionOutcome {
+                        label,
+                        kind: SubmissionOutcomeKind::Rejected,
+                        detail: Some(message.clone()),
+                    });
+                    if should_stop_submission(status) {
+                        let reason = format!(
+                            "Not attempted after the server returned HTTP {}.",
+                            status.as_u16()
+                        );
+                        outcomes.extend(queue.map(|(_, pending)| SubmissionOutcome {
+                            label: submission_label(&pending.value, &pending.path),
+                            kind: SubmissionOutcomeKind::NotAttempted,
+                            detail: Some(reason.clone()),
+                        }));
+                        break;
+                    }
                 }
             }
             Err(error) => {
                 eprintln!("{} {error}", ui.error("✗"));
-                failures.push(format!("{}: {error}", report.path.display()));
+                outcomes.push(SubmissionOutcome {
+                    label,
+                    kind: SubmissionOutcomeKind::Rejected,
+                    detail: Some(error.to_string()),
+                });
+                outcomes.extend(queue.map(|(_, pending)| SubmissionOutcome {
+                    label: submission_label(&pending.value, &pending.path),
+                    kind: SubmissionOutcomeKind::NotAttempted,
+                    detail: Some(
+                        "Not attempted because the connection to ComputeArena failed.".to_string(),
+                    ),
+                }));
+                break;
             }
         }
     }
-    if !failures.is_empty() {
+
+    print_submission_results(ui, &outcomes);
+    let submitted = outcomes
+        .iter()
+        .filter(|outcome| outcome.kind == SubmissionOutcomeKind::Submitted)
+        .count();
+    let duplicates = outcomes
+        .iter()
+        .filter(|outcome| outcome.kind == SubmissionOutcomeKind::Duplicate)
+        .count();
+    let failures = outcomes
+        .iter()
+        .filter(|outcome| {
+            matches!(
+                outcome.kind,
+                SubmissionOutcomeKind::Rejected | SubmissionOutcomeKind::NotAttempted
+            )
+        })
+        .count();
+    if failures > 0 {
         bail!(
-            "{} of {} benchmark submissions failed:\n{}",
-            failures.len(),
-            report_count,
-            failures.join("\n")
+            "{failures} of {report_count} eligible benchmark(s) were not submitted; successful submissions remain saved"
         );
     }
     println!(
-        "{} All selected benchmarks are available on ComputeArena.",
-        ui.success("✓")
+        "{} Submission complete: {submitted} uploaded, {duplicates} already present.",
+        ui.success("✓"),
     );
     Ok(())
 }
 
-fn prepare_submissions(reports: &[PathBuf]) -> Result<Vec<PreparedSubmission>> {
-    reports
-        .iter()
-        .map(|path| {
-            let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-            let value: Value = serde_json::from_slice(&bytes)
-                .with_context(|| format!("parsing report {}", path.display()))?;
-            verify_report(&value).with_context(|| format!("checking {}", path.display()))?;
-            Ok(PreparedSubmission {
+fn preflight_submissions(reports: &[PathBuf]) -> SubmissionPreflight {
+    let mut preflight = SubmissionPreflight::default();
+    for path in reports {
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                preflight.invalid.push(InvalidSubmission {
+                    path: path.clone(),
+                    label: submission_file_label(path),
+                    reason: format!("Could not read the report: {error}"),
+                });
+                continue;
+            }
+        };
+        let value: Value = match serde_json::from_slice(&bytes) {
+            Ok(value) => value,
+            Err(error) => {
+                preflight.invalid.push(InvalidSubmission {
+                    path: path.clone(),
+                    label: submission_file_label(path),
+                    reason: format!("Invalid JSON: {error}"),
+                });
+                continue;
+            }
+        };
+        if let Err(error) = verify_report(&value) {
+            preflight.invalid.push(InvalidSubmission {
                 path: path.clone(),
-                value,
-                bytes,
-            })
-        })
-        .collect()
+                label: submission_label(&value, path),
+                reason: error.to_string(),
+            });
+            continue;
+        }
+        preflight.ready.push(PreparedSubmission {
+            path: path.clone(),
+            value,
+            bytes,
+        });
+    }
+    preflight
+}
+
+fn print_submission_preflight(ui: TerminalUi, preflight: &SubmissionPreflight) {
+    println!();
+    println!("{}", ui.paint(BRAND_LIME_BOLD, "Submission check complete"));
+    println!(
+        "  {:<22} {}",
+        "Ready to submit",
+        ui.success(preflight.ready.len())
+    );
+    println!(
+        "  {:<22} {}  {}",
+        "Invalid reports",
+        if preflight.invalid.is_empty() {
+            ui.neutral(0)
+        } else {
+            ui.error(preflight.invalid.len())
+        },
+        ui.neutral("— will not be uploaded")
+    );
+
+    if !preflight.invalid.is_empty() {
+        println!("\n{} Invalid reports:", ui.warning("!"));
+        for invalid in &preflight.invalid {
+            println!("  {} {}", ui.error("✗"), invalid.label);
+            println!("    {}", ui.neutral(&invalid.reason));
+            println!("    {}", ui.paint("2", invalid.path.display()));
+        }
+    }
+}
+
+fn submission_file_label(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn submission_label(report: &Value, path: &Path) -> String {
+    let (model, variant) = model_identity_for_report(report);
+    let model = match variant {
+        Some(variant) => format!("{model} ({variant})"),
+        None => model,
+    };
+    let run_id = report
+        .get("run_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if model == "Unknown model" && run_id == "unknown" {
+        submission_file_label(path)
+    } else {
+        format!("{model} · report {}", short_id(run_id))
+    }
+}
+
+fn should_stop_submission(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED
+            | reqwest::StatusCode::FORBIDDEN
+            | reqwest::StatusCode::REQUEST_TIMEOUT
+            | reqwest::StatusCode::TOO_MANY_REQUESTS
+    ) || status.is_server_error()
+}
+
+fn print_submission_results(ui: TerminalUi, outcomes: &[SubmissionOutcome]) {
+    ui.section("Submission results");
+    for outcome in outcomes {
+        let (marker, status) = match outcome.kind {
+            SubmissionOutcomeKind::Submitted => (ui.success("✓"), "Submitted"),
+            SubmissionOutcomeKind::Duplicate => (ui.neutral("="), "Already submitted"),
+            SubmissionOutcomeKind::Rejected => (ui.error("✗"), "Rejected"),
+            SubmissionOutcomeKind::NotAttempted => (ui.warning("—"), "Not attempted"),
+        };
+        println!("  {marker} {} — {status}", outcome.label);
+        if let Some(detail) = &outcome.detail {
+            println!("    {}", ui.neutral(detail));
+        }
+    }
 }
 
 fn print_submission_preview(ui: TerminalUi, reports: &[PreparedSubmission]) -> Result<()> {
@@ -2275,6 +2484,17 @@ mod tests {
         })
     }
 
+    fn signed_sample_report() -> Value {
+        let key = SigningKey::generate(&mut OsRng);
+        let mut report = sample_report();
+        let public = key.verifying_key().to_bytes();
+        report["installation"] = json!({
+            "key_id": sha256_hex(&public),
+            "public_key": b64_encode(&public)
+        });
+        sign_report(&mut report, &key).unwrap();
+        report
+    }
     #[test]
     fn canonical_json_sorts_nested_object_keys() {
         let value = json!({"z": 1, "a": {"y": true, "b": [2, 1]}});
@@ -2302,9 +2522,63 @@ mod tests {
             cli.command,
             Some(Command::Submit {
                 reports,
-                yes: true
+                yes: true,
+                skip_invalid: false,
             }) if reports == ["report.json"]
         ));
+
+        let cli = Cli::try_parse_from([
+            "basert-computearena",
+            "submit",
+            "--yes",
+            "--skip-invalid",
+            "report.json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Submit {
+                skip_invalid: true,
+                ..
+            })
+        ));
+        assert!(Cli::try_parse_from([
+            "basert-computearena",
+            "submit",
+            "--skip-invalid",
+            "report.json",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn submission_preflight_separates_invalid_reports() {
+        let temporary = tempfile::tempdir().unwrap();
+        let valid_path = temporary.path().join("valid.json");
+        let tampered_path = temporary.path().join("tampered.json");
+        let malformed_path = temporary.path().join("malformed.json");
+        let valid = signed_sample_report();
+        let mut tampered = valid.clone();
+        tampered["model"]["size_bytes"] = json!(2);
+        fs::write(&valid_path, serde_json::to_vec(&valid).unwrap()).unwrap();
+        fs::write(&tampered_path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+        fs::write(&malformed_path, b"{not-json").unwrap();
+
+        let preflight = preflight_submissions(&[
+            valid_path.clone(),
+            tampered_path.clone(),
+            malformed_path.clone(),
+        ]);
+
+        assert_eq!(preflight.ready.len(), 1);
+        assert_eq!(preflight.ready[0].path, valid_path);
+        assert_eq!(preflight.invalid.len(), 2);
+        assert_eq!(preflight.invalid[0].path, tampered_path);
+        assert!(preflight.invalid[0]
+            .reason
+            .contains("signature verification failed"));
+        assert_eq!(preflight.invalid[1].path, malformed_path);
+        assert!(preflight.invalid[1].reason.starts_with("Invalid JSON:"));
     }
 
     #[test]
@@ -2368,14 +2642,7 @@ mod tests {
 
     #[test]
     fn signed_report_verifies_and_tampering_fails() {
-        let key = SigningKey::generate(&mut OsRng);
-        let mut report = sample_report();
-        let public = key.verifying_key().to_bytes();
-        report["installation"] = json!({
-            "key_id": sha256_hex(&public),
-            "public_key": b64_encode(&public)
-        });
-        sign_report(&mut report, &key).unwrap();
+        let mut report = signed_sample_report();
         assert!(verify_report(&report).is_ok());
 
         report["model"]["size_bytes"] = json!(2);
@@ -2383,6 +2650,23 @@ mod tests {
             verify_report(&report).unwrap_err().to_string(),
             "signature verification failed; the report was modified after signing or has an invalid signature"
         );
+    }
+
+    #[test]
+    fn submission_stops_only_for_systemic_http_errors() {
+        assert!(!should_stop_submission(reqwest::StatusCode::BAD_REQUEST));
+        assert!(!should_stop_submission(
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY
+        ));
+        assert!(should_stop_submission(reqwest::StatusCode::UNAUTHORIZED));
+        assert!(should_stop_submission(reqwest::StatusCode::FORBIDDEN));
+        assert!(should_stop_submission(reqwest::StatusCode::REQUEST_TIMEOUT));
+        assert!(should_stop_submission(
+            reqwest::StatusCode::TOO_MANY_REQUESTS
+        ));
+        assert!(should_stop_submission(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        ));
     }
 
     #[test]
