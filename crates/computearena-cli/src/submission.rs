@@ -478,12 +478,6 @@ fn print_submission_preview(ui: TerminalUi, reports: &[PreparedSubmission]) -> R
         "{}",
         ui.neutral("──────────────── SUBMISSION PREVIEW · NOT YET UPLOADED ────────────────")
     );
-    println!(
-        "{}",
-        ui.neutral(
-            "The JSON fields below will be publicly accessible on ComputeArena. Local file paths are not sent."
-        )
-    );
     for (index, report) in reports.iter().enumerate() {
         println!();
         println!(
@@ -503,6 +497,12 @@ fn print_submission_preview(ui: TerminalUi, reports: &[PreparedSubmission]) -> R
     println!(
         "{}",
         ui.neutral("──────────────────────── END PREVIEW ────────────────────────")
+    );
+    println!(
+        "\n{}",
+        ui.neutral(
+            "The JSON fields above will be publicly accessible on ComputeArena. Local file paths are not sent."
+        )
     );
     Ok(())
 }
