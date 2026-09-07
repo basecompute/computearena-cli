@@ -1,10 +1,10 @@
 use crate::api::{client as api_client, error_message as api_error_message};
 use crate::auth::load_api_session;
 use crate::config::SUBMISSION_HTTP_TIMEOUT;
-use crate::ui::{finish_activity, prompt, prompt_yes_no, start_activity, TerminalUi};
-use crate::{
+use crate::reports::{
     model_identity_for_report, report_summaries, resolve_report, short_id, verify_report, Paths,
 };
+use crate::ui::{finish_activity, prompt, prompt_yes_no, start_activity, TerminalUi};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::collections::HashSet;

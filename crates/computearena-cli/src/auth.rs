@@ -5,8 +5,8 @@ use crate::config::{
     AUTH_HTTP_TIMEOUT, DEFAULT_API_URL, DEFAULT_DEVICE_AUTH_EXPIRES_SECS,
     DEFAULT_DEVICE_AUTH_POLL_INTERVAL_SECS, MIN_DEVICE_AUTH_POLL_INTERVAL_SECS,
 };
+use crate::reports::{read_report, set_private_permissions, Paths};
 use crate::ui::{finish_activity, start_activity, TerminalUi};
-use crate::{read_report, set_private_permissions, Paths};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::fs;
