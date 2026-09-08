@@ -12,7 +12,7 @@ mod ui;
 use auth::{load_api_session, login, logout, resolve_api_url};
 #[cfg(test)]
 use auth::{remove_api_session, save_api_session, ApiSession};
-use benchmark::run_benchmark;
+use benchmark::{confirm_benchmark_run, run_benchmark};
 #[cfg(test)]
 use benchmark::{validate_harness_result, validate_pp};
 use config::*;
@@ -96,6 +96,9 @@ enum Command {
         /// Warmup repetitions (not recorded).
         #[arg(short = 'w', long, default_value_t = DEFAULT_WARMUP_REPETITIONS)]
         warmup: u32,
+        /// Run without the benchmark confirmation prompt.
+        #[arg(short = 'y', long)]
+        yes: bool,
         /// Write to this path instead of the local report directory.
         #[arg(short, long)]
         output: Option<PathBuf>,
@@ -159,6 +162,7 @@ fn execute(command: Command, paths: &Paths, harness: Option<PathBuf>, api_url: &
             tg,
             reps,
             warmup,
+            yes,
             output,
         } => {
             let model = match model {
@@ -168,6 +172,10 @@ fn execute(command: Command, paths: &Paths, harness: Option<PathBuf>, api_url: &
                     None => return Ok(()),
                 },
             };
+            if !confirm_benchmark_run(&model, &pp, tg, reps, warmup, yes)? {
+                println!("Benchmark cancelled. Nothing was run.");
+                return Ok(());
+            }
             run_benchmark(paths, harness, &model, &pp, tg, reps, warmup, output)?;
             Ok(())
         }
@@ -255,6 +263,17 @@ fn interactive(paths: &Paths, harness: Option<PathBuf>, api_url: &str) -> Result
                 let Some(model) = prompt_model_path()? else {
                     continue;
                 };
+                if !confirm_benchmark_run(
+                    &model,
+                    DEFAULT_PREFILL_TOKENS,
+                    DEFAULT_DECODE_TOKENS,
+                    DEFAULT_REPETITIONS,
+                    DEFAULT_WARMUP_REPETITIONS,
+                    false,
+                )? {
+                    println!("Benchmark cancelled. Nothing was run.");
+                    continue;
+                }
                 if let Err(error) = run_benchmark(
                     paths,
                     harness.clone(),
@@ -600,6 +619,13 @@ mod tests {
         assert!(validate_pp(DEFAULT_PREFILL_TOKENS).is_ok());
         assert!(validate_pp("128,0").is_err());
         assert!(validate_pp("128,nope").is_err());
+    }
+
+    #[test]
+    fn run_yes_flag_supports_non_interactive_execution() {
+        let cli =
+            Cli::try_parse_from(["basert-computearena", "run", "model.base", "--yes"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Run { yes: true, .. })));
     }
 
     #[test]

@@ -45,6 +45,12 @@ public headline remains PP512/TG128 so new reports stay comparable with
 previous submissions while retaining the additional long-context measurements
 in their signed JSON.
 
+Before execution, the CLI shows the selected model, exact PP/TG workloads,
+warmup and recorded repetitions, platform telemetry behavior, device-load
+warning, and local report policy. It asks for confirmation before starting.
+Use `run --yes` for non-interactive automation; the plan is still printed, but
+the prompt is skipped.
+
 Running without a subcommand opens the interactive menu. Login and submission
 are menu/CLI placeholders until the `computearena.ai` server API is available;
 benchmark creation and verification do not require a network connection or a

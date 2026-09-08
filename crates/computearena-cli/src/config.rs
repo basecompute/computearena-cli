@@ -7,6 +7,12 @@ pub(crate) const DEFAULT_DECODE_TOKENS: u32 = 128;
 pub(crate) const DEFAULT_REPETITIONS: u32 = 3;
 pub(crate) const DEFAULT_WARMUP_REPETITIONS: u32 = 3;
 
+// User-facing estimate for the current Apple harness protocol: a fixed idle
+// baseline plus separate five-second energy and temperature windows for each
+// prefill workload and decode. Keep synchronized with bench_multidevice.cpp.
+pub(crate) const APPLE_TELEMETRY_IDLE_BASELINE_SECONDS: f64 = 1.5;
+pub(crate) const APPLE_TELEMETRY_SECONDS_PER_WORKLOAD: f64 = 10.0;
+
 pub(crate) const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const AUTH_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) const DEFAULT_DEVICE_AUTH_POLL_INTERVAL_SECS: u64 = 3;

@@ -1,18 +1,119 @@
-use crate::config::{DEVELOPMENT_HARNESS_PATHS, LEGACY_HARNESS_NAME, PRIMARY_HARNESS_NAME};
-use crate::models::inspect_model;
+use crate::config::{
+    APPLE_TELEMETRY_IDLE_BASELINE_SECONDS, APPLE_TELEMETRY_SECONDS_PER_WORKLOAD,
+    DEVELOPMENT_HARNESS_PATHS, LEGACY_HARNESS_NAME, PRIMARY_HARNESS_NAME,
+};
+use crate::models::{compact_home_path, inspect_model};
 use crate::protocol::{HARNESS_SCHEMA, REPORT_SCHEMA, RUNTIME_NAME, TELEMETRY_SCHEMA};
 use crate::reports::{
     atomic_write_json, hex, load_or_create_installation_key, sha256_hex, sign_report, Paths,
 };
-use crate::ui::{finish_activity, start_activity, TerminalUi};
+use crate::ui::{finish_activity, prompt_yes_no, start_activity, TerminalUi};
 use anyhow::{bail, Context, Result};
 use base_sign::b64_encode;
 use rand_core::{OsRng, RngCore};
 use serde_json::{json, Value};
 use std::fs;
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+pub(crate) fn confirm_benchmark_run(
+    model: &Path,
+    pp: &str,
+    tg: u32,
+    reps: u32,
+    warmup: u32,
+    skip_confirmation: bool,
+) -> Result<bool> {
+    if !model.is_file() {
+        bail!("model does not exist or is not a file: {}", model.display());
+    }
+    let prefill_tokens = parse_pp(pp)?;
+    if tg == 0 || reps == 0 {
+        bail!("--tg and --reps must be greater than zero");
+    }
+
+    let ui = TerminalUi::detect();
+    ui.section("Benchmark plan");
+    println!("  {} {}", ui.neutral("Model:"), compact_home_path(model));
+    println!(
+        "  {} {}",
+        ui.neutral("Prefill:"),
+        prefill_tokens
+            .iter()
+            .map(|tokens| format!("PP{tokens}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    println!("  {} TG{tg}", ui.neutral("Decode:"));
+    println!(
+        "  {} {warmup} warmup {} + {reps} recorded {} per throughput workload",
+        ui.neutral("Sampling:"),
+        repetition_label(warmup),
+        repetition_label(reps)
+    );
+    println!(
+        "  {} Synthetic token sequences; this does not test model accuracy",
+        ui.neutral("Input:")
+    );
+
+    if cfg!(target_os = "macos") {
+        let telemetry_seconds = APPLE_TELEMETRY_IDLE_BASELINE_SECONDS
+            + APPLE_TELEMETRY_SECONDS_PER_WORKLOAD * (prefill_tokens.len() + 1) as f64;
+        println!(
+            "  {} Separate energy and temperature replays add about {} or more",
+            ui.neutral("Telemetry:"),
+            format_duration(telemetry_seconds)
+        );
+    } else {
+        println!(
+            "  {} Basic NVIDIA/ROCm boundary snapshots; no telemetry replays",
+            ui.neutral("Telemetry:")
+        );
+    }
+    println!(
+        "  {} Signed JSON report saved locally",
+        ui.neutral("Output:")
+    );
+    println!("          Nothing is uploaded automatically");
+
+    println!();
+    println!(
+        "{} This creates sustained CPU/GPU load and can consume substantial memory.",
+        ui.warning("!")
+    );
+    println!("  The device may become hot during the benchmark.");
+    println!("  For comparable results, connect external power, disable power-saving mode,");
+    println!("  and close demanding apps.");
+
+    if skip_confirmation {
+        return Ok(true);
+    }
+    if !io::stdin().is_terminal() {
+        bail!("benchmark confirmation requires a terminal; pass --yes to run non-interactively");
+    }
+    prompt_yes_no("Start this benchmark?", false)
+}
+
+fn format_duration(seconds: f64) -> String {
+    let seconds = seconds.ceil() as u64;
+    let minutes = seconds / 60;
+    let remaining = seconds % 60;
+    if minutes == 0 {
+        format!("{remaining}s")
+    } else {
+        format!("{minutes}m {remaining}s")
+    }
+}
+
+fn repetition_label(count: u32) -> &'static str {
+    if count == 1 {
+        "repetition"
+    } else {
+        "repetitions"
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_benchmark(
@@ -99,13 +200,34 @@ pub(crate) fn run_benchmark(
     println!("Report SHA-256: {digest}");
     Ok(path)
 }
+
 pub(crate) fn validate_pp(pp: &str) -> Result<()> {
+    parse_pp(pp).map(|_| ())
+}
+
+fn parse_pp(pp: &str) -> Result<Vec<u32>> {
     let values: Result<Vec<u32>, _> = pp.split(',').map(str::parse::<u32>).collect();
     let values = values.context("--pp must be a comma-separated list of positive integers")?;
     if values.is_empty() || values.contains(&0) {
         bail!("--pp values must be greater than zero");
     }
-    Ok(())
+    Ok(values)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_preflight_telemetry_duration() {
+        let workload_count = parse_pp("128,256,512,1024,2048,4096,8192,16384")
+            .unwrap()
+            .len()
+            + 1;
+        let seconds = APPLE_TELEMETRY_IDLE_BASELINE_SECONDS
+            + APPLE_TELEMETRY_SECONDS_PER_WORKLOAD * workload_count as f64;
+        assert_eq!(format_duration(seconds), "1m 32s");
+    }
 }
 
 pub(crate) fn validate_harness_result(value: &Value) -> Result<()> {
