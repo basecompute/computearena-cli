@@ -98,3 +98,28 @@ The harness includes raw `{tokens, elapsed_ns}` samples for prefill and
 retained for local display, but the server can recompute it from raw samples.
 Available start/end thermal readings and peak process RSS are captured beside
 the throughput measurements.
+
+ComputeArena invokes text benchmarks with `--telemetry`, which adds an optional
+`benchmark.telemetry` object using the nested `basert-telemetry/1` schema. The
+headline throughput samples remain uninstrumented: power-state, temperature,
+vendor power, cumulative energy, and peak-RSS snapshots are read only before
+or after those timers. The snapshots also record BaseRT's model-memory
+accounting and, where available, accelerator memory use. On Apple Silicon, the
+harness then runs separate five-second workload replays for energy and
+temperature:
+
+- energy uses start/end IOReport counters, a 1.5-second idle baseline, and
+  reports gross and idle-adjusted joules for every prefill length and decode;
+- temperature is sampled every 500 ms in a diagnostic replay and reports the
+  maximum and mean die temperature for every workload; and
+- each replay records its elapsed time, iterations, processed tokens, and
+  process peak RSS so its telemetry is auditable and is never confused with
+  the headline performance run.
+
+IOReport counters are system-wide estimates, so Apple energy values are
+advisory and are most useful on an otherwise-idle machine. NVIDIA and ROCm
+currently use deliberately basic telemetry: start/end GPU temperature, board
+power, memory use and cumulative energy when exposed by `nvidia-smi` or
+`rocm-smi`, plus Linux power-source, CPU-governor, and peak-RSS data. Their
+per-workload energy and continuous temperature collection remain explicitly
+marked unavailable until those paths have been measured on supported hardware.

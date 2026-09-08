@@ -603,12 +603,17 @@ mod tests {
         let valid = json!({
             "schema": HARNESS_SCHEMA,
             "mode": "text",
+            "telemetry": {"schema": TELEMETRY_SCHEMA},
             "raw_samples": {
                 "prefill": {"128": [{"tokens": 128, "elapsed_ns": 10}]},
                 "decode": [{"generated_tokens": 128, "elapsed_ns": 20}]
             }
         });
         assert!(validate_harness_result(&valid).is_ok());
+
+        let mut missing_telemetry = valid.clone();
+        missing_telemetry["telemetry"] = Value::Null;
+        assert!(validate_harness_result(&missing_telemetry).is_err());
 
         let mut invalid = valid;
         invalid["raw_samples"]["decode"][0]["elapsed_ns"] = json!(0);

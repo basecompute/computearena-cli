@@ -1,6 +1,6 @@
 use crate::config::{DEVELOPMENT_HARNESS_PATHS, LEGACY_HARNESS_NAME, PRIMARY_HARNESS_NAME};
 use crate::models::inspect_model;
-use crate::protocol::{HARNESS_SCHEMA, REPORT_SCHEMA, RUNTIME_NAME};
+use crate::protocol::{HARNESS_SCHEMA, REPORT_SCHEMA, RUNTIME_NAME, TELEMETRY_SCHEMA};
 use crate::reports::{
     atomic_write_json, hex, load_or_create_installation_key, sha256_hex, sign_report, Paths,
 };
@@ -39,7 +39,7 @@ pub(crate) fn run_benchmark(
     let benchmark_started = start_activity(
         ui,
         format!(
-            "Running the BaseRT prefill/decode benchmark with {}…",
+            "Running the BaseRT benchmark and hardware telemetry with {}…",
             harness.display()
         ),
     );
@@ -51,6 +51,7 @@ pub(crate) fn run_benchmark(
         .arg(reps.to_string())
         .args(["-w"])
         .arg(warmup.to_string())
+        .arg("--telemetry")
         .stderr(Stdio::inherit())
         .output()
         .with_context(|| format!("launching benchmark harness {}", harness.display()))?;
@@ -116,6 +117,11 @@ pub(crate) fn validate_harness_result(value: &Value) -> Result<()> {
     }
     if value.get("mode").and_then(Value::as_str) != Some("text") {
         bail!("harness returned a non-text benchmark");
+    }
+    if value.pointer("/telemetry/schema").and_then(Value::as_str) != Some(TELEMETRY_SCHEMA) {
+        bail!(
+            "benchmark harness omitted supported telemetry (expected {TELEMETRY_SCHEMA}); rebuild basert-harness"
+        );
     }
     let raw = value
         .get("raw_samples")
