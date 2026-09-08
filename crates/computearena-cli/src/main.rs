@@ -26,7 +26,8 @@ use models::{
 use protocol::*;
 #[cfg(test)]
 use reports::{
-    format_unix_ms, sha256_hex, sign_report, throughput_for_report, write_canonical_json,
+    format_unix_ms, peak_memory_for_report, sha256_hex, sign_report, throughput_for_report,
+    write_canonical_json,
 };
 use reports::{
     list_reports, model_identity_for_report, read_report, report_summaries, resolve_report,
@@ -671,6 +672,30 @@ mod tests {
         assert_eq!(prefill[1]["tokens"], 512);
         assert_eq!(decode["tokens"], 128);
         assert_eq!(decode["tokens_per_second"], 91.25);
+    }
+
+    #[test]
+    fn report_summary_prefers_observed_memory_replay_peak_and_supports_legacy_reports() {
+        let report = json!({
+            "benchmark": {
+                "memory": {"process_lifetime_peak_rss_mb": 900.0},
+                "telemetry": {
+                    "memory_replay": {
+                        "workloads": {
+                            "prefill": {
+                                "128": {"process_peak_mb": 850.0},
+                                "512": {"process_peak_mb": 920.0}
+                            },
+                            "decode": {"process_peak_mb": 910.0}
+                        }
+                    }
+                }
+            }
+        });
+        assert_eq!(peak_memory_for_report(&report), Some(920.0));
+
+        let legacy = json!({"benchmark": {"memory": {"process_peak_rss_mb": 700.0}}});
+        assert_eq!(peak_memory_for_report(&legacy), Some(700.0));
     }
 
     #[test]

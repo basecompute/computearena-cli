@@ -319,7 +319,7 @@ pub(crate) fn list_reports(paths: &Paths, as_json: bool) -> Result<()> {
 
         let mut telemetry = Vec::new();
         if let Some(memory) = report["peak_memory_mb"].as_f64() {
-            telemetry.push(format!("peak memory {memory:.0} MiB"));
+            telemetry.push(format!("observed peak memory {memory:.0} MiB"));
         }
         if let Some(temperature) = report["ending_temperature_c"].as_f64() {
             telemetry.push(format!("ending temperature {temperature:.1}°C"));
@@ -386,7 +386,7 @@ pub(crate) fn report_summaries(paths: &Paths) -> Result<Vec<Value>> {
                         .or_else(|| value.pointer("/runtime/computearena_version").and_then(Value::as_str)),
                     "prefill": prefill,
                     "decode": decode,
-                    "peak_memory_mb": value.pointer("/benchmark/memory/process_peak_rss_mb").and_then(Value::as_f64),
+                    "peak_memory_mb": peak_memory_for_report(&value),
                     "ending_temperature_c": value.pointer("/benchmark/thermal/die_end_c").and_then(Value::as_f64),
                     "status": status,
                     "path": path
@@ -482,6 +482,32 @@ pub(crate) fn throughput_for_report(report: &Value) -> (Vec<Value>, Value) {
         })
         .unwrap_or(Value::Null);
     (prefill, decode)
+}
+
+pub(crate) fn peak_memory_for_report(report: &Value) -> Option<f64> {
+    let memory_replay = report.pointer("/benchmark/telemetry/memory_replay/workloads");
+    let prefill = memory_replay
+        .and_then(|workloads| workloads.get("prefill"))
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|workloads| workloads.values());
+    let decode = memory_replay
+        .and_then(|workloads| workloads.get("decode"))
+        .into_iter();
+    prefill
+        .chain(decode)
+        .filter_map(|workload| workload.get("process_peak_mb").and_then(Value::as_f64))
+        .reduce(f64::max)
+        .or_else(|| {
+            report
+                .pointer("/benchmark/memory/process_lifetime_peak_rss_mb")
+                .and_then(Value::as_f64)
+        })
+        .or_else(|| {
+            report
+                .pointer("/benchmark/memory/process_peak_rss_mb")
+                .and_then(Value::as_f64)
+        })
 }
 
 pub(crate) fn short_id(run_id: &str) -> &str {

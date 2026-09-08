@@ -1,6 +1,7 @@
 use crate::config::{
     APPLE_TELEMETRY_IDLE_BASELINE_SECONDS, APPLE_TELEMETRY_SECONDS_PER_WORKLOAD,
-    DEVELOPMENT_HARNESS_PATHS, LEGACY_HARNESS_NAME, PRIMARY_HARNESS_NAME,
+    DEVELOPMENT_HARNESS_PATHS, LEGACY_HARNESS_NAME, MEMORY_TELEMETRY_SECONDS_PER_WORKLOAD,
+    PRIMARY_HARNESS_NAME,
 };
 use crate::models::{compact_home_path, inspect_model};
 use crate::protocol::{HARNESS_SCHEMA, REPORT_SCHEMA, RUNTIME_NAME, TELEMETRY_SCHEMA};
@@ -62,14 +63,17 @@ pub(crate) fn confirm_benchmark_run(
         let telemetry_seconds = APPLE_TELEMETRY_IDLE_BASELINE_SECONDS
             + APPLE_TELEMETRY_SECONDS_PER_WORKLOAD * (prefill_tokens.len() + 1) as f64;
         println!(
-            "  {} Separate energy and temperature replays add about {} or more",
+            "  {} Separate energy and combined memory/temperature replays add about {} or more",
             ui.neutral("Telemetry:"),
             format_duration(telemetry_seconds)
         );
     } else {
+        let telemetry_seconds =
+            MEMORY_TELEMETRY_SECONDS_PER_WORKLOAD * (prefill_tokens.len() + 1) as f64;
         println!(
-            "  {} Basic NVIDIA/ROCm boundary snapshots; no telemetry replays",
-            ui.neutral("Telemetry:")
+            "  {} Separate process-memory replays add about {} or more; NVIDIA/ROCm sensors remain basic",
+            ui.neutral("Telemetry:"),
+            format_duration(telemetry_seconds)
         );
     }
     println!(
@@ -227,6 +231,10 @@ mod tests {
         let seconds = APPLE_TELEMETRY_IDLE_BASELINE_SECONDS
             + APPLE_TELEMETRY_SECONDS_PER_WORKLOAD * workload_count as f64;
         assert_eq!(format_duration(seconds), "1m 32s");
+        assert_eq!(
+            format_duration(MEMORY_TELEMETRY_SECONDS_PER_WORKLOAD * workload_count as f64),
+            "45s"
+        );
     }
 }
 
