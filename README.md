@@ -63,7 +63,11 @@ colors and reports potentially slow work—model discovery, benchmark execution,
 report loading, verification, and signing—before it begins. Selecting
 verification presents available reports as a numbered list, so users do not
 need to know report paths or IDs. ANSI color is disabled when output is
-redirected or `NO_COLOR` is set.
+redirected or `NO_COLOR` is set. Benchmark-harness progress uses the same
+BaseCompute palette: blue marks active work, lime marks completed measurements,
+neutral gray carries secondary detail, and red is reserved for timeouts or
+errors. Interactive cooldown updates replace one line in place; redirected logs
+retain plain periodic progress lines.
 
 For a source-tree build, build the companion harness once before running a real
 benchmark:
