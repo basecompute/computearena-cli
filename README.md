@@ -118,8 +118,14 @@ ComputeArena invokes text benchmarks with `--telemetry`, which adds an optional
 headline throughput samples remain uninstrumented: power-state, temperature,
 vendor power, cumulative energy, and peak-RSS snapshots are read only before
 or after those timers. The snapshots also record BaseRT's model-memory
-accounting and, where available, accelerator memory use. The harness then runs
-five-second diagnostic replays that sample current process memory every 25 ms
+accounting and, where available, accelerator memory use. Every diagnostic
+replay also carries a `computearena-runtime-memory/1` boundary observation:
+runtime-allocated memory plus KV-cache capacity and logical usage (and block
+occupancy for paged caches). The provider-labelled shape is deliberately
+runtime-neutral so future llama.cpp, vLLM, and MLX adapters can populate the
+same fields without treating process RSS and accelerator allocations as the
+same measurement. The harness then runs five-second diagnostic replays that
+sample current process memory every 25 ms
 for every prefill length and decode. Each workload reports its baseline,
 observed peak, peak increase, ending footprint, sample count, missed sampling
 deadlines, and observer read time. On Apple Silicon, these replays also sample
