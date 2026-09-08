@@ -21,14 +21,57 @@ use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[derive(Clone, Copy, Debug)]
+struct BenchmarkTiming {
+    scheduled_seconds: f64,
+    cooldown_phases: f64,
+}
+
+impl BenchmarkTiming {
+    fn cooldown_minimum_seconds(self) -> f64 {
+        self.scheduled_seconds + self.cooldown_phases * CONDITIONING_STABLE_WINDOW_SECONDS
+    }
+
+    fn cooldown_fallback_seconds(self) -> f64 {
+        self.scheduled_seconds + self.cooldown_phases * CONDITIONING_FALLBACK_WAIT_SECONDS
+    }
+
+    fn cooldown_maximum_seconds(self) -> f64 {
+        self.scheduled_seconds + self.cooldown_phases * CONDITIONING_MAXIMUM_WAIT_SECONDS
+    }
+}
+
+fn benchmark_timing(prefill_count: usize, apple: bool) -> BenchmarkTiming {
+    let workload_count = (prefill_count + 1) as f64;
+    if apple {
+        BenchmarkTiming {
+            scheduled_seconds: APPLE_TELEMETRY_IDLE_BASELINE_SECONDS
+                + workload_count
+                    * (2.0 * TELEMETRY_WINDOW_SECONDS
+                        + APPLE_CONDITIONED_PHASES_PER_WORKLOAD
+                            * CONDITIONING_MINIMUM_WARMUP_SECONDS),
+            cooldown_phases: workload_count * APPLE_CONDITIONED_PHASES_PER_WORKLOAD + 1.0,
+        }
+    } else {
+        BenchmarkTiming {
+            scheduled_seconds: workload_count
+                * (TELEMETRY_WINDOW_SECONDS
+                    + PORTABLE_CONDITIONED_PHASES_PER_WORKLOAD
+                        * CONDITIONING_MINIMUM_WARMUP_SECONDS),
+            cooldown_phases: workload_count * PORTABLE_CONDITIONED_PHASES_PER_WORKLOAD,
+        }
+    }
+}
+
 pub(crate) fn confirm_benchmark_run(
     model: &Path,
     pp: &str,
     tg: u32,
     reps: u32,
     warmup: u32,
+    cooldown_requested: bool,
     skip_confirmation: bool,
-) -> Result<bool> {
+) -> Result<Option<bool>> {
     if !model.is_file() {
         bail!("model does not exist or is not a file: {}", model.display());
     }
@@ -65,39 +108,22 @@ pub(crate) fn confirm_benchmark_run(
         ui.neutral("Input:")
     );
 
-    let workload_count = (prefill_tokens.len() + 1) as f64;
-    let conditioned_phases = if cfg!(target_os = "macos") {
-        APPLE_CONDITIONED_PHASES_PER_WORKLOAD
-    } else {
-        PORTABLE_CONDITIONED_PHASES_PER_WORKLOAD
-    };
-    let telemetry_seconds = if cfg!(target_os = "macos") {
-        APPLE_TELEMETRY_IDLE_BASELINE_SECONDS
-            + workload_count
-                * (2.0 * TELEMETRY_WINDOW_SECONDS
-                    + APPLE_CONDITIONED_PHASES_PER_WORKLOAD * CONDITIONING_MINIMUM_WARMUP_SECONDS)
-    } else {
-        workload_count
-            * (TELEMETRY_WINDOW_SECONDS
-                + PORTABLE_CONDITIONED_PHASES_PER_WORKLOAD * CONDITIONING_MINIMUM_WARMUP_SECONDS)
-    };
+    let timing = benchmark_timing(prefill_tokens.len(), cfg!(target_os = "macos"));
+    println!("  {}", ui.neutral("Estimated duration:"));
     println!(
-        "  {} Measurement and warmup windows add at least {}",
-        ui.neutral("Telemetry:"),
-        format_duration(telemetry_seconds)
+        "    Warmup only (default)  at least {}",
+        format_duration(timing.scheduled_seconds)
     );
     println!(
-        "  {} {:.0}s stable idle window before each of {:.0} phases; up to {} per phase when hot",
-        ui.neutral("Cooldown:"),
-        CONDITIONING_STABLE_WINDOW_SECONDS,
-        workload_count * conditioned_phases + if cfg!(target_os = "macos") { 1.0 } else { 0.0 },
-        format_duration(CONDITIONING_MAXIMUM_WAIT_SECONDS)
+        "    With thermal cooldown  {}–{}",
+        format_duration(timing.cooldown_minimum_seconds()),
+        format_duration(timing.cooldown_maximum_seconds())
     );
     println!(
-        "            Systems without readable sensors use a {} fixed fallback per phase",
-        format_duration(CONDITIONING_FALLBACK_WAIT_SECONDS)
+        "    Sensorless fallback    about {}",
+        format_duration(timing.cooldown_fallback_seconds())
     );
-    println!("            Cooldown, model loading, and recorded repetitions are additional");
+    println!("    Model loading and recorded repetitions add device-dependent time");
     println!(
         "  {} Signed JSON report saved locally",
         ui.neutral("Output:")
@@ -113,13 +139,36 @@ pub(crate) fn confirm_benchmark_run(
     println!("  For comparable results, connect external power, disable power-saving mode,");
     println!("  and close demanding apps.");
 
-    if skip_confirmation {
-        return Ok(true);
-    }
-    if !io::stdin().is_terminal() {
+    if !skip_confirmation && !io::stdin().is_terminal() {
         bail!("benchmark confirmation requires a terminal; pass --yes to run non-interactively");
     }
-    prompt_yes_no("Start this benchmark?", false)
+    let cooldown_enabled = if cooldown_requested || skip_confirmation {
+        cooldown_requested
+    } else {
+        println!();
+        prompt_yes_no(
+            "Enable thermal cooldowns for more comparable results?",
+            false,
+        )?
+    };
+    println!(
+        "  {} {}",
+        ui.neutral("Selected profile:"),
+        if cooldown_enabled {
+            "warmup with thermal cooldown"
+        } else {
+            "warmup only"
+        }
+    );
+
+    if skip_confirmation {
+        return Ok(Some(cooldown_enabled));
+    }
+    if prompt_yes_no("Start this benchmark?", false)? {
+        Ok(Some(cooldown_enabled))
+    } else {
+        Ok(None)
+    }
 }
 
 fn format_duration(seconds: f64) -> String {
@@ -150,6 +199,7 @@ pub(crate) fn run_benchmark(
     tg: u32,
     reps: u32,
     warmup: u32,
+    cooldown_enabled: bool,
     output: Option<PathBuf>,
 ) -> Result<PathBuf> {
     if !model.is_file() {
@@ -170,7 +220,8 @@ pub(crate) fn run_benchmark(
             harness.display()
         ),
     );
-    let result = ProcessCommand::new(&harness)
+    let mut command = ProcessCommand::new(&harness);
+    command
         .arg(model)
         .args(["--mode", "text", "-p", pp, "-n"])
         .arg(tg.to_string())
@@ -178,7 +229,11 @@ pub(crate) fn run_benchmark(
         .arg(reps.to_string())
         .args(["-w"])
         .arg(warmup.to_string())
-        .arg("--telemetry")
+        .arg("--telemetry");
+    if cooldown_enabled {
+        command.arg("--cooldown");
+    }
+    let result = command
         .stderr(Stdio::inherit())
         .output()
         .with_context(|| format!("launching benchmark harness {}", harness.display()))?;
@@ -245,20 +300,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn formats_preflight_telemetry_duration() {
-        let workload_count = (parse_pp("128,256,512,1024,2048,4096,8192,16384")
+    fn formats_preflight_profile_duration_estimates() {
+        let prefill_count = parse_pp("128,256,512,1024,2048,4096,8192,16384")
             .unwrap()
-            .len()
-            + 1) as f64;
-        let apple_seconds = APPLE_TELEMETRY_IDLE_BASELINE_SECONDS
-            + workload_count
-                * (2.0 * TELEMETRY_WINDOW_SECONDS
-                    + APPLE_CONDITIONED_PHASES_PER_WORKLOAD * CONDITIONING_MINIMUM_WARMUP_SECONDS);
-        let portable_seconds = workload_count
-            * (TELEMETRY_WINDOW_SECONDS
-                + PORTABLE_CONDITIONED_PHASES_PER_WORKLOAD * CONDITIONING_MINIMUM_WARMUP_SECONDS);
-        assert_eq!(format_duration(apple_seconds), "2m 53s");
-        assert_eq!(format_duration(portable_seconds), "1m 39s");
+            .len();
+
+        let apple = benchmark_timing(prefill_count, true);
+        assert_eq!(format_duration(apple.scheduled_seconds), "2m 53s");
+        assert_eq!(format_duration(apple.cooldown_minimum_seconds()), "7m 33s");
+        assert_eq!(
+            format_duration(apple.cooldown_fallback_seconds()),
+            "16m 53s"
+        );
+        assert_eq!(format_duration(apple.cooldown_maximum_seconds()), "86m 53s");
+
+        let portable = benchmark_timing(prefill_count, false);
+        assert_eq!(format_duration(portable.scheduled_seconds), "1m 39s");
+        assert_eq!(
+            format_duration(portable.cooldown_minimum_seconds()),
+            "4m 39s"
+        );
+        assert_eq!(
+            format_duration(portable.cooldown_fallback_seconds()),
+            "10m 39s"
+        );
+        assert_eq!(
+            format_duration(portable.cooldown_maximum_seconds()),
+            "55m 39s"
+        );
     }
 }
 

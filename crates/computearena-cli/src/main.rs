@@ -97,7 +97,10 @@ enum Command {
         /// Warmup repetitions (not recorded).
         #[arg(short = 'w', long, default_value_t = DEFAULT_WARMUP_REPETITIONS)]
         warmup: u32,
-        /// Run without the benchmark confirmation prompt.
+        /// Enable adaptive thermal cooldowns before measured phases (can take substantially longer).
+        #[arg(long)]
+        cooldown: bool,
+        /// Run without prompts (warmup-only unless --cooldown is also passed).
         #[arg(short = 'y', long)]
         yes: bool,
         /// Write to this path instead of the local report directory.
@@ -163,6 +166,7 @@ fn execute(command: Command, paths: &Paths, harness: Option<PathBuf>, api_url: &
             tg,
             reps,
             warmup,
+            cooldown,
             yes,
             output,
         } => {
@@ -173,11 +177,23 @@ fn execute(command: Command, paths: &Paths, harness: Option<PathBuf>, api_url: &
                     None => return Ok(()),
                 },
             };
-            if !confirm_benchmark_run(&model, &pp, tg, reps, warmup, yes)? {
+            let Some(cooldown_enabled) =
+                confirm_benchmark_run(&model, &pp, tg, reps, warmup, cooldown, yes)?
+            else {
                 println!("Benchmark cancelled. Nothing was run.");
                 return Ok(());
-            }
-            run_benchmark(paths, harness, &model, &pp, tg, reps, warmup, output)?;
+            };
+            run_benchmark(
+                paths,
+                harness,
+                &model,
+                &pp,
+                tg,
+                reps,
+                warmup,
+                cooldown_enabled,
+                output,
+            )?;
             Ok(())
         }
         Command::List { json } => list_reports(paths, json),
@@ -264,17 +280,19 @@ fn interactive(paths: &Paths, harness: Option<PathBuf>, api_url: &str) -> Result
                 let Some(model) = prompt_model_path()? else {
                     continue;
                 };
-                if !confirm_benchmark_run(
+                let Some(cooldown_enabled) = confirm_benchmark_run(
                     &model,
                     DEFAULT_PREFILL_TOKENS,
                     DEFAULT_DECODE_TOKENS,
                     DEFAULT_REPETITIONS,
                     DEFAULT_WARMUP_REPETITIONS,
                     false,
-                )? {
+                    false,
+                )?
+                else {
                     println!("Benchmark cancelled. Nothing was run.");
                     continue;
-                }
+                };
                 if let Err(error) = run_benchmark(
                     paths,
                     harness.clone(),
@@ -283,6 +301,7 @@ fn interactive(paths: &Paths, harness: Option<PathBuf>, api_url: &str) -> Result
                     DEFAULT_DECODE_TOKENS,
                     DEFAULT_REPETITIONS,
                     DEFAULT_WARMUP_REPETITIONS,
+                    cooldown_enabled,
                     None,
                 ) {
                     eprintln!("{} {error:#}", ui.error("Benchmark failed:"));
@@ -623,10 +642,23 @@ mod tests {
     }
 
     #[test]
-    fn run_yes_flag_supports_non_interactive_execution() {
-        let cli =
-            Cli::try_parse_from(["basert-computearena", "run", "model.base", "--yes"]).unwrap();
-        assert!(matches!(cli.command, Some(Command::Run { yes: true, .. })));
+    fn run_flags_support_non_interactive_cooldown_execution() {
+        let cli = Cli::try_parse_from([
+            "basert-computearena",
+            "run",
+            "model.base",
+            "--cooldown",
+            "--yes",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Run {
+                cooldown: true,
+                yes: true,
+                ..
+            })
+        ));
     }
 
     #[test]

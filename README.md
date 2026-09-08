@@ -46,10 +46,11 @@ previous submissions while retaining the additional long-context measurements
 in their signed JSON.
 
 Before execution, the CLI shows the selected model, exact PP/TG workloads,
-warmup and recorded repetitions, platform telemetry behavior, device-load
-warning, and local report policy. It asks for confirmation before starting.
-Use `run --yes` for non-interactive automation; the plan is still printed, but
-the prompt is skipped.
+warmup and recorded repetitions, device-load warning, local report policy, and
+duration estimates for warmup-only and thermally conditioned runs. Thermal
+cooldown is opt-in: interactive runs ask which profile to use, while scripts
+can pass `run --cooldown`. Use `run --yes` for non-interactive automation; the
+plan is still printed and cooldown remains off unless `--cooldown` is present.
 
 Running without a subcommand opens the interactive menu. Login and submission
 are menu/CLI placeholders until the `computearena.ai` server API is available;
@@ -119,17 +120,22 @@ process-lifetime RSS high-water mark remains as a coarse fit indicator.
 
 ComputeArena invokes text benchmarks with `--telemetry`, which adds an optional
 `benchmark.telemetry` object using the nested `basert-telemetry/3` schema.
-The `basert-telemetry/3` protocol conditions every independent PP/TG phase
-before measurement. It establishes a stable idle baseline, waits for a
-ten-second stable window within the configured temperature, power, and
-utilization limits, then performs the requested warmups for at least three
-seconds. The adaptive wait is capped at three minutes; unavailable sensors use
-a recorded 30-second fallback. Recorded repetitions remain contiguous, with no
-cooldown or observer work inside their timing window.
+Workload-specific warmups always run for at least three seconds. Adaptive
+thermal cooldown is opt-in and is passed to the harness as `--cooldown`.
 
-The runtime-neutral `computearena-conditioning/1` object records the policy,
-baseline, actual wait, timeout/fallback result, temperature slope, and warmup
-work for headline performance and every diagnostic replay. Older signed
+With cooldown enabled, `basert-telemetry/3` conditions every independent PP/TG
+phase before measurement. It establishes a stable idle baseline and waits for
+a ten-second stable window within the configured temperature, power, and
+utilization limits. The adaptive wait is capped at three minutes; unavailable
+sensors use a recorded 30-second fallback. With cooldown disabled, those idle
+waits are skipped while warmups and all telemetry measurements remain enabled.
+Recorded repetitions stay contiguous, with no observer work or cooldown gaps
+inside their timing window.
+
+The runtime-neutral `computearena-conditioning/1` object records the selected
+mode, policy, baseline, actual wait, timeout/fallback result, temperature slope,
+and warmup work for headline performance and every diagnostic replay. Opted-out
+waits are explicit (`method: disabled`, `reason: user_opt_out`). Older signed
 `basert-telemetry/2` reports remain readable and submittable.
 
 Headline throughput samples remain uninstrumented: power-state, temperature,
