@@ -1,7 +1,9 @@
 use crate::config::{
-    APPLE_TELEMETRY_IDLE_BASELINE_SECONDS, APPLE_TELEMETRY_SECONDS_PER_WORKLOAD,
-    DEVELOPMENT_HARNESS_PATHS, LEGACY_HARNESS_NAME, MEMORY_TELEMETRY_SECONDS_PER_WORKLOAD,
-    PRIMARY_HARNESS_NAME,
+    APPLE_CONDITIONED_PHASES_PER_WORKLOAD, APPLE_TELEMETRY_IDLE_BASELINE_SECONDS,
+    CONDITIONING_FALLBACK_WAIT_SECONDS, CONDITIONING_MAXIMUM_WAIT_SECONDS,
+    CONDITIONING_MINIMUM_WARMUP_SECONDS, CONDITIONING_STABLE_WINDOW_SECONDS,
+    DEVELOPMENT_HARNESS_PATHS, LEGACY_HARNESS_NAME, PORTABLE_CONDITIONED_PHASES_PER_WORKLOAD,
+    PRIMARY_HARNESS_NAME, TELEMETRY_WINDOW_SECONDS,
 };
 use crate::models::{compact_home_path, inspect_model};
 use crate::protocol::{HARNESS_SCHEMA, REPORT_SCHEMA, RUNTIME_NAME, TELEMETRY_SCHEMA};
@@ -49,33 +51,52 @@ pub(crate) fn confirm_benchmark_run(
     );
     println!("  {} TG{tg}", ui.neutral("Decode:"));
     println!(
-        "  {} {warmup} warmup {} + {reps} recorded {} per throughput workload",
+        "  {} {warmup} requested warmup {} + {reps} recorded {} per throughput workload",
         ui.neutral("Sampling:"),
         repetition_label(warmup),
         repetition_label(reps)
+    );
+    println!(
+        "            Warmup runs for at least {} before each measured phase",
+        format_duration(CONDITIONING_MINIMUM_WARMUP_SECONDS)
     );
     println!(
         "  {} Synthetic token sequences; this does not test model accuracy",
         ui.neutral("Input:")
     );
 
-    if cfg!(target_os = "macos") {
-        let telemetry_seconds = APPLE_TELEMETRY_IDLE_BASELINE_SECONDS
-            + APPLE_TELEMETRY_SECONDS_PER_WORKLOAD * (prefill_tokens.len() + 1) as f64;
-        println!(
-            "  {} Separate energy and combined memory/temperature replays add about {} or more",
-            ui.neutral("Telemetry:"),
-            format_duration(telemetry_seconds)
-        );
+    let workload_count = (prefill_tokens.len() + 1) as f64;
+    let conditioned_phases = if cfg!(target_os = "macos") {
+        APPLE_CONDITIONED_PHASES_PER_WORKLOAD
     } else {
-        let telemetry_seconds =
-            MEMORY_TELEMETRY_SECONDS_PER_WORKLOAD * (prefill_tokens.len() + 1) as f64;
-        println!(
-            "  {} Separate process-memory replays add about {} or more; NVIDIA/ROCm sensors remain basic",
-            ui.neutral("Telemetry:"),
-            format_duration(telemetry_seconds)
-        );
-    }
+        PORTABLE_CONDITIONED_PHASES_PER_WORKLOAD
+    };
+    let telemetry_seconds = if cfg!(target_os = "macos") {
+        APPLE_TELEMETRY_IDLE_BASELINE_SECONDS
+            + workload_count
+                * (2.0 * TELEMETRY_WINDOW_SECONDS
+                    + APPLE_CONDITIONED_PHASES_PER_WORKLOAD * CONDITIONING_MINIMUM_WARMUP_SECONDS)
+    } else {
+        workload_count
+            * (TELEMETRY_WINDOW_SECONDS
+                + PORTABLE_CONDITIONED_PHASES_PER_WORKLOAD * CONDITIONING_MINIMUM_WARMUP_SECONDS)
+    };
+    println!(
+        "  {} Diagnostic measurement and warmup windows add at least {}",
+        ui.neutral("Telemetry:"),
+        format_duration(telemetry_seconds)
+    );
+    println!(
+        "  {} {:.0}s stable idle window before each of {:.0} phases; up to {} per phase when hot",
+        ui.neutral("Cooldown:"),
+        CONDITIONING_STABLE_WINDOW_SECONDS,
+        workload_count * conditioned_phases + if cfg!(target_os = "macos") { 1.0 } else { 0.0 },
+        format_duration(CONDITIONING_MAXIMUM_WAIT_SECONDS)
+    );
+    println!(
+        "            Systems without readable sensors use a {} fixed fallback per phase",
+        format_duration(CONDITIONING_FALLBACK_WAIT_SECONDS)
+    );
     println!(
         "  {} Signed JSON report saved locally",
         ui.neutral("Output:")
@@ -224,17 +245,19 @@ mod tests {
 
     #[test]
     fn formats_preflight_telemetry_duration() {
-        let workload_count = parse_pp("128,256,512,1024,2048,4096,8192,16384")
+        let workload_count = (parse_pp("128,256,512,1024,2048,4096,8192,16384")
             .unwrap()
             .len()
-            + 1;
-        let seconds = APPLE_TELEMETRY_IDLE_BASELINE_SECONDS
-            + APPLE_TELEMETRY_SECONDS_PER_WORKLOAD * workload_count as f64;
-        assert_eq!(format_duration(seconds), "1m 32s");
-        assert_eq!(
-            format_duration(MEMORY_TELEMETRY_SECONDS_PER_WORKLOAD * workload_count as f64),
-            "45s"
-        );
+            + 1) as f64;
+        let apple_seconds = APPLE_TELEMETRY_IDLE_BASELINE_SECONDS
+            + workload_count
+                * (2.0 * TELEMETRY_WINDOW_SECONDS
+                    + APPLE_CONDITIONED_PHASES_PER_WORKLOAD * CONDITIONING_MINIMUM_WARMUP_SECONDS);
+        let portable_seconds = workload_count
+            * (TELEMETRY_WINDOW_SECONDS
+                + PORTABLE_CONDITIONED_PHASES_PER_WORKLOAD * CONDITIONING_MINIMUM_WARMUP_SECONDS);
+        assert_eq!(format_duration(apple_seconds), "2m 53s");
+        assert_eq!(format_duration(portable_seconds), "1m 39s");
     }
 }
 

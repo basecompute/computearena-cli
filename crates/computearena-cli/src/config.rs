@@ -7,13 +7,17 @@ pub(crate) const DEFAULT_DECODE_TOKENS: u32 = 128;
 pub(crate) const DEFAULT_REPETITIONS: u32 = 3;
 pub(crate) const DEFAULT_WARMUP_REPETITIONS: u32 = 3;
 
-// User-facing estimate for the current Apple harness protocol: a fixed idle
-// baseline plus separate five-second energy and combined memory/temperature
-// windows for each prefill workload and decode. Keep synchronized with
-// bench_multidevice.cpp.
+// User-facing constants for the public conditioning protocol. The C++ harness
+// remains authoritative; keep these values synchronized with
+// benchmark_conditioning.h and bench_multidevice.cpp.
+pub(crate) const TELEMETRY_WINDOW_SECONDS: f64 = 5.0;
 pub(crate) const APPLE_TELEMETRY_IDLE_BASELINE_SECONDS: f64 = 1.5;
-pub(crate) const APPLE_TELEMETRY_SECONDS_PER_WORKLOAD: f64 = 10.0;
-pub(crate) const MEMORY_TELEMETRY_SECONDS_PER_WORKLOAD: f64 = 5.0;
+pub(crate) const CONDITIONING_MINIMUM_WARMUP_SECONDS: f64 = 3.0;
+pub(crate) const CONDITIONING_STABLE_WINDOW_SECONDS: f64 = 10.0;
+pub(crate) const CONDITIONING_MAXIMUM_WAIT_SECONDS: f64 = 180.0;
+pub(crate) const CONDITIONING_FALLBACK_WAIT_SECONDS: f64 = 30.0;
+pub(crate) const APPLE_CONDITIONED_PHASES_PER_WORKLOAD: f64 = 3.0;
+pub(crate) const PORTABLE_CONDITIONED_PHASES_PER_WORKLOAD: f64 = 2.0;
 
 pub(crate) const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const AUTH_HTTP_TIMEOUT: Duration = Duration::from_secs(15);

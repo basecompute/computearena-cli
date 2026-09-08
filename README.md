@@ -114,8 +114,21 @@ are captured beside the throughput measurements. A separately labelled
 process-lifetime RSS high-water mark remains as a coarse fit indicator.
 
 ComputeArena invokes text benchmarks with `--telemetry`, which adds an optional
-`benchmark.telemetry` object using the nested `basert-telemetry/2` schema. The
-headline throughput samples remain uninstrumented: power-state, temperature,
+`benchmark.telemetry` object using the nested `basert-telemetry/3` schema.
+The `basert-telemetry/3` protocol conditions every independent PP/TG phase
+before measurement. It establishes a stable idle baseline, waits for a
+ten-second stable window within the configured temperature, power, and
+utilization limits, then performs the requested warmups for at least three
+seconds. The adaptive wait is capped at three minutes; unavailable sensors use
+a recorded 30-second fallback. Recorded repetitions remain contiguous, with no
+cooldown or observer work inside their timing window.
+
+The runtime-neutral `computearena-conditioning/1` object records the policy,
+baseline, actual wait, timeout/fallback result, temperature slope, and warmup
+work for headline performance and every diagnostic replay. Older signed
+`basert-telemetry/2` reports remain readable and submittable.
+
+Headline throughput samples remain uninstrumented: power-state, temperature,
 vendor power, cumulative energy, and peak-RSS snapshots are read only before
 or after those timers. The snapshots also record BaseRT's model-memory
 accounting and, where available, accelerator memory use. Every diagnostic
