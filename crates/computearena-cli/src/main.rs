@@ -593,7 +593,11 @@ mod tests {
 
     #[test]
     fn invalid_prompt_sweep_is_rejected() {
-        assert!(validate_pp("128,512").is_ok());
+        assert_eq!(
+            DEFAULT_PREFILL_TOKENS,
+            "128,256,512,1024,2048,4096,8192,16384"
+        );
+        assert!(validate_pp(DEFAULT_PREFILL_TOKENS).is_ok());
         assert!(validate_pp("128,0").is_err());
         assert!(validate_pp("128,nope").is_err());
     }

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 pub(crate) const DEFAULT_API_URL: &str = "https://computearena.ai/api/v1";
 
-pub(crate) const DEFAULT_PREFILL_TOKENS: &str = "128,256,512,1024,2048";
+pub(crate) const DEFAULT_PREFILL_TOKENS: &str = "128,256,512,1024,2048,4096,8192,16384";
 pub(crate) const DEFAULT_DECODE_TOKENS: u32 = 128;
 pub(crate) const DEFAULT_REPETITIONS: u32 = 3;
 pub(crate) const DEFAULT_WARMUP_REPETITIONS: u32 = 3;

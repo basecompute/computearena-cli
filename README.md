@@ -38,6 +38,13 @@ basert computearena inspect <run-id-or-path>
 basert computearena verify <run-id-or-path>
 ```
 
+The default text workload measures prefill at powers of two from PP128 through
+PP16384 (`128,256,512,1024,2048,4096,8192,16384`) and decode at TG128. Use
+`run --pp <comma-separated-values> --tg <tokens>` to override the sweep. The
+public headline remains PP512/TG128 so new reports stay comparable with
+previous submissions while retaining the additional long-context measurements
+in their signed JSON.
+
 Running without a subcommand opens the interactive menu. Login and submission
 are menu/CLI placeholders until the `computearena.ai` server API is available;
 benchmark creation and verification do not require a network connection or a
