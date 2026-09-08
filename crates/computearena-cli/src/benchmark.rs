@@ -82,7 +82,7 @@ pub(crate) fn confirm_benchmark_run(
                 + PORTABLE_CONDITIONED_PHASES_PER_WORKLOAD * CONDITIONING_MINIMUM_WARMUP_SECONDS)
     };
     println!(
-        "  {} Diagnostic measurement and warmup windows add at least {}",
+        "  {} Measurement and warmup windows add at least {}",
         ui.neutral("Telemetry:"),
         format_duration(telemetry_seconds)
     );
@@ -97,6 +97,7 @@ pub(crate) fn confirm_benchmark_run(
         "            Systems without readable sensors use a {} fixed fallback per phase",
         format_duration(CONDITIONING_FALLBACK_WAIT_SECONDS)
     );
+    println!("            Cooldown, model loading, and recorded repetitions are additional");
     println!(
         "  {} Signed JSON report saved locally",
         ui.neutral("Output:")
