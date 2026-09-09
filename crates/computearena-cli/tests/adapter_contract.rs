@@ -2,6 +2,35 @@
 #![cfg(unix)]
 
 #[test]
+fn telemetry_is_collected_for_the_child_summarized_and_signature_protected() {
+    let f = Fixture::new("llama-cpp");
+    f.install(&f.result(), "/bin/sleep 1.2");
+    let mut report = f.signed();
+    let telemetry = &report["benchmark"]["telemetry"];
+    assert_eq!(telemetry["schema"], "computearena-telemetry/1");
+    assert_eq!(telemetry["observer"]["requested_interval_ms"], 1000);
+    assert!(
+        telemetry["process_memory"]["statistics"]["sample_count"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+    assert_eq!(
+        report["benchmark"]["memory"]["process_peak_rss_mb"],
+        telemetry["process_memory"]["statistics"]["peak"]
+    );
+    assert_eq!(telemetry["energy"]["available"], false);
+    assert_eq!(telemetry["per_workload"]["available"], false);
+    success(&f.verify());
+    if let Some(path) = std::env::var_os("COMPUTEARENA_TELEMETRY_TEST_REPORT") {
+        fs::copy(&f.report, path).unwrap();
+    }
+    report["benchmark"]["telemetry"]["observer"]["requested_interval_ms"] = json!(25);
+    fs::write(&f.report, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    failure(&f.verify(), "signature verification failed");
+}
+
+#[test]
 fn plans_share_layout_and_identify_full_binary_paths_before_execution() {
     for runtime in RUNTIMES {
         let f = Fixture::new(runtime);
@@ -402,8 +431,12 @@ fn runtimes_agree_on_samples_units_and_rates_without_faking_protocol_equivalence
     assert_eq!(b["benchmark"]["metrics"]["pp512_t_s"], 3840.0);
     assert_eq!(b["benchmark"]["protocol"]["warmup"], "runtime_native");
     assert_eq!(b["benchmark"]["params"]["decode_context_tokens"], 0);
-    assert_eq!(b["benchmark"]["protocol"]["telemetry_available"], false);
-    assert!(b["benchmark"].get("telemetry").is_none());
+    assert_eq!(b["benchmark"]["protocol"]["telemetry_available"], true);
+    assert_eq!(
+        b["benchmark"]["telemetry"]["scope"],
+        "whole_runtime_process"
+    );
+    assert!(b["benchmark"]["telemetry"].get("memory_replay").is_none());
     assert!(a["benchmark"].get("telemetry").is_some());
     for (fixture, report) in [(&base, a), (&llama, b)] {
         assert_eq!(
@@ -635,6 +668,7 @@ fn server(statuses: Vec<u16>) -> (String, thread::JoinHandle<Vec<Value>>) {
                     Err(e) => panic!("expected upload before deadline: {e}"),
                 }
             };
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();

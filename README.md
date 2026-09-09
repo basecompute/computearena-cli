@@ -75,8 +75,9 @@ computearena llama-cpp run /path/to/model.gguf
 The same menus, report commands, login and submission flow work for both runtimes.
 Starting `computearena` without arguments offers a runtime chooser.
 The llama.cpp adapter asks for a GGUF file; it does not scan the disk.
-Its first version uses native warmup, and does not collect extra telemetry or
-support adaptive cooldown. The benchmark plan explains these differences.
+It uses native warmup and automatically collects whole-run process memory,
+available temperature sensors, and power/device snapshots. Adaptive cooldown
+is not yet supported. See [telemetry scope and limitations](docs/telemetry.md).
 Positive `--warmup` values enable native warmup; they do not set its repetition count.
 
 Runtime binary checksums are recorded offline and checked by the server at

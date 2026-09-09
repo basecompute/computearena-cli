@@ -151,7 +151,7 @@ pub(crate) fn print_benchmark_plan(runtime: Runtime, r: &BenchmarkRequest<'_>) -
                 ui.neutral("Context:")
             );
             println!(
-                "  {} Not collected yet by this adapter",
+                "  {} Automatic process memory, temperature sensors, and power/device snapshots where available (whole run; 1-second sampling)",
                 ui.neutral("Telemetry:")
             );
         }

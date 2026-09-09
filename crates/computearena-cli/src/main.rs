@@ -8,6 +8,7 @@ mod models;
 mod protocol;
 mod reports;
 mod submission;
+mod telemetry;
 mod theme;
 mod ui;
 

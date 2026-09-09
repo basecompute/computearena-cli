@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 pub(crate) struct LlamaCppAdapter;
 const DOWNLOAD: &str = "https://github.com/ggml-org/llama.cpp/releases";
@@ -123,10 +123,10 @@ impl RuntimeAdapter for LlamaCppAdapter {
         if r.warmup == 0 {
             command.arg("--no-warmup");
         }
-        let output = command
-            .stderr(Stdio::inherit())
-            .output()
-            .context("running llama.cpp benchmark")?;
+        let ui = TerminalUi::detect();
+        println!("{}", ui.neutral("Telemetry: observing process memory and available device sensors (whole run, 1-second sampling)."));
+        let (output, telemetry) =
+            crate::telemetry::run_observed(&mut command).context("running llama.cpp benchmark")?;
         if !output.status.success() {
             bail!(
                 "llama.cpp exited with {}. See its output above; no report was signed.",
@@ -136,6 +136,22 @@ impl RuntimeAdapter for LlamaCppAdapter {
         let rows: Value = serde_json::from_slice(&output.stdout)
             .context("llama.cpp did not return benchmark JSON")?;
         let mut result = normalize(&rows, r)?;
+        result.benchmark["protocol"]["telemetry_available"] =
+            json!(telemetry.get("observer").is_some());
+        result.benchmark["protocol"]["measurement_observer"] =
+            json!("external_whole_process_sampler");
+        if let Some(peak) = telemetry
+            .pointer("/process_memory/statistics/peak")
+            .and_then(Value::as_f64)
+        {
+            result.benchmark["memory"] = json!({"process_peak_rss_mb":peak,
+                "measurement_relation":"concurrent_observer","scope":"whole_runtime_process",
+                "unit":"MiB","note":"Observed sampled peak, including loading and warmup; not a kernel high-water mark"});
+            println!("{}", ui.neutral(format!("Telemetry: observed peak process memory {peak:.0} MiB (includes loading and warmup).")));
+        } else {
+            println!("{}", ui.neutral("Telemetry: process memory unavailable; see sensor coverage in the saved report."));
+        }
+        result.benchmark["telemetry"] = telemetry;
         let mut model = super::gguf::inspect(r.model)?;
         model["runtime_description"] = result.model["runtime_description"].clone();
         model["parameters"] = result.model["parameters"].clone();
