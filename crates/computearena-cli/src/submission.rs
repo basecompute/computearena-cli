@@ -270,6 +270,19 @@ pub(crate) fn submit_reports(
                             "Benchmark submitted".to_string()
                         },
                     );
+                    if let Ok(response) = serde_json::from_str::<Value>(&body) {
+                        if let Some(provenance) = response.get("runtime_provenance") {
+                            if let Some(message) = provenance.get("message").and_then(Value::as_str)
+                            {
+                                println!("{}", ui.neutral(message));
+                            }
+                            if let Some(url) =
+                                provenance.get("download_url").and_then(Value::as_str)
+                            {
+                                println!("{}", ui.neutral(format!("Official downloads: {url}")));
+                            }
+                        }
+                    }
                     outcomes.push(SubmissionOutcome {
                         label,
                         kind: if duplicate {

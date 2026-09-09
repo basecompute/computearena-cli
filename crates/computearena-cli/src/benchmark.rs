@@ -1,10 +1,10 @@
+use crate::adapters::{file_sha256, BenchmarkRequest, Runtime};
 use crate::config::{
     APPLE_CONDITIONED_PHASES_PER_WORKLOAD, APPLE_TELEMETRY_IDLE_BASELINE_SECONDS,
     BASERT_HARNESS_NAME, CONDITIONING_FALLBACK_WAIT_SECONDS, CONDITIONING_MAXIMUM_WAIT_SECONDS,
     CONDITIONING_MINIMUM_WARMUP_SECONDS, CONDITIONING_STABLE_WINDOW_SECONDS,
     PORTABLE_CONDITIONED_PHASES_PER_WORKLOAD, TELEMETRY_WINDOW_SECONDS,
 };
-use crate::models::{compact_home_path, inspect_model};
 use crate::protocol::{HARNESS_SCHEMA, REPORT_SCHEMA, RUNTIME_NAME, TELEMETRY_SCHEMA};
 use crate::reports::b64_encode;
 use crate::reports::{
@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, Stdio};
+use std::process::Command as ProcessCommand;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy, Debug)]
@@ -100,6 +100,117 @@ fn benchmark_timing(prefill_count: usize, apple: bool) -> BenchmarkTiming {
     }
 }
 
+pub(crate) fn print_benchmark_plan(runtime: Runtime, r: &BenchmarkRequest<'_>) -> Result<()> {
+    let ui = TerminalUi::detect();
+    let prefill = parse_pp(r.pp)?
+        .iter()
+        .map(|n| format!("PP{n}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    ui.section("Benchmark plan");
+    println!("  {} {}", ui.neutral("Runtime:"), runtime.adapter().name());
+    println!("  {} {}", ui.neutral("Model:"), r.model.display());
+    println!("  {} {prefill}", ui.neutral("Prefill:"));
+    println!("  {} TG{}", ui.neutral("Decode:"), r.tg);
+    match runtime {
+        Runtime::Basert => {
+            println!(
+                "  {} {} requested warmup {} + {} recorded {} per throughput workload",
+                ui.neutral("Sampling:"),
+                r.warmup,
+                repetition_label(r.warmup),
+                r.reps,
+                repetition_label(r.reps)
+            );
+            println!(
+                "            Warmup runs for at least {} before each measured phase",
+                format_duration(CONDITIONING_MINIMUM_WARMUP_SECONDS)
+            );
+            println!(
+                "  {} Collected by the BaseRT benchmark harness",
+                ui.neutral("Telemetry:")
+            );
+        }
+        Runtime::LlamaCpp => {
+            println!(
+                "  {} {} + {} recorded {} per throughput workload",
+                ui.neutral("Sampling:"),
+                if r.warmup == 0 {
+                    "No warmup"
+                } else {
+                    "Runtime-native warmup"
+                },
+                r.reps,
+                repetition_label(r.reps)
+            );
+            if r.warmup > 0 {
+                println!("            llama.cpp controls warmup; --warmup is not a repetition count for this runtime.");
+            }
+            println!(
+                "  {} Independent PP and TG tests; initial context depth 0",
+                ui.neutral("Context:")
+            );
+            println!(
+                "  {} Automatic process memory, temperature sensors, and power/device snapshots where available (whole run; 1-second sampling)",
+                ui.neutral("Telemetry:")
+            );
+        }
+    }
+    println!(
+        "  {} Synthetic token sequences; this does not test model accuracy",
+        ui.neutral("Input:")
+    );
+    println!(
+        "  {} Signed JSON report saved locally",
+        ui.neutral("Output:")
+    );
+    println!("          Nothing is uploaded automatically");
+    println!();
+    println!(
+        "{} This creates sustained CPU/GPU load and can consume substantial memory.",
+        ui.warning("!")
+    );
+    println!("  The device may become hot during the benchmark.");
+    println!("  For comparable results, connect external power, disable power-saving mode,");
+    println!("  and close demanding apps.");
+    Ok(())
+}
+
+/// Resolve once before confirmation and pass these exact paths to execution.
+pub(crate) fn identify_benchmark_paths(
+    runtime: Runtime,
+    override_path: Option<PathBuf>,
+    model: &Path,
+) -> Result<(PathBuf, PathBuf)> {
+    let expand = |path: &Path| -> Result<PathBuf> {
+        if let Some(rest) = path.to_str().and_then(|p| p.strip_prefix("~/")) {
+            Ok(dirs::home_dir()
+                .context("cannot locate home directory")?
+                .join(rest))
+        } else {
+            Ok(path.to_path_buf())
+        }
+    };
+    let model = fs::canonicalize(expand(model)?).context("resolving model path")?;
+    let override_path = override_path.map(|p| expand(&p)).transpose()?;
+    let executable = fs::canonicalize(runtime.adapter().discover(override_path)?)
+        .context("resolving runtime executable path")?;
+    let ui = TerminalUi::detect();
+    ui.section("Selected binaries");
+    println!(
+        "  {} {}",
+        ui.neutral("ComputeArena:"),
+        std::env::current_exe()?.display()
+    );
+    println!(
+        "  {} {}",
+        ui.neutral(format!("{}:", runtime.adapter().name())),
+        executable.display()
+    );
+    println!("  {} Compatibility is checked before execution; release provenance is checked at submission.", ui.muted("Note:"));
+    Ok((executable, model))
+}
+
 pub(crate) fn confirm_benchmark_run(
     model: &Path,
     pp: &str,
@@ -118,47 +229,17 @@ pub(crate) fn confirm_benchmark_run(
     }
 
     let ui = TerminalUi::detect();
-    ui.section("Benchmark plan");
-    println!("  {} {}", ui.neutral("Model:"), compact_home_path(model));
-    println!(
-        "  {} {}",
-        ui.neutral("Prefill:"),
-        prefill_tokens
-            .iter()
-            .map(|tokens| format!("PP{tokens}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    println!("  {} TG{tg}", ui.neutral("Decode:"));
-    println!(
-        "  {} {warmup} requested warmup {} + {reps} recorded {} per throughput workload",
-        ui.neutral("Sampling:"),
-        repetition_label(warmup),
-        repetition_label(reps)
-    );
-    println!(
-        "            Warmup runs for at least {} before each measured phase",
-        format_duration(CONDITIONING_MINIMUM_WARMUP_SECONDS)
-    );
-    println!(
-        "  {} Synthetic token sequences; this does not test model accuracy",
-        ui.neutral("Input:")
-    );
-
-    println!(
-        "  {} Signed JSON report saved locally",
-        ui.neutral("Output:")
-    );
-    println!("          Nothing is uploaded automatically");
-
-    println!();
-    println!(
-        "{} This creates sustained CPU/GPU load and can consume substantial memory.",
-        ui.warning("!")
-    );
-    println!("  The device may become hot during the benchmark.");
-    println!("  For comparable results, connect external power, disable power-saving mode,");
-    println!("  and close demanding apps.");
+    print_benchmark_plan(
+        Runtime::Basert,
+        &BenchmarkRequest {
+            model,
+            pp,
+            tg,
+            reps,
+            warmup,
+            cooldown: cooldown_requested,
+        },
+    )?;
 
     if !skip_confirmation && !io::stdin().is_terminal() {
         bail!("benchmark confirmation requires a terminal; pass --yes to run non-interactively");
@@ -183,6 +264,86 @@ pub(crate) fn confirm_benchmark_run(
     }
     if prompt_yes_no("Start this benchmark?", false)? {
         Ok(Some(profile.cooldown_enabled()))
+    } else {
+        Ok(None)
+    }
+}
+
+pub(crate) fn confirm_llama_profile(r: &BenchmarkRequest<'_>, yes: bool) -> Result<Option<bool>> {
+    let ui = TerminalUi::detect();
+    print_benchmark_plan(Runtime::LlamaCpp, r)?;
+    let count = (parse_pp(r.pp)?.len() + 1) as f64;
+    let standard = if r.warmup == 0 {
+        "Standard — no warmup"
+    } else {
+        "Standard — native warmup"
+    };
+    println!();
+    println!("{}", ui.brand_bold("Run profile"));
+    println!(
+        "  {}  {} {}",
+        ui.strong("1"),
+        ui.strong(standard),
+        ui.neutral("(default)")
+    );
+    println!(
+        "     {}",
+        ui.accent_bold("No cooldown waits; total runtime depends on your model and device")
+    );
+    println!();
+    println!(
+        "  {}  {}",
+        ui.strong("2"),
+        ui.strong("Thermally controlled")
+    );
+    println!(
+        "     {}",
+        ui.accent_bold(format!(
+            "Adds approximately {}–{} of cooldown waits",
+            format_duration(count * CONDITIONING_STABLE_WINDOW_SECONDS),
+            format_duration(count * CONDITIONING_MAXIMUM_WAIT_SECONDS)
+        ))
+    );
+    println!(
+        "     {}",
+        ui.muted(format!(
+            "Without usable die-temperature sensors: about {} of timed rests",
+            format_duration(count * CONDITIONING_FALLBACK_WAIT_SECONDS)
+        ))
+    );
+    println!(
+        "     {}",
+        ui.muted("Runs each PP size and TG separately; reloads the model after each cooldown.")
+    );
+    println!(
+        "     {}",
+        ui.muted(
+            "Waits precede loading and native warmup, not the measured phase inside llama.cpp."
+        )
+    );
+    println!("  {}",ui.muted("Total time = loading + native warmup + recorded work + the waits above; no calibrated total estimate yet."));
+    if !yes && !io::stdin().is_terminal() {
+        bail!("benchmark confirmation requires a terminal; pass --yes to run non-interactively");
+    }
+    let selected = if r.cooldown || yes {
+        BenchmarkProfile::from_cooldown(r.cooldown)
+    } else {
+        prompt_benchmark_profile()?
+    };
+    println!(
+        "{} {}",
+        ui.success("✓"),
+        ui.strong(format!(
+            "Selected: {}",
+            if selected.cooldown_enabled() {
+                "Thermally controlled"
+            } else {
+                standard
+            }
+        ))
+    );
+    if yes || prompt_yes_no("Start this benchmark?", false)? {
+        Ok(Some(selected.cooldown_enabled()))
     } else {
         Ok(None)
     }
@@ -287,6 +448,7 @@ fn repetition_label(count: u32) -> &'static str {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_benchmark(
+    runtime: Runtime,
     paths: &Paths,
     harness_override: Option<PathBuf>,
     model: &Path,
@@ -306,48 +468,35 @@ pub(crate) fn run_benchmark(
     }
 
     paths.prepare()?;
-    let harness = resolve_harness(harness_override)?;
+    let adapter = runtime.adapter();
+    let harness = adapter.discover(harness_override)?;
     let ui = TerminalUi::detect();
     let checking_started = start_activity(
         ui,
-        format!(
-            "Checking BaseRT harness compatibility with {}…",
-            harness.display()
-        ),
+        format!("Checking runtime compatibility with {}…", harness.display()),
     );
-    validate_harness_descriptor(&harness)?;
+    let binary_sha256 = file_sha256(&harness)?;
+    let descriptor = adapter.probe(&harness)?;
     finish_activity(ui, checking_started, "Benchmark harness is compatible");
     let benchmark_started = start_activity(
         ui,
-        format!(
-            "Running the BaseRT benchmark and hardware telemetry with {}…",
-            harness.display()
-        ),
+        format!("Running the benchmark with {}…", harness.display()),
     );
-    let mut command = ProcessCommand::new(&harness);
-    command
-        .arg("run")
-        .arg(model)
-        .args(["--mode", "text", "-p", pp, "-n"])
-        .arg(tg.to_string())
-        .args(["-r"])
-        .arg(reps.to_string())
-        .args(["-w"])
-        .arg(warmup.to_string())
-        .arg("--telemetry");
-    if cooldown_enabled {
-        command.arg("--cooldown");
+    let result = adapter.execute(
+        &harness,
+        &BenchmarkRequest {
+            model,
+            pp,
+            tg,
+            reps,
+            warmup,
+            cooldown: cooldown_enabled,
+        },
+    )?;
+    if file_sha256(&harness)? != binary_sha256 {
+        bail!("The runtime executable changed during the benchmark. Run it again with a stable installation.");
     }
-    let result = command
-        .stderr(Stdio::inherit())
-        .output()
-        .with_context(|| format!("launching benchmark harness {}", harness.display()))?;
-    if !result.status.success() {
-        bail!("benchmark harness exited with {}", result.status);
-    }
-    let benchmark: Value = serde_json::from_slice(&result.stdout)
-        .context("benchmark harness did not return one valid JSON object")?;
-    validate_harness_result(&benchmark)?;
+    let benchmark = result.benchmark;
     finish_activity(ui, benchmark_started, "Benchmark measurements complete");
 
     let finalizing_started = start_activity(ui, "Reading model metadata and signing the report…");
@@ -356,7 +505,7 @@ pub(crate) fn run_benchmark(
     let public_bytes = public.to_bytes();
     let key_id = sha256_hex(&public_bytes);
     let run_id = random_id();
-    let model_metadata = inspect_model(model)?;
+    let model_metadata = result.model;
 
     // Intentionally omit the user's account and local model path: a benchmark
     // can be created offline and attached to an authenticated account later.
@@ -365,8 +514,15 @@ pub(crate) fn run_benchmark(
         "run_id": run_id,
         "created_at_unix_ms": unix_ms(),
         "runtime": {
-            "name": RUNTIME_NAME,
-            "computearena_version": env!("CARGO_PKG_VERSION")
+            "name": adapter.name(),
+            "computearena_version": env!("CARGO_PKG_VERSION"),
+            "binary": {
+                "sha256": binary_sha256,
+                "os": std::env::consts::OS,
+                "arch": std::env::consts::ARCH,
+                "version": benchmark.get("runtime_version"),
+                "descriptor": descriptor
+            }
         },
         "installation": {
             "key_id": key_id,
@@ -384,6 +540,14 @@ pub(crate) fn run_benchmark(
     println!("Saved signed benchmark: {}", path.display());
     println!("Run ID: {run_id}");
     println!("Report SHA-256: {digest}");
+    if runtime == Runtime::LlamaCpp {
+        if let Err(error) = crate::recent_gguf::remember(paths, model) {
+            eprintln!(
+                "{} Report saved, but could not update recent GGUF files: {error:#}",
+                ui.warning("!")
+            );
+        }
+    }
     Ok(path)
 }
 
@@ -457,7 +621,7 @@ fn validate_duration_samples(value: &Value, token_key: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_harness_descriptor(path: &Path) -> Result<()> {
+pub(crate) fn validate_harness_descriptor(path: &Path) -> Result<()> {
     let output = ProcessCommand::new(path)
         .args(["describe", "--json"])
         .output()
@@ -483,7 +647,7 @@ fn validate_harness_descriptor(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn resolve_harness(override_path: Option<PathBuf>) -> Result<PathBuf> {
+pub(crate) fn resolve_harness(override_path: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = override_path {
         return executable_path(path);
     }
@@ -502,7 +666,7 @@ fn resolve_harness(override_path: Option<PathBuf>) -> Result<PathBuf> {
     })
 }
 
-fn executable_on_path(name: &str) -> Option<PathBuf> {
+pub(crate) fn executable_on_path(name: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|path| {
         std::env::split_paths(&path)
             .map(|directory| directory.join(name))
@@ -510,7 +674,7 @@ fn executable_on_path(name: &str) -> Option<PathBuf> {
     })
 }
 
-fn executable_path(path: PathBuf) -> Result<PathBuf> {
+pub(crate) fn executable_path(path: PathBuf) -> Result<PathBuf> {
     if path.components().count() == 1 {
         return executable_on_path(path.to_string_lossy().as_ref()).with_context(|| {
             format!(

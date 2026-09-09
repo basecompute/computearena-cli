@@ -296,7 +296,8 @@ pub(crate) fn list_reports(paths: &Paths, as_json: bool) -> Result<()> {
             report["backend"].as_str().unwrap_or("unknown backend")
         );
         println!(
-            "     Runtime: BaseRT {} | {} | {}",
+            "     Runtime: {} {} | {} | {}",
+            report["runtime"].as_str().unwrap_or("basert"),
             report["runtime_version"].as_str().unwrap_or("unknown"),
             report["architecture"]
                 .as_str()
@@ -399,6 +400,7 @@ pub(crate) fn report_summaries(paths: &Paths) -> Result<Vec<Value>> {
                     "created_at": format_unix_ms(created_at_unix_ms),
                     "device": value.pointer("/benchmark/chip").and_then(Value::as_str),
                     "backend": value.pointer("/benchmark/backend").and_then(Value::as_str),
+                    "runtime": value.pointer("/runtime/name").and_then(Value::as_str),
                     "runtime_version": value.pointer("/benchmark/runtime_version").and_then(Value::as_str)
                         .or_else(|| value.pointer("/runtime/computearena_version").and_then(Value::as_str)),
                     "prefill": prefill,

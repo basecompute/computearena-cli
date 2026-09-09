@@ -89,7 +89,9 @@ pub(crate) fn prompt(message: &str) -> Result<String> {
     print!("\n{} {message}", ui.brand_bold("›"));
     io::stdout().flush()?;
     let mut input = String::new();
-    io::stdin().read_line(&mut input).context("reading input")?;
+    if io::stdin().read_line(&mut input).context("reading input")? == 0 {
+        anyhow::bail!("input closed; nothing else will be run or submitted");
+    }
     Ok(input.trim().to_string())
 }
 
