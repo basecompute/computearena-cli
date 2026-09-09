@@ -832,3 +832,136 @@ fn mixed_batch_requires_explicit_skip_and_uploads_only_the_valid_report() {
     assert!(text(&output).contains("signature verification failed"));
     assert_eq!(received.join().unwrap(), vec![valid]);
 }
+
+#[test]
+fn successful_gguf_runs_populate_the_picker_and_number_selection_reuses_the_file() {
+    let f = Fixture::new("llama-cpp");
+    let report = f.signed();
+    let history = f.dir.path().join("data/recent-gguf.json");
+    let expected = fs::canonicalize(&f.model).unwrap();
+    let entries: Vec<PathBuf> = serde_json::from_slice(&fs::read(&history).unwrap()).unwrap();
+    assert_eq!(entries, vec![expected.clone()]);
+    assert!(!report.to_string().contains(expected.to_str().unwrap()));
+    let mut child = f
+        .command()
+        .args([
+            "llama-cpp",
+            "run",
+            "--pp",
+            "128,512",
+            "--tg",
+            "128",
+            "--reps",
+            "2",
+            "--yes",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"99\n1\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+    success(&output);
+    let output = text(&output);
+    assert!(output.contains("Recently used GGUF models"));
+    assert!(output.contains("Choose a number from 1 to 1"));
+    assert!(output.contains("Saved signed benchmark"));
+    assert!(!output.contains('\u{1b}'));
+    let args = fs::read_to_string(f.dir.path().join("args")).unwrap();
+    assert!(args.lines().any(|arg| arg == expected.to_str().unwrap()));
+    let entries: Vec<PathBuf> = serde_json::from_slice(&fs::read(history).unwrap()).unwrap();
+    assert_eq!(entries, vec![expected]);
+}
+
+#[test]
+fn missing_recent_gguf_can_be_replaced_with_a_manual_path() {
+    let f = Fixture::new("llama-cpp");
+    f.signed();
+    let moved = f.dir.path().join("moved model.gguf");
+    fs::rename(&f.model, &moved).unwrap();
+    let mut child = f
+        .command()
+        .args([
+            "llama-cpp",
+            "run",
+            "--pp",
+            "128,512",
+            "--tg",
+            "128",
+            "--reps",
+            "2",
+            "--yes",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("1\np\n{}\n", moved.display()).as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    success(&output);
+    assert!(text(&output).contains("[missing or unavailable]"));
+    assert!(text(&output).contains("Cannot use this GGUF file:"));
+    assert!(text(&output).contains("Saved signed benchmark"));
+    let entries: Vec<PathBuf> =
+        serde_json::from_slice(&fs::read(f.dir.path().join("data/recent-gguf.json")).unwrap())
+            .unwrap();
+    assert_eq!(entries[0], fs::canonicalize(moved).unwrap());
+}
+
+#[test]
+fn recent_history_failure_does_not_prevent_a_signed_benchmark_or_manual_selection() {
+    let f = Fixture::new("llama-cpp");
+    fs::create_dir_all(f.dir.path().join("data")).unwrap();
+    let history = f.dir.path().join("data/recent-gguf.json");
+    fs::write(&history, b"broken").unwrap();
+    let mut child = f
+        .command()
+        .args([
+            "llama-cpp",
+            "run",
+            "--pp",
+            "128,512",
+            "--tg",
+            "128",
+            "--reps",
+            "2",
+            "--yes",
+            "--output",
+        ])
+        .arg(&f.report)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{}\n", f.model.display()).as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    success(&output);
+    assert!(text(&output).contains("Could not read recent GGUF files"));
+    assert!(text(&output).contains("Report saved, but could not update recent GGUF files"));
+    success(&f.verify());
+    assert_eq!(fs::read(history).unwrap(), b"broken");
+}
+
+#[test]
+fn failed_benchmarks_and_basert_runs_do_not_create_gguf_history() {
+    let f = Fixture::new("llama-cpp");
+    f.install(&f.result(), "exit 1");
+    assert!(!f.run(&[]).status.success());
+    assert!(!f.dir.path().join("data/recent-gguf.json").exists());
+    let f = Fixture::new("basert");
+    f.signed();
+    assert!(!f.dir.path().join("data/recent-gguf.json").exists());
+}

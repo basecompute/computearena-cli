@@ -540,6 +540,14 @@ pub(crate) fn run_benchmark(
     println!("Saved signed benchmark: {}", path.display());
     println!("Run ID: {run_id}");
     println!("Report SHA-256: {digest}");
+    if runtime == Runtime::LlamaCpp {
+        if let Err(error) = crate::recent_gguf::remember(paths, model) {
+            eprintln!(
+                "{} Report saved, but could not update recent GGUF files: {error:#}",
+                ui.warning("!")
+            );
+        }
+    }
     Ok(path)
 }
 

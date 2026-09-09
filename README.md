@@ -84,6 +84,22 @@ Runtime binary checksums are recorded offline and checked by the server at
 submission. An unrecognized/custom build receives informational download guidance,
 not a report-integrity error. See [adapter details](docs/runtime-adapters.md).
 
+### Recently used GGUF models
+
+When choosing a llama.cpp model, ComputeArena lists the last 10 GGUF files from
+successful benchmarks, most recent first. Enter its number, choose `p` to enter
+another path (absolute, relative, or `~/`), or `0` to go back. Filenames and full
+paths distinguish models with similar names; missing files are marked, and you
+can enter their new location. Selecting an entry checks its GGUF header without
+scanning model tensors.
+
+History starts with benchmarks run by this version, including explicit
+`llama-cpp run <path>` commands. It is stored only in `recent-gguf.json` under
+your local data directory (`--data-dir` / `COMPUTEARENA_HOME`), never included in
+reports or uploads. Delete that history file to clear the list. A corrupt or
+unwritable history does not prevent benchmarking; corrupt files are left intact
+and can be removed to reset history.
+
 ## API and local data
 
 Production is the default. Override it for local or staging development:

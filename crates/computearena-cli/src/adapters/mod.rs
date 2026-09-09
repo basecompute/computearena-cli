@@ -45,7 +45,7 @@ pub(crate) trait RuntimeAdapter {
     fn name(&self) -> &'static str;
     fn discover(&self, override_path: Option<PathBuf>) -> Result<PathBuf>;
     fn probe(&self, executable: &Path) -> Result<Value>;
-    fn select_model(&self) -> Result<Option<PathBuf>>;
+    fn select_model(&self, paths: &crate::reports::Paths) -> Result<Option<PathBuf>>;
     fn confirm(&self, request: &BenchmarkRequest<'_>, yes: bool) -> Result<Option<bool>>;
     fn execute(&self, executable: &Path, request: &BenchmarkRequest<'_>) -> Result<RuntimeOutput>;
 }

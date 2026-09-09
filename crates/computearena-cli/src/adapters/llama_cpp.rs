@@ -1,6 +1,6 @@
 use super::{BenchmarkRequest, RuntimeAdapter, RuntimeOutput};
 use crate::benchmark::{executable_on_path, executable_path, validate_pp};
-use crate::ui::{prompt, TerminalUi};
+use crate::ui::TerminalUi;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
@@ -56,22 +56,9 @@ impl RuntimeAdapter for LlamaCppAdapter {
         )
     }
 
-    fn select_model(&self) -> Result<Option<PathBuf>> {
+    fn select_model(&self, paths: &crate::reports::Paths) -> Result<Option<PathBuf>> {
         print_model_download_hint();
-        let input = prompt("GGUF model path (absolute, relative, or ~/; 0 to go back): ")?;
-        let input = input.trim();
-        if input.is_empty() || input == "0" {
-            return Ok(None);
-        }
-        let path = if let Some(rest) = input.strip_prefix("~/") {
-            dirs::home_dir()
-                .context("cannot locate home directory")?
-                .join(rest)
-        } else {
-            PathBuf::from(input)
-        };
-        validate_model(&path)?;
-        Ok(Some(path))
+        crate::recent_gguf::select(paths, validate_model)
     }
 
     fn confirm(&self, r: &BenchmarkRequest<'_>, yes: bool) -> Result<Option<bool>> {

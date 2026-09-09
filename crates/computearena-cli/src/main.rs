@@ -7,6 +7,7 @@ mod conditioning;
 mod config;
 mod models;
 mod protocol;
+mod recent_gguf;
 mod reports;
 mod submission;
 mod telemetry;
@@ -227,7 +228,7 @@ fn execute(
         } => {
             let model = match model {
                 Some(path) => path,
-                None => match runtime.adapter().select_model()? {
+                None => match runtime.adapter().select_model(paths)? {
                     Some(path) => path,
                     None => return Ok(()),
                 },
@@ -352,7 +353,7 @@ fn interactive(
             }
             "2" => {
                 ui.section("Run a benchmark");
-                let model = match runtime.adapter().select_model() {
+                let model = match runtime.adapter().select_model(paths) {
                     Ok(Some(model)) => model,
                     Ok(None) => continue,
                     Err(error) => {

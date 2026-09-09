@@ -23,7 +23,7 @@ impl RuntimeAdapter for BaseRtAdapter {
         serde_json::from_slice(&output.stdout).context("reading BaseRT benchmark capabilities")
     }
 
-    fn select_model(&self) -> Result<Option<PathBuf>> {
+    fn select_model(&self, _paths: &crate::reports::Paths) -> Result<Option<PathBuf>> {
         crate::models::prompt_model_path()
     }
 
