@@ -2,6 +2,77 @@
 #![cfg(unix)]
 
 #[test]
+fn plans_share_layout_and_identify_full_binary_paths_before_execution() {
+    for runtime in RUNTIMES {
+        let f = Fixture::new(runtime);
+        let output = f.run(&[]);
+        success(&output);
+        let output = text(&output);
+        let plan = output.find("Benchmark plan").unwrap();
+        let running = output.find("Running the benchmark").unwrap();
+        let binary = fs::canonicalize(&f.executable).unwrap();
+        assert!(output.find(binary.to_str().unwrap()).unwrap() < plan);
+        assert!(output.contains(env!("CARGO_BIN_EXE_computearena")));
+        let mut previous = plan;
+        for label in [
+            "Runtime:",
+            "Model:",
+            "Prefill:",
+            "Decode:",
+            "Sampling:",
+            "Telemetry:",
+            "Input:",
+            "Output:",
+            "Run profile",
+        ] {
+            let position = output[previous..].find(label).unwrap() + previous;
+            assert!(position < running);
+            previous = position;
+        }
+        assert!(output.contains("PP128, PP512"));
+        assert!(output.contains("TG128"));
+        assert!(output.contains("Nothing is uploaded automatically"));
+        assert!(output.contains("sustained CPU/GPU load"));
+        assert!(output.contains(fs::canonicalize(&f.model).unwrap().to_str().unwrap()));
+    }
+}
+
+#[test]
+fn relative_and_home_relative_model_paths_resolve_to_absolute_paths() {
+    for home_relative in [false, true] {
+        let f = Fixture::new("llama-cpp");
+        let name = f.model.file_name().unwrap().to_str().unwrap();
+        let supplied = if home_relative {
+            format!("~/{name}")
+        } else {
+            name.to_owned()
+        };
+        let output = f
+            .command()
+            .current_dir(f.dir.path())
+            .args([
+                "llama-cpp",
+                "run",
+                &supplied,
+                "--pp",
+                "128,512",
+                "--reps",
+                "2",
+                "--yes",
+                "--output",
+            ])
+            .arg(&f.report)
+            .output()
+            .unwrap();
+        success(&output);
+        let absolute = fs::canonicalize(&f.model).unwrap();
+        assert!(text(&output).contains(absolute.to_str().unwrap()));
+        let args = fs::read_to_string(f.dir.path().join("args")).unwrap();
+        assert!(args.lines().any(|arg| arg == absolute.to_str().unwrap()));
+    }
+}
+
+#[test]
 fn repeated_runs_have_unique_ids_but_keep_the_installation_identity() {
     for runtime in RUNTIMES {
         let f = Fixture::new(runtime);

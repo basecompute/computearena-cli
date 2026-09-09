@@ -5,7 +5,6 @@ use crate::config::{
     CONDITIONING_MINIMUM_WARMUP_SECONDS, CONDITIONING_STABLE_WINDOW_SECONDS,
     PORTABLE_CONDITIONED_PHASES_PER_WORKLOAD, TELEMETRY_WINDOW_SECONDS,
 };
-use crate::models::compact_home_path;
 use crate::protocol::{HARNESS_SCHEMA, REPORT_SCHEMA, RUNTIME_NAME, TELEMETRY_SCHEMA};
 use crate::reports::b64_encode;
 use crate::reports::{
@@ -101,6 +100,117 @@ fn benchmark_timing(prefill_count: usize, apple: bool) -> BenchmarkTiming {
     }
 }
 
+pub(crate) fn print_benchmark_plan(runtime: Runtime, r: &BenchmarkRequest<'_>) -> Result<()> {
+    let ui = TerminalUi::detect();
+    let prefill = parse_pp(r.pp)?
+        .iter()
+        .map(|n| format!("PP{n}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    ui.section("Benchmark plan");
+    println!("  {} {}", ui.neutral("Runtime:"), runtime.adapter().name());
+    println!("  {} {}", ui.neutral("Model:"), r.model.display());
+    println!("  {} {prefill}", ui.neutral("Prefill:"));
+    println!("  {} TG{}", ui.neutral("Decode:"), r.tg);
+    match runtime {
+        Runtime::Basert => {
+            println!(
+                "  {} {} requested warmup {} + {} recorded {} per throughput workload",
+                ui.neutral("Sampling:"),
+                r.warmup,
+                repetition_label(r.warmup),
+                r.reps,
+                repetition_label(r.reps)
+            );
+            println!(
+                "            Warmup runs for at least {} before each measured phase",
+                format_duration(CONDITIONING_MINIMUM_WARMUP_SECONDS)
+            );
+            println!(
+                "  {} Collected by the BaseRT benchmark harness",
+                ui.neutral("Telemetry:")
+            );
+        }
+        Runtime::LlamaCpp => {
+            println!(
+                "  {} {} + {} recorded {} per throughput workload",
+                ui.neutral("Sampling:"),
+                if r.warmup == 0 {
+                    "No warmup"
+                } else {
+                    "Runtime-native warmup"
+                },
+                r.reps,
+                repetition_label(r.reps)
+            );
+            if r.warmup > 0 {
+                println!("            llama.cpp controls warmup; --warmup is not a repetition count for this runtime.");
+            }
+            println!(
+                "  {} Independent PP and TG tests; initial context depth 0",
+                ui.neutral("Context:")
+            );
+            println!(
+                "  {} Not collected yet by this adapter",
+                ui.neutral("Telemetry:")
+            );
+        }
+    }
+    println!(
+        "  {} Synthetic token sequences; this does not test model accuracy",
+        ui.neutral("Input:")
+    );
+    println!(
+        "  {} Signed JSON report saved locally",
+        ui.neutral("Output:")
+    );
+    println!("          Nothing is uploaded automatically");
+    println!();
+    println!(
+        "{} This creates sustained CPU/GPU load and can consume substantial memory.",
+        ui.warning("!")
+    );
+    println!("  The device may become hot during the benchmark.");
+    println!("  For comparable results, connect external power, disable power-saving mode,");
+    println!("  and close demanding apps.");
+    Ok(())
+}
+
+/// Resolve once before confirmation and pass these exact paths to execution.
+pub(crate) fn identify_benchmark_paths(
+    runtime: Runtime,
+    override_path: Option<PathBuf>,
+    model: &Path,
+) -> Result<(PathBuf, PathBuf)> {
+    let expand = |path: &Path| -> Result<PathBuf> {
+        if let Some(rest) = path.to_str().and_then(|p| p.strip_prefix("~/")) {
+            Ok(dirs::home_dir()
+                .context("cannot locate home directory")?
+                .join(rest))
+        } else {
+            Ok(path.to_path_buf())
+        }
+    };
+    let model = fs::canonicalize(expand(model)?).context("resolving model path")?;
+    let override_path = override_path.map(|p| expand(&p)).transpose()?;
+    let executable = fs::canonicalize(runtime.adapter().discover(override_path)?)
+        .context("resolving runtime executable path")?;
+    let ui = TerminalUi::detect();
+    ui.section("Selected binaries");
+    println!(
+        "  {} {}",
+        ui.neutral("ComputeArena:"),
+        std::env::current_exe()?.display()
+    );
+    println!(
+        "  {} {}",
+        ui.neutral(format!("{}:", runtime.adapter().name())),
+        executable.display()
+    );
+    println!("  {} Compatibility is checked before execution; release provenance is checked at submission.", ui.muted("Note:"));
+    Ok((executable, model))
+}
+
 pub(crate) fn confirm_benchmark_run(
     model: &Path,
     pp: &str,
@@ -119,47 +229,17 @@ pub(crate) fn confirm_benchmark_run(
     }
 
     let ui = TerminalUi::detect();
-    ui.section("Benchmark plan");
-    println!("  {} {}", ui.neutral("Model:"), compact_home_path(model));
-    println!(
-        "  {} {}",
-        ui.neutral("Prefill:"),
-        prefill_tokens
-            .iter()
-            .map(|tokens| format!("PP{tokens}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    println!("  {} TG{tg}", ui.neutral("Decode:"));
-    println!(
-        "  {} {warmup} requested warmup {} + {reps} recorded {} per throughput workload",
-        ui.neutral("Sampling:"),
-        repetition_label(warmup),
-        repetition_label(reps)
-    );
-    println!(
-        "            Warmup runs for at least {} before each measured phase",
-        format_duration(CONDITIONING_MINIMUM_WARMUP_SECONDS)
-    );
-    println!(
-        "  {} Synthetic token sequences; this does not test model accuracy",
-        ui.neutral("Input:")
-    );
-
-    println!(
-        "  {} Signed JSON report saved locally",
-        ui.neutral("Output:")
-    );
-    println!("          Nothing is uploaded automatically");
-
-    println!();
-    println!(
-        "{} This creates sustained CPU/GPU load and can consume substantial memory.",
-        ui.warning("!")
-    );
-    println!("  The device may become hot during the benchmark.");
-    println!("  For comparable results, connect external power, disable power-saving mode,");
-    println!("  and close demanding apps.");
+    print_benchmark_plan(
+        Runtime::Basert,
+        &BenchmarkRequest {
+            model,
+            pp,
+            tg,
+            reps,
+            warmup,
+            cooldown: cooldown_requested,
+        },
+    )?;
 
     if !skip_confirmation && !io::stdin().is_terminal() {
         bail!("benchmark confirmation requires a terminal; pass --yes to run non-interactively");

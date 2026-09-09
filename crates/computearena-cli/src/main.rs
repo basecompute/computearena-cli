@@ -111,7 +111,7 @@ enum Action {
         /// Recorded repetitions.
         #[arg(short = 'r', long, default_value_t = DEFAULT_REPETITIONS)]
         reps: u32,
-        /// Warmup repetitions (not recorded).
+        /// BaseRT warmup repetitions; llama.cpp uses native warmup when greater than zero.
         #[arg(short = 'w', long, default_value_t = DEFAULT_WARMUP_REPETITIONS)]
         warmup: u32,
         /// Enable adaptive thermal cooldowns before measured phases (can take substantially longer).
@@ -230,6 +230,7 @@ fn execute(
                     None => return Ok(()),
                 },
             };
+            let (harness, model) = benchmark::identify_benchmark_paths(runtime, harness, &model)?;
             let Some(cooldown_enabled) = runtime.adapter().confirm(
                 &BenchmarkRequest {
                     model: &model,
@@ -248,7 +249,7 @@ fn execute(
             run_benchmark(
                 runtime,
                 paths,
-                harness,
+                Some(harness),
                 &model,
                 &pp,
                 tg,
@@ -352,6 +353,14 @@ fn interactive(
                 let Some(model) = runtime.adapter().select_model()? else {
                     continue;
                 };
+                let (selected_harness, model) =
+                    match benchmark::identify_benchmark_paths(runtime, harness.clone(), &model) {
+                        Ok(selected) => selected,
+                        Err(error) => {
+                            eprintln!("{} {error:#}", ui.error("Could not select runtime:"));
+                            continue;
+                        }
+                    };
                 let Some(cooldown_enabled) = runtime.adapter().confirm(
                     &BenchmarkRequest {
                         model: &model,
@@ -370,7 +379,7 @@ fn interactive(
                 if let Err(error) = run_benchmark(
                     runtime,
                     paths,
-                    harness.clone(),
+                    Some(selected_harness),
                     &model,
                     DEFAULT_PREFILL_TOKENS,
                     DEFAULT_DECODE_TOKENS,

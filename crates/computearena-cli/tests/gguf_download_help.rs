@@ -23,7 +23,9 @@ fn gguf_download_guidance_precedes_the_model_prompt_and_back_returns_to_menu() {
         String::from_utf8_lossy(&output.stderr)
     );
     let text = String::from_utf8(output.stdout).unwrap();
-    let prompt = text.find("GGUF model path (or 0 to go back):").unwrap();
+    let prompt = text
+        .find("GGUF model path (absolute, relative, or ~/; 0 to go back):")
+        .unwrap();
     for instruction in [
         "Need a GGUF model for llama.cpp?",
         "https://huggingface.co/models?library=gguf",

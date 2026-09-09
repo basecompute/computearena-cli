@@ -58,7 +58,7 @@ impl RuntimeAdapter for LlamaCppAdapter {
 
     fn select_model(&self) -> Result<Option<PathBuf>> {
         print_model_download_hint();
-        let input = prompt("GGUF model path (or 0 to go back): ")?;
+        let input = prompt("GGUF model path (absolute, relative, or ~/; 0 to go back): ")?;
         let input = input.trim();
         if input.is_empty() || input == "0" {
             return Ok(None);
@@ -84,26 +84,21 @@ impl RuntimeAdapter for LlamaCppAdapter {
             bail!("Adaptive cooldown is not supported by this llama.cpp adapter yet. Run without --cooldown.");
         }
         let ui = TerminalUi::detect();
-        ui.section("Benchmark plan");
-        println!("  Runtime: llama.cpp");
-        println!("  Model: {}", crate::models::compact_home_path(r.model));
+        crate::benchmark::print_benchmark_plan(super::Runtime::LlamaCpp, r)?;
+        println!();
+        println!("{}", ui.strong("Run profile"));
         println!(
-            "  Prefill: {} tokens · Decode: {} tokens · Repetitions: {}",
-            r.pp, r.tg, r.reps
-        );
-        println!("  Independent PP and TG tests, starting at context depth 0.");
-        println!(
-            "  Warmup: {}.",
-            if r.warmup == 0 {
-                "disabled"
+            "  {} {}",
+            ui.accent_bold(if r.warmup == 0 {
+                "Standard — no warmup"
             } else {
-                "llama.cpp native warmup; repetition count is controlled by the runtime"
-            }
+                "Standard — native warmup"
+            }),
+            ui.muted("(cooldown not supported yet)")
         );
         println!(
-            "  Duration depends on your model and device; no reliable estimate is available yet."
+            "     Duration depends on the model and device; no reliable estimate is available yet."
         );
-        println!("  Additional telemetry is unavailable for this adapter. Results are saved locally; submission is separate.");
         if yes || prompt_yes_no("Start this benchmark?", false)? {
             Ok(Some(false))
         } else {
