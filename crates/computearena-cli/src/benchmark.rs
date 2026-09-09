@@ -10,7 +10,7 @@ use crate::reports::b64_encode;
 use crate::reports::{
     atomic_write_json, hex, load_or_create_installation_key, sha256_hex, sign_report, Paths,
 };
-use crate::ui::{finish_activity, prompt_yes_no, start_activity, TerminalUi};
+use crate::ui::{finish_activity, prompt, prompt_yes_no, start_activity, TerminalUi};
 use anyhow::{bail, Context, Result};
 use rand_core::{OsRng, RngCore};
 use serde_json::{json, Value};
@@ -24,6 +24,44 @@ use std::time::{SystemTime, UNIX_EPOCH};
 struct BenchmarkTiming {
     scheduled_seconds: f64,
     cooldown_phases: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BenchmarkProfile {
+    Standard,
+    ThermallyControlled,
+}
+
+impl BenchmarkProfile {
+    fn from_cooldown(cooldown: bool) -> Self {
+        if cooldown {
+            Self::ThermallyControlled
+        } else {
+            Self::Standard
+        }
+    }
+
+    fn cooldown_enabled(self) -> bool {
+        matches!(self, Self::ThermallyControlled)
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Standard => "Standard — warmup only",
+            Self::ThermallyControlled => "Thermally controlled",
+        }
+    }
+
+    fn duration(self, timing: BenchmarkTiming) -> String {
+        match self {
+            Self::Standard => format!("at least {}", format_duration(timing.scheduled_seconds)),
+            Self::ThermallyControlled => format!(
+                "{}–{}",
+                format_duration(timing.cooldown_minimum_seconds()),
+                format_duration(timing.cooldown_maximum_seconds())
+            ),
+        }
+    }
 }
 
 impl BenchmarkTiming {
@@ -107,22 +145,6 @@ pub(crate) fn confirm_benchmark_run(
         ui.neutral("Input:")
     );
 
-    let timing = benchmark_timing(prefill_tokens.len(), cfg!(target_os = "macos"));
-    println!("  {}", ui.neutral("Estimated duration:"));
-    println!(
-        "    Warmup only (default)  at least {}",
-        format_duration(timing.scheduled_seconds)
-    );
-    println!(
-        "    With thermal cooldown  {}–{}",
-        format_duration(timing.cooldown_minimum_seconds()),
-        format_duration(timing.cooldown_maximum_seconds())
-    );
-    println!(
-        "    Sensorless fallback    about {}",
-        format_duration(timing.cooldown_fallback_seconds())
-    );
-    println!("    Model loading and recorded repetitions add device-dependent time");
     println!(
         "  {} Signed JSON report saved locally",
         ui.neutral("Output:")
@@ -141,40 +163,114 @@ pub(crate) fn confirm_benchmark_run(
     if !skip_confirmation && !io::stdin().is_terminal() {
         bail!("benchmark confirmation requires a terminal; pass --yes to run non-interactively");
     }
-    let cooldown_enabled = if cooldown_requested || skip_confirmation {
-        cooldown_requested
+
+    let timing = benchmark_timing(prefill_tokens.len(), cfg!(target_os = "macos"));
+    print_run_profiles(ui, timing);
+    let profile = if cooldown_requested || skip_confirmation {
+        BenchmarkProfile::from_cooldown(cooldown_requested)
     } else {
-        println!();
-        prompt_yes_no(
-            "Enable thermal cooldowns for more comparable results?",
-            false,
-        )?
+        prompt_benchmark_profile()?
     };
     println!(
-        "  {} {}",
-        ui.neutral("Selected profile:"),
-        if cooldown_enabled {
-            "warmup with thermal cooldown"
-        } else {
-            "warmup only"
-        }
+        "{} {} — {}",
+        ui.success("✓"),
+        ui.strong(format!("Selected: {}", profile.name())),
+        ui.accent_bold(profile.duration(timing))
     );
 
     if skip_confirmation {
-        return Ok(Some(cooldown_enabled));
+        return Ok(Some(profile.cooldown_enabled()));
     }
     if prompt_yes_no("Start this benchmark?", false)? {
-        Ok(Some(cooldown_enabled))
+        Ok(Some(profile.cooldown_enabled()))
     } else {
         Ok(None)
     }
 }
 
+fn print_run_profiles(ui: TerminalUi, timing: BenchmarkTiming) {
+    println!();
+    println!("{}", ui.brand_bold("Run profile"));
+    println!();
+    println!(
+        "  {}  {} {}",
+        ui.strong("1"),
+        ui.strong(BenchmarkProfile::Standard.name()),
+        ui.neutral("(default)")
+    );
+    println!(
+        "     {}",
+        ui.accent_bold(BenchmarkProfile::Standard.duration(timing))
+    );
+    println!(
+        "     {}",
+        ui.muted("Fastest option. Thermal state may affect comparability.")
+    );
+    println!();
+    println!(
+        "  {}  {}",
+        ui.strong("2"),
+        ui.strong(BenchmarkProfile::ThermallyControlled.name())
+    );
+    println!(
+        "     {}",
+        ui.accent_bold(BenchmarkProfile::ThermallyControlled.duration(timing))
+    );
+    println!(
+        "     {}",
+        ui.muted("Waits for thermal recovery between workloads.")
+    );
+    println!(
+        "     {} {}",
+        ui.muted("Without a usable temperature sensor:"),
+        ui.accent_bold(format!(
+            "about {}",
+            format_duration(timing.cooldown_fallback_seconds())
+        ))
+    );
+    println!();
+    println!(
+        "  {}",
+        ui.muted("Times exclude model loading and recorded repetitions.")
+    );
+}
+
+fn prompt_benchmark_profile() -> Result<BenchmarkProfile> {
+    loop {
+        let answer = prompt("Select a run profile [1]: ")?;
+        match parse_benchmark_profile(&answer) {
+            Some(profile) => return Ok(profile),
+            None => println!(
+                "{} Enter `1` for standard or `2` for thermally controlled.",
+                TerminalUi::detect().warning("!")
+            ),
+        }
+    }
+}
+
+fn parse_benchmark_profile(answer: &str) -> Option<BenchmarkProfile> {
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "" | "1" | "standard" | "warmup" => Some(BenchmarkProfile::Standard),
+        "2" | "thermal" | "cooldown" => Some(BenchmarkProfile::ThermallyControlled),
+        _ => None,
+    }
+}
+
 fn format_duration(seconds: f64) -> String {
     let seconds = seconds.ceil() as u64;
+    let hours = seconds / 3_600;
     let minutes = seconds / 60;
     let remaining = seconds % 60;
-    if minutes == 0 {
+    if hours > 0 {
+        let mut duration = format!("{hours}h");
+        if minutes % 60 > 0 {
+            duration.push_str(&format!(" {}m", minutes % 60));
+        }
+        if remaining > 0 {
+            duration.push_str(&format!(" {remaining}s"));
+        }
+        duration
+    } else if minutes == 0 {
         format!("{remaining}s")
     } else {
         format!("{minutes}m {remaining}s")
@@ -459,7 +555,10 @@ mod tests {
             format_duration(apple.cooldown_fallback_seconds()),
             "16m 53s"
         );
-        assert_eq!(format_duration(apple.cooldown_maximum_seconds()), "86m 53s");
+        assert_eq!(
+            format_duration(apple.cooldown_maximum_seconds()),
+            "1h 26m 53s"
+        );
 
         let portable = benchmark_timing(prefill_count, false);
         assert_eq!(format_duration(portable.scheduled_seconds), "1m 39s");
@@ -475,5 +574,49 @@ mod tests {
             format_duration(portable.cooldown_maximum_seconds()),
             "55m 39s"
         );
+    }
+
+    #[test]
+    fn benchmark_profiles_describe_their_timing_and_cooldown_behavior() {
+        let timing = benchmark_timing(8, true);
+
+        assert_eq!(
+            BenchmarkProfile::Standard.duration(timing),
+            "at least 2m 53s"
+        );
+        assert!(!BenchmarkProfile::Standard.cooldown_enabled());
+        assert_eq!(
+            BenchmarkProfile::ThermallyControlled.duration(timing),
+            "7m 33s–1h 26m 53s"
+        );
+        assert!(BenchmarkProfile::ThermallyControlled.cooldown_enabled());
+    }
+
+    #[test]
+    fn formats_hour_scale_durations_for_readability() {
+        assert_eq!(format_duration(3_600.0), "1h");
+        assert_eq!(format_duration(3_660.0), "1h 1m");
+        assert_eq!(format_duration(5_213.0), "1h 26m 53s");
+    }
+
+    #[test]
+    fn parses_run_profile_numbers_names_and_default() {
+        assert_eq!(
+            parse_benchmark_profile(""),
+            Some(BenchmarkProfile::Standard)
+        );
+        assert_eq!(
+            parse_benchmark_profile("1"),
+            Some(BenchmarkProfile::Standard)
+        );
+        assert_eq!(
+            parse_benchmark_profile("COOLDOWN"),
+            Some(BenchmarkProfile::ThermallyControlled)
+        );
+        assert_eq!(
+            parse_benchmark_profile("2"),
+            Some(BenchmarkProfile::ThermallyControlled)
+        );
+        assert_eq!(parse_benchmark_profile("3"), None);
     }
 }

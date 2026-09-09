@@ -33,6 +33,14 @@ impl TerminalUi {
         self.render(BASECOMPUTE_THEME.brand.style().bold(), text)
     }
 
+    pub(crate) fn strong(self, text: impl Display) -> String {
+        self.render(Style::new().bold(), text)
+    }
+
+    pub(crate) fn accent_bold(self, text: impl Display) -> String {
+        self.render(BASECOMPUTE_THEME.accent.style().bold(), text)
+    }
+
     pub(crate) fn muted(self, text: impl Display) -> String {
         self.render(Style::new().dim(), text)
     }
