@@ -35,7 +35,7 @@ They do not run GPU workloads. See [telemetry.md](telemetry.md) for collector co
 | Discovery | PATH discovery, explicit executable path override, paths containing spaces, missing/incompatible executables |
 | Runtime invocation | Requested PP sweep forwarded, separate PP/TG samples, llama.cpp depth zero and JSON output, BaseRT telemetry flag, no default cooldown, native warmup disablement |
 | Result consistency | Identical raw measurements produce identical token/second metrics and units across adapters; bogus llama.cpp aggregate rates are ignored |
-| Protocol differences | llama.cpp records native warmup, zero initial context, and concurrent whole-run telemetry; no invented BaseRT diagnostic replays or cooldown support |
+| Protocol differences | llama.cpp records native warmup, zero initial context, and concurrent whole-run telemetry; conditioned runs use a distinct per-workload-process protocol |
 | Runtime failures | Nonzero exit, malformed JSON, executable mutation during a benchmark: no report signed |
 | Measurement validation | Missing workloads, token-count mismatches, repetition mismatches, invalid/unsafe durations, nonzero llama.cpp depth, inconsistent build identity |
 | Binary identity | Signed SHA-256 equals the executable bytes; platform identity recorded; report remains verifiable after the executable is removed or upgraded |

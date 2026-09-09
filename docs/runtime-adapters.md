@@ -29,8 +29,9 @@ Capability probing uses --help because --version is not implemented consistently
 The initial llama.cpp adapter uses native warmup and records it as runtime_native.
 --warmup 0 disables it; any positive value enables native warmup, not that number
 of repetitions. The plan states this before execution. Automatic external telemetry
-is collected over the whole process (see telemetry.md). Adaptive cooldown remains
-unsupported and is rejected rather than silently ignored. Native effective settings are preserved.
+is collected over the whole process (see telemetry.md). Optional cooldown runs each
+workload in a fresh process using llama-bench-conditioned-pp-tg/1 (see benchmark-profiles.md).
+Native effective settings are preserved.
 No equivalence between BaseRT and GGUF quantization names is assumed.
 
 The PP/TG counts alone do not establish equivalent timing semantics. llama.cpp

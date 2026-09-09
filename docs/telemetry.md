@@ -43,8 +43,8 @@ OS sensor handles and is stopped/joined on completion or failure.
 
 Energy, runtime allocator/KV-cache queries, and per-workload attribution are explicitly
 unavailable in this version. Power snapshots are not energy measurements, and a
-whole-run sensor reading is not a per-token metric. Adaptive cooldown remains a
-BaseRT-only capability. Matching UX does not imply identical measurement capabilities.
+whole-run sensor reading is not a per-token metric. Optional llama.cpp cooldown groups telemetry by isolated workload process, still
+including loading/warmup (see benchmark-profiles.md). Matching UX does not imply identical measurement capabilities.
 
 ## Overhead and validation
 

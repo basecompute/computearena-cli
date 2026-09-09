@@ -269,6 +269,86 @@ pub(crate) fn confirm_benchmark_run(
     }
 }
 
+pub(crate) fn confirm_llama_profile(r: &BenchmarkRequest<'_>, yes: bool) -> Result<Option<bool>> {
+    let ui = TerminalUi::detect();
+    print_benchmark_plan(Runtime::LlamaCpp, r)?;
+    let count = (parse_pp(r.pp)?.len() + 1) as f64;
+    let standard = if r.warmup == 0 {
+        "Standard — no warmup"
+    } else {
+        "Standard — native warmup"
+    };
+    println!();
+    println!("{}", ui.brand_bold("Run profile"));
+    println!(
+        "  {}  {} {}",
+        ui.strong("1"),
+        ui.strong(standard),
+        ui.neutral("(default)")
+    );
+    println!(
+        "     {}",
+        ui.accent_bold("No cooldown waits; total runtime depends on your model and device")
+    );
+    println!();
+    println!(
+        "  {}  {}",
+        ui.strong("2"),
+        ui.strong("Thermally controlled")
+    );
+    println!(
+        "     {}",
+        ui.accent_bold(format!(
+            "Adds approximately {}–{} of cooldown waits",
+            format_duration(count * CONDITIONING_STABLE_WINDOW_SECONDS),
+            format_duration(count * CONDITIONING_MAXIMUM_WAIT_SECONDS)
+        ))
+    );
+    println!(
+        "     {}",
+        ui.muted(format!(
+            "Without usable die-temperature sensors: about {} of timed rests",
+            format_duration(count * CONDITIONING_FALLBACK_WAIT_SECONDS)
+        ))
+    );
+    println!(
+        "     {}",
+        ui.muted("Runs each PP size and TG separately; reloads the model after each cooldown.")
+    );
+    println!(
+        "     {}",
+        ui.muted(
+            "Waits precede loading and native warmup, not the measured phase inside llama.cpp."
+        )
+    );
+    println!("  {}",ui.muted("Total time = loading + native warmup + recorded work + the waits above; no calibrated total estimate yet."));
+    if !yes && !io::stdin().is_terminal() {
+        bail!("benchmark confirmation requires a terminal; pass --yes to run non-interactively");
+    }
+    let selected = if r.cooldown || yes {
+        BenchmarkProfile::from_cooldown(r.cooldown)
+    } else {
+        prompt_benchmark_profile()?
+    };
+    println!(
+        "{} {}",
+        ui.success("✓"),
+        ui.strong(format!(
+            "Selected: {}",
+            if selected.cooldown_enabled() {
+                "Thermally controlled"
+            } else {
+                standard
+            }
+        ))
+    );
+    if yes || prompt_yes_no("Start this benchmark?", false)? {
+        Ok(Some(selected.cooldown_enabled()))
+    } else {
+        Ok(None)
+    }
+}
+
 fn print_run_profiles(ui: TerminalUi, timing: BenchmarkTiming) {
     println!();
     println!("{}", ui.brand_bold("Run profile"));

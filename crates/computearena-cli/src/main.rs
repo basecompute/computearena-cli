@@ -3,6 +3,7 @@ mod api;
 use adapters::{BenchmarkRequest, Runtime};
 mod auth;
 mod benchmark;
+mod conditioning;
 mod config;
 mod models;
 mod protocol;
@@ -351,8 +352,13 @@ fn interactive(
             }
             "2" => {
                 ui.section("Run a benchmark");
-                let Some(model) = runtime.adapter().select_model()? else {
-                    continue;
+                let model = match runtime.adapter().select_model() {
+                    Ok(Some(model)) => model,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        eprintln!("{} {error:#}", ui.error("Could not select model:"));
+                        continue;
+                    }
                 };
                 let (selected_harness, model) =
                     match benchmark::identify_benchmark_paths(runtime, harness.clone(), &model) {
@@ -362,7 +368,7 @@ fn interactive(
                             continue;
                         }
                     };
-                let Some(cooldown_enabled) = runtime.adapter().confirm(
+                let confirmation = runtime.adapter().confirm(
                     &BenchmarkRequest {
                         model: &model,
                         pp: DEFAULT_PREFILL_TOKENS,
@@ -372,10 +378,17 @@ fn interactive(
                         cooldown: false,
                     },
                     false,
-                )?
-                else {
-                    println!("Benchmark cancelled. Nothing was run.");
-                    continue;
+                );
+                let cooldown_enabled = match confirmation {
+                    Ok(Some(enabled)) => enabled,
+                    Ok(None) => {
+                        println!("Benchmark cancelled. Nothing was run.");
+                        continue;
+                    }
+                    Err(error) => {
+                        eprintln!("{} {error:#}", ui.error("Could not prepare benchmark:"));
+                        continue;
+                    }
                 };
                 if let Err(error) = run_benchmark(
                     runtime,

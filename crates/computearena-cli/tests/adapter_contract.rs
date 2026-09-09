@@ -2,6 +2,68 @@
 #![cfg(unix)]
 
 #[test]
+fn cooldown_plan_estimates_waits_and_requires_confirmation_before_execution() {
+    let f = Fixture::new("llama-cpp");
+    let output = f
+        .command()
+        .args(["llama-cpp", "run"])
+        .arg(&f.model)
+        .args(["--pp", "128,512", "--cooldown"])
+        .output()
+        .unwrap();
+    failure(&output, "confirmation requires a terminal");
+    for hint in [
+        "Standard — native warmup",
+        "Thermally controlled",
+        "30s–9m 0s",
+        "1m 30s",
+        "reloads the model",
+        "Total time =",
+    ] {
+        assert!(
+            text(&output).contains(hint),
+            "missing {hint}: {}",
+            text(&output)
+        );
+    }
+    assert!(!f.report.exists());
+    assert!(!f.dir.path().join("args").exists());
+}
+
+#[test]
+fn closed_menu_input_exits_instead_of_prompting_forever() {
+    let f = Fixture::new("llama-cpp");
+    failure(
+        &f.command().arg("llama-cpp").output().unwrap(),
+        "input closed",
+    );
+}
+
+#[test]
+fn invalid_model_selection_returns_to_the_menu_instead_of_exiting() {
+    let f = Fixture::new("llama-cpp");
+    let mut child = f
+        .command()
+        .arg("llama-cpp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"2\n/definitely-missing-computearena-model.gguf\n6\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    success(&output);
+    assert!(text(&output).contains("Could not select model:"));
+    assert_eq!(text(&output).matches("Choose an option:").count(), 2);
+    assert!(!f.report.exists());
+}
+
+#[test]
 fn telemetry_is_collected_for_the_child_summarized_and_signature_protected() {
     let f = Fixture::new("llama-cpp");
     f.install(&f.result(), "/bin/sleep 1.2");
@@ -595,7 +657,13 @@ fn discovery_help_runtime_scoping_and_unsupported_options_are_actionable() {
         success(&f.run(&["--runtime-path", renamed.to_str().unwrap()]));
     }
     let f = Fixture::new("llama-cpp");
-    failure(&f.run(&["--cooldown"]), "Run without --cooldown");
+    let help = f
+        .command()
+        .args(["llama-cpp", "run", "--cooldown", "--help"])
+        .output()
+        .unwrap();
+    success(&help);
+    assert!(text(&help).contains("--cooldown"));
     assert!(!f.dir.path().join("args").exists());
     success(&f.run(&["--warmup", "0"]));
     assert!(fs::read_to_string(f.dir.path().join("args"))

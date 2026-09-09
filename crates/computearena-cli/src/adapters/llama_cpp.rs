@@ -1,6 +1,6 @@
 use super::{BenchmarkRequest, RuntimeAdapter, RuntimeOutput};
 use crate::benchmark::{executable_on_path, executable_path, validate_pp};
-use crate::ui::{prompt, prompt_yes_no, TerminalUi};
+use crate::ui::{prompt, TerminalUi};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
@@ -52,7 +52,7 @@ impl RuntimeAdapter for LlamaCppAdapter {
         // structured benchmark rows are the authoritative build identity.
         Ok(
             json!({"adapter": "llama-bench-json/1", "version_source": "benchmark.build_commit",
-            "warmup": "runtime_native", "cooldown_supported": false}),
+            "warmup": "runtime_native", "cooldown_supported": true}),
         )
     }
 
@@ -80,64 +80,38 @@ impl RuntimeAdapter for LlamaCppAdapter {
         if r.tg == 0 || r.reps == 0 || r.reps > 100 {
             bail!("Use positive token sizes and between 1 and 100 repetitions.");
         }
-        if r.cooldown {
-            bail!("Adaptive cooldown is not supported by this llama.cpp adapter yet. Run without --cooldown.");
-        }
-        let ui = TerminalUi::detect();
-        crate::benchmark::print_benchmark_plan(super::Runtime::LlamaCpp, r)?;
-        println!();
-        println!("{}", ui.strong("Run profile"));
-        println!(
-            "  {} {}",
-            ui.accent_bold(if r.warmup == 0 {
-                "Standard — no warmup"
-            } else {
-                "Standard — native warmup"
-            }),
-            ui.muted("(cooldown not supported yet)")
-        );
-        println!(
-            "     Duration depends on the model and device; no reliable estimate is available yet."
-        );
-        if yes || prompt_yes_no("Start this benchmark?", false)? {
-            Ok(Some(false))
-        } else {
-            Ok(None)
-        }
+        crate::benchmark::confirm_llama_profile(r, yes)
     }
 
     fn execute(&self, executable: &Path, r: &BenchmarkRequest<'_>) -> Result<RuntimeOutput> {
         validate_model(r.model)?;
-        if r.cooldown {
-            bail!("llama.cpp adaptive cooldown is unsupported");
-        }
-        let mut command = Command::new(executable);
-        command
-            .arg("-m")
-            .arg(r.model)
-            .args(["-p", r.pp, "-n"])
-            .arg(r.tg.to_string())
-            .args(["-d", "0", "-r"])
-            .arg(r.reps.to_string())
-            .args(["-o", "json"]);
-        if r.warmup == 0 {
-            command.arg("--no-warmup");
-        }
         let ui = TerminalUi::detect();
         println!("{}", ui.neutral("Telemetry: observing process memory and available device sensors (whole run, 1-second sampling)."));
-        let (output, telemetry) =
-            crate::telemetry::run_observed(&mut command).context("running llama.cpp benchmark")?;
-        if !output.status.success() {
-            bail!(
-                "llama.cpp exited with {}. See its output above; no report was signed.",
-                output.status
-            );
-        }
-        let rows: Value = serde_json::from_slice(&output.stdout)
-            .context("llama.cpp did not return benchmark JSON")?;
+        let (rows, telemetry) = if r.cooldown {
+            let mut cooldown = crate::conditioning::Cooldown::new();
+            run_conditioned(executable, r, |label| cooldown.prepare(label))?
+        } else {
+            run_native(executable, r, r.pp, r.tg)?
+        };
         let mut result = normalize(&rows, r)?;
+        ui.section("Benchmark results");
+        for pp in r.pp.split(',') {
+            if let Some(rate) = result.benchmark["metrics"][format!("pp{pp}_t_s")].as_f64() {
+                println!("  {}", ui.neutral(format!("PP{pp}: {rate:.2} tok/s")));
+            }
+        }
+        println!(
+            "  {}",
+            ui.neutral(format!(
+                "TG{}: {:.2} tok/s",
+                r.tg,
+                result.benchmark["metrics"]["decode_t_s"]
+                    .as_f64()
+                    .unwrap_or(0.0)
+            ))
+        );
         result.benchmark["protocol"]["telemetry_available"] =
-            json!(telemetry.get("observer").is_some());
+            json!(telemetry.get("observer").is_some() || telemetry.get("workloads").is_some());
         result.benchmark["protocol"]["measurement_observer"] =
             json!("external_whole_process_sampler");
         if let Some(peak) = telemetry
@@ -152,12 +126,123 @@ impl RuntimeAdapter for LlamaCppAdapter {
             println!("{}", ui.neutral("Telemetry: process memory unavailable; see sensor coverage in the saved report."));
         }
         result.benchmark["telemetry"] = telemetry;
+        if r.cooldown {
+            result.benchmark["protocol"]["id"] = json!("llama-bench-conditioned-pp-tg/1");
+            result.benchmark["protocol"]["cooldown_enabled"] = json!(true);
+            result.benchmark["protocol"]["execution_layout"] = json!("one_process_per_workload");
+            result.benchmark["protocol"]["conditioning"] =
+                result.benchmark["telemetry"]["conditioning"].clone();
+            result.benchmark["protocol"]["conditioning_workloads"] =
+                result.benchmark["telemetry"]["conditioning_workloads"].clone();
+            if result.benchmark.get("memory").is_some() {
+                result.benchmark["memory"]["scope"] = json!("all_workload_processes");
+            }
+        }
         let mut model = super::gguf::inspect(r.model)?;
         model["runtime_description"] = result.model["runtime_description"].clone();
         model["parameters"] = result.model["parameters"].clone();
         result.model = model;
         Ok(result)
     }
+}
+
+fn run_native(
+    executable: &Path,
+    r: &BenchmarkRequest<'_>,
+    pp: &str,
+    tg: u32,
+) -> Result<(Value, Value)> {
+    let mut command = Command::new(executable);
+    command
+        .arg("-m")
+        .arg(r.model)
+        .args(["-p", pp, "-n"])
+        .arg(tg.to_string())
+        .args(["-d", "0", "-r"])
+        .arg(r.reps.to_string())
+        .args(["-o", "json"]);
+    if r.warmup == 0 {
+        command.arg("--no-warmup");
+    }
+    let (output, telemetry) =
+        crate::telemetry::run_observed(&mut command).context("running llama.cpp benchmark")?;
+    if !output.status.success() {
+        bail!(
+            "llama.cpp exited with {}. See its output above; no report was signed.",
+            output.status
+        );
+    }
+    let rows = serde_json::from_slice(&output.stdout)
+        .context("llama.cpp did not return benchmark JSON")?;
+    Ok((rows, telemetry))
+}
+
+fn run_conditioned(
+    executable: &Path,
+    r: &BenchmarkRequest<'_>,
+    mut prepare: impl FnMut(&str) -> Value,
+) -> Result<(Value, Value)> {
+    let schedule: Vec<(u32, u32)> =
+        r.pp.split(',')
+            .map(|v| v.parse::<u32>().map(|pp| (pp, 0)))
+            .chain(std::iter::once(Ok((0, r.tg))))
+            .collect::<std::result::Result<_, _>>()?;
+    let mut rows = Vec::new();
+    let mut observations = Map::new();
+    let mut conditioning = Map::new();
+    let mut peak: Option<f64> = None;
+    let ui = TerminalUi::detect();
+    for (index, (pp, tg)) in schedule.iter().enumerate() {
+        let label = if *pp > 0 {
+            format!("pp{pp}")
+        } else {
+            format!("tg{tg}")
+        };
+        println!(
+            "{}",
+            ui.strong(format!("[{}/{}] {label}", index + 1, schedule.len()))
+        );
+        conditioning.insert(label.clone(), prepare(&label));
+        println!(
+            "{}",
+            ui.neutral(format!(
+                "{label} — loading model, then {} and {} recorded repetitions",
+                if r.warmup == 0 {
+                    "no warmup"
+                } else {
+                    "native warmup"
+                },
+                r.reps
+            ))
+        );
+        let (native, telemetry) = run_native(executable, r, &pp.to_string(), *tg)?;
+        let native = native
+            .as_array()
+            .context("llama.cpp benchmark output must be an array")?;
+        if native.len() != 1
+            || native[0]["n_prompt"].as_u64() != Some(u64::from(*pp))
+            || native[0]["n_gen"].as_u64() != Some(u64::from(*tg))
+        {
+            bail!("llama.cpp returned an unexpected workload for {label}; no report was signed");
+        }
+        rows.extend(native.iter().cloned());
+        if let Some(value) = telemetry
+            .pointer("/process_memory/statistics/peak")
+            .and_then(Value::as_f64)
+        {
+            peak = Some(peak.map_or(value, |p| p.max(value)));
+        }
+        observations.insert(label, telemetry);
+    }
+    Ok((
+        Value::Array(rows),
+        json!({"schema":"computearena-telemetry/1","coverage":"basic",
+        "scope":"separate_workload_processes","measurement_relation":"concurrent_observer",
+        "conditioning":crate::conditioning::policy(),"conditioning_workloads":conditioning,
+        "workloads":observations,"process_memory":{"metric":"resident_set_size","unit":"MiB",
+            "statistics":{"available":peak.is_some(),"peak":peak},
+            "note":"Maximum observed peak across separate process windows including loading and warmup"}}),
+    ))
 }
 
 fn print_model_download_hint() {
@@ -347,6 +432,47 @@ pub(crate) fn normalize(value: &Value, r: &BenchmarkRequest<'_>) -> Result<Runti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn cooled_execution_waits_before_each_isolated_workload_and_keeps_raw_samples() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("llama-bench");
+        std::fs::write(&executable, r#"#!/bin/sh
+pp=0
+tg=0
+while [ "$#" -gt 0 ]; do
+case "$1" in
+-p) shift; pp="$1";;
+-n) shift; tg="$1";;
+esac
+shift
+done
+printf '[{"build_commit":"abc123","build_number":123,"model_type":"Qwen Q4","model_filename":"test.gguf","n_prompt":%s,"n_gen":%s,"n_depth":0,"n_gpu_layers":0,"cpu_info":"Test CPU","gpu_info":"","backends":"CPU","samples_ns":[100000000,200000000]}]' "$pp" "$tg"
+"#).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut request = request();
+        request.cooldown = true;
+        let mut order = Vec::new();
+        let (rows,telemetry)=run_conditioned(&executable,&request,|label|{
+            order.push(label.to_owned());
+            json!({"method":"timed_fallback","target_reached":false,"timed_out":false,"waited_s":30.0,"sample_count":1})
+        }).unwrap();
+        assert_eq!(order, vec!["pp128", "pp512", "tg128"]);
+        let normalized = normalize(&rows, &request).unwrap();
+        assert_eq!(normalized.benchmark["metrics"]["pp512_t_s"], 3840.0);
+        assert_eq!(telemetry["scope"], "separate_workload_processes");
+        assert_eq!(
+            telemetry["conditioning_workloads"]
+                .as_object()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert!(telemetry["workloads"]["tg128"].get("observer").is_some());
+    }
+
     fn request() -> BenchmarkRequest<'static> {
         BenchmarkRequest {
             model: Path::new("Qwen3-4B.gguf"),
