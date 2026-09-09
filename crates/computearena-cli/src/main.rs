@@ -1,4 +1,6 @@
+mod adapters;
 mod api;
+use adapters::{BenchmarkRequest, Runtime};
 mod auth;
 mod benchmark;
 mod config;
@@ -12,11 +14,10 @@ mod ui;
 use auth::{load_api_session, login, logout, resolve_api_url};
 #[cfg(test)]
 use auth::{remove_api_session, save_api_session, ApiSession};
-use benchmark::{confirm_benchmark_run, run_benchmark};
+use benchmark::run_benchmark;
 #[cfg(test)]
 use benchmark::{validate_harness_result, validate_pp};
 use config::*;
-use models::prompt_model_path;
 #[cfg(test)]
 use models::{
     compact_home_path, display_quantization, fallback_model_name, model_choice_labels,
@@ -47,7 +48,6 @@ use rand_core::OsRng;
 #[cfg(test)]
 use serde_json::json;
 use serde_json::Value;
-use std::ffi::OsString;
 #[cfg(test)]
 use std::fs;
 #[cfg(test)]
@@ -60,15 +60,15 @@ use std::path::PathBuf;
     bin_name = "computearena",
     version,
     about = "Run, retain, and verify ComputeArena benchmarks",
-    after_help = "BaseRT runtime selector: computearena basert [OPTIONS] [COMMAND]"
+    after_help = "Select a runtime: computearena basert or computearena llama-cpp"
 )]
 struct Cli {
     /// Override the local ComputeArena data directory.
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
 
-    /// Override the benchmark harness executable.
-    #[arg(long, global = true)]
+    /// Path to the runtime benchmark executable.
+    #[arg(long = "runtime-path", visible_alias = "harness", global = true)]
     harness: Option<PathBuf>,
 
     /// Override the ComputeArena API base URL.
@@ -81,9 +81,26 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Run a BaseRT prefill/decode benchmark and save a signed report.
+    /// Open the BaseRT session or run a BaseRT action.
+    Basert {
+        #[command(subcommand)]
+        command: Option<Action>,
+    },
+    /// Open the llama.cpp session or run a llama.cpp action.
+    #[command(name = "llama-cpp", alias = "llamacpp")]
+    LlamaCpp {
+        #[command(subcommand)]
+        command: Option<Action>,
+    },
+    #[command(flatten)]
+    Action(Action),
+}
+
+#[derive(Subcommand, Debug)]
+enum Action {
+    /// Run a prefill/decode benchmark and save a signed report.
     Run {
-        /// Path to a local `.base` model. Prompted for when omitted.
+        /// Local model file (.base for BaseRT, .gguf for llama.cpp).
         model: Option<PathBuf>,
         /// Comma-separated prefill token counts.
         #[arg(long, default_value = DEFAULT_PREFILL_TOKENS)]
@@ -133,11 +150,13 @@ enum Command {
     },
 }
 
-fn normalized_args(mut args: Vec<OsString>) -> Vec<OsString> {
-    if args.get(1).and_then(|arg| arg.to_str()) == Some("basert") {
-        args.remove(1);
+fn select_runtime(command: Option<Command>) -> (Runtime, Option<Action>) {
+    match command {
+        Some(Command::Basert { command }) => (Runtime::Basert, command),
+        Some(Command::LlamaCpp { command }) => (Runtime::LlamaCpp, command),
+        Some(Command::Action(command)) => (Runtime::Basert, Some(command)),
+        None => (Runtime::Basert, None),
     }
-    args
 }
 
 fn main() {
@@ -148,7 +167,7 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let cli = Cli::parse_from(normalized_args(std::env::args_os().collect()));
+    let cli = Cli::parse();
     let data_dir = match cli.data_dir {
         Some(path) => Some(path),
         None => match std::env::var_os("COMPUTEARENA_HOME")
@@ -161,15 +180,40 @@ fn run() -> Result<()> {
     };
     let paths = Paths::resolve(data_dir)?;
     let api_url = resolve_api_url(cli.api_url)?;
-    match cli.command {
-        Some(command) => execute(command, &paths, cli.harness, &api_url),
-        None => interactive(&paths, cli.harness, &api_url),
+    let choose_runtime = cli.command.is_none();
+    let (mut runtime, command) = select_runtime(cli.command);
+    if choose_runtime {
+        println!("Choose a runtime: 1. BaseRT  2. llama.cpp  0. Exit");
+        loop {
+            match prompt("Runtime: ")?.as_str() {
+                "1" | "basert" => {
+                    runtime = Runtime::Basert;
+                    break;
+                }
+                "2" | "llama-cpp" | "llamacpp" => {
+                    runtime = Runtime::LlamaCpp;
+                    break;
+                }
+                "0" | "" => return Ok(()),
+                _ => println!("Choose 1, 2, or 0."),
+            }
+        }
+    }
+    match command {
+        Some(command) => execute(runtime, command, &paths, cli.harness, &api_url),
+        None => interactive(runtime, &paths, cli.harness, &api_url),
     }
 }
 
-fn execute(command: Command, paths: &Paths, harness: Option<PathBuf>, api_url: &str) -> Result<()> {
+fn execute(
+    runtime: Runtime,
+    command: Action,
+    paths: &Paths,
+    harness: Option<PathBuf>,
+    api_url: &str,
+) -> Result<()> {
     match command {
-        Command::Run {
+        Action::Run {
             model,
             pp,
             tg,
@@ -181,18 +225,28 @@ fn execute(command: Command, paths: &Paths, harness: Option<PathBuf>, api_url: &
         } => {
             let model = match model {
                 Some(path) => path,
-                None => match prompt_model_path()? {
+                None => match runtime.adapter().select_model()? {
                     Some(path) => path,
                     None => return Ok(()),
                 },
             };
-            let Some(cooldown_enabled) =
-                confirm_benchmark_run(&model, &pp, tg, reps, warmup, cooldown, yes)?
+            let Some(cooldown_enabled) = runtime.adapter().confirm(
+                &BenchmarkRequest {
+                    model: &model,
+                    pp: &pp,
+                    tg,
+                    reps,
+                    warmup,
+                    cooldown,
+                },
+                yes,
+            )?
             else {
                 println!("Benchmark cancelled. Nothing was run.");
                 return Ok(());
             };
             run_benchmark(
+                runtime,
                 paths,
                 harness,
                 &model,
@@ -205,14 +259,14 @@ fn execute(command: Command, paths: &Paths, harness: Option<PathBuf>, api_url: &
             )?;
             Ok(())
         }
-        Command::List { json } => list_reports(paths, json),
-        Command::Inspect { report } => {
+        Action::List { json } => list_reports(paths, json),
+        Action::Inspect { report } => {
             let path = resolve_report(paths, &report)?;
             let value = read_report(&path)?;
             println!("{}", serde_json::to_string_pretty(&value)?);
             Ok(())
         }
-        Command::Verify { report } => {
+        Action::Verify { report } => {
             let ui = TerminalUi::detect();
             let started = start_activity(ui, "Reading and verifying the saved benchmark…");
             let path = resolve_report(paths, &report)?;
@@ -223,9 +277,9 @@ fn execute(command: Command, paths: &Paths, harness: Option<PathBuf>, api_url: &
             println!("Installation key: {key_id}");
             Ok(())
         }
-        Command::Login => login(paths, api_url),
-        Command::Logout => logout(paths, api_url),
-        Command::Submit {
+        Action::Login => login(paths, api_url),
+        Action::Logout => logout(paths, api_url),
+        Action::Submit {
             reports,
             yes,
             skip_invalid,
@@ -236,7 +290,12 @@ fn execute(command: Command, paths: &Paths, harness: Option<PathBuf>, api_url: &
     }
 }
 
-fn interactive(paths: &Paths, harness: Option<PathBuf>, api_url: &str) -> Result<()> {
+fn interactive(
+    runtime: Runtime,
+    paths: &Paths,
+    harness: Option<PathBuf>,
+    api_url: &str,
+) -> Result<()> {
     let ui = TerminalUi::detect();
 
     loop {
@@ -257,6 +316,7 @@ fn interactive(paths: &Paths, harness: Option<PathBuf>, api_url: &str) -> Result
             "{}",
             ui.brand("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         );
+        println!("  Runtime: {}", runtime.adapter().name());
         let session = load_api_session(paths, api_url)?;
         if let Some(session) = &session {
             println!(
@@ -289,16 +349,18 @@ fn interactive(paths: &Paths, harness: Option<PathBuf>, api_url: &str) -> Result
             }
             "2" => {
                 ui.section("Run a benchmark");
-                let Some(model) = prompt_model_path()? else {
+                let Some(model) = runtime.adapter().select_model()? else {
                     continue;
                 };
-                let Some(cooldown_enabled) = confirm_benchmark_run(
-                    &model,
-                    DEFAULT_PREFILL_TOKENS,
-                    DEFAULT_DECODE_TOKENS,
-                    DEFAULT_REPETITIONS,
-                    DEFAULT_WARMUP_REPETITIONS,
-                    false,
+                let Some(cooldown_enabled) = runtime.adapter().confirm(
+                    &BenchmarkRequest {
+                        model: &model,
+                        pp: DEFAULT_PREFILL_TOKENS,
+                        tg: DEFAULT_DECODE_TOKENS,
+                        reps: DEFAULT_REPETITIONS,
+                        warmup: DEFAULT_WARMUP_REPETITIONS,
+                        cooldown: false,
+                    },
                     false,
                 )?
                 else {
@@ -306,6 +368,7 @@ fn interactive(paths: &Paths, harness: Option<PathBuf>, api_url: &str) -> Result
                     continue;
                 };
                 if let Err(error) = run_benchmark(
+                    runtime,
                     paths,
                     harness.clone(),
                     &model,
@@ -442,27 +505,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn basert_runtime_selector_is_forwarded_to_the_shared_cli() {
-        let args = normalized_args(
-            [
-                "computearena",
-                "basert",
-                "--harness",
-                "/tmp/harness",
-                "list",
-            ]
-            .into_iter()
-            .map(OsString::from)
-            .collect(),
+    fn runtime_selection_is_explicit_and_cannot_be_nested() {
+        let cli = Cli::try_parse_from([
+            "computearena",
+            "basert",
+            "--harness",
+            "/tmp/harness",
+            "list",
+        ])
+        .unwrap();
+        assert_eq!(cli.harness, Some(PathBuf::from("/tmp/harness")));
+        assert_eq!(select_runtime(cli.command).0, Runtime::Basert);
+        let cli = Cli::try_parse_from(["computearena", "llama-cpp", "list"]).unwrap();
+        assert_eq!(select_runtime(cli.command).0, Runtime::LlamaCpp);
+        assert!(Cli::try_parse_from(["computearena", "basert", "llama-cpp"]).is_err());
+        assert!(
+            Cli::try_parse_from(["computearena", "basert", "run", "llama-cpp", "model.gguf"])
+                .is_err()
         );
-        assert_eq!(
-            args,
-            ["computearena", "--harness", "/tmp/harness", "list"]
-                .into_iter()
-                .map(OsString::from)
-                .collect::<Vec<_>>(),
-        );
-        assert!(Cli::try_parse_from(args).is_ok());
     }
 
     #[test]
@@ -541,8 +601,8 @@ mod tests {
     fn submit_yes_flag_allows_non_interactive_submission() {
         let cli = Cli::try_parse_from(["computearena", "submit", "--yes", "report.json"]).unwrap();
         assert!(matches!(
-            cli.command,
-            Some(Command::Submit {
+            select_runtime(cli.command).1,
+            Some(Action::Submit {
                 reports,
                 yes: true,
                 skip_invalid: false,
@@ -558,8 +618,8 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(
-            cli.command,
-            Some(Command::Submit {
+            select_runtime(cli.command).1,
+            Some(Action::Submit {
                 skip_invalid: true,
                 ..
             })
@@ -704,8 +764,8 @@ mod tests {
         let cli = Cli::try_parse_from(["computearena", "run", "model.base", "--cooldown", "--yes"])
             .unwrap();
         assert!(matches!(
-            cli.command,
-            Some(Command::Run {
+            select_runtime(cli.command).1,
+            Some(Action::Run {
                 cooldown: true,
                 yes: true,
                 ..

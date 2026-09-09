@@ -5,8 +5,9 @@ report creation, Ed25519 signing, inspection, verification, device login, and
 submission. Runtime-specific measurements stay behind executable adapters, so
 the CLI does not link the BaseRT engine.
 
-Only BaseRT is supported today. llama.cpp, MLX, and vLLM adapters can be added
-without moving the report, authentication, or submission code.
+BaseRT and llama.cpp are supported through a shared RuntimeAdapter interface.
+MLX and vLLM can implement the same interface without duplicating report,
+authentication, or submission code.
 
 ## Build
 
@@ -59,6 +60,28 @@ basert computearena
 
 For that command, both `basert` and `computearena` must be installed, and the
 standalone `computearena` binary must be beside `basert` or on `PATH`.
+
+## llama.cpp adapter
+
+Install llama.cpp from https://github.com/ggml-org/llama.cpp/releases and make
+`llama-bench` available on PATH, or provide its path:
+
+```sh
+computearena llama-cpp
+computearena llama-cpp --runtime-path /path/to/llama-bench
+computearena llama-cpp run /path/to/model.gguf
+```
+
+The same menus, report commands, login and submission flow work for both runtimes.
+Starting `computearena` without arguments offers a runtime chooser.
+The llama.cpp adapter asks for a GGUF file; it does not scan the disk.
+Its first version uses native warmup, and does not collect extra telemetry or
+support adaptive cooldown. The benchmark plan explains these differences.
+Positive `--warmup` values enable native warmup; they do not set its repetition count.
+
+Runtime binary checksums are recorded offline and checked by the server at
+submission. An unrecognized/custom build receives informational download guidance,
+not a report-integrity error. See [adapter details](docs/runtime-adapters.md).
 
 ## API and local data
 
