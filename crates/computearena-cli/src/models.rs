@@ -12,6 +12,9 @@ use std::fs::{self, File};
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
+const BASERT_REMOTE_MODELS_COMMAND: &str = "basert list --remote";
+const BASERT_PULL_MODEL_COMMAND: &str = "basert pull <model-id>";
+
 #[derive(Clone, Debug)]
 pub(crate) struct InstalledModel {
     pub(crate) path: PathBuf,
@@ -111,14 +114,42 @@ pub(crate) fn prompt_model_path() -> Result<Option<PathBuf>> {
         format!("Found {} compatible model(s)", installed.len()),
     );
     if installed.is_empty() {
+        print_model_acquisition_help(ui, true);
         return model_path_from_input(prompt("Model path: ")?).map(Some);
     }
 
+    print_model_acquisition_help(ui, false);
     if io::stdin().is_terminal() && io::stderr().is_terminal() {
         prompt_model_path_interactive(&installed, ui)
     } else {
         prompt_model_path_numbered(&installed, ui)
     }
+}
+
+fn print_model_acquisition_help(ui: TerminalUi, no_models_installed: bool) {
+    println!();
+    if no_models_installed {
+        println!(
+            "{}",
+            ui.neutral("No compatible BaseRT text models are installed yet.")
+        );
+    } else {
+        println!("{}", ui.neutral("Need another BaseRT model?"));
+    }
+    println!(
+        "  {}  {}",
+        ui.neutral("Browse"),
+        ui.accent_bold(BASERT_REMOTE_MODELS_COMMAND)
+    );
+    println!(
+        "  {}    {}",
+        ui.neutral("Pull"),
+        ui.accent_bold(BASERT_PULL_MODEL_COMMAND)
+    );
+    println!(
+        "{}",
+        ui.muted("Run this step again after pulling to refresh the list.")
+    );
 }
 
 fn prompt_model_path_interactive(
