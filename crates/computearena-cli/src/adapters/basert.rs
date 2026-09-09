@@ -58,9 +58,63 @@ impl RuntimeAdapter for BaseRtAdapter {
         let benchmark: Value =
             serde_json::from_slice(&output.stdout).context("BaseRT returned invalid JSON")?;
         crate::benchmark::validate_harness_result(&benchmark)?;
+        validate_requested_workloads(&benchmark, r)?;
         Ok(RuntimeOutput {
             benchmark,
             model: crate::models::inspect_model(r.model)?,
         })
     }
+}
+
+/// A compatible harness must also have completed the work the user requested.
+/// Keep raw samples unchanged; reject partial runs instead of signing them.
+fn validate_requested_workloads(value: &Value, r: &BenchmarkRequest<'_>) -> Result<()> {
+    use std::collections::BTreeSet;
+    let expected: BTreeSet<u64> =
+        r.pp.split(',')
+            .map(str::parse)
+            .collect::<std::result::Result<_, _>>()?;
+    let prefill = value["raw_samples"]["prefill"]
+        .as_object()
+        .context("missing prefill samples")?;
+    if expected.len() != r.pp.split(',').count() || prefill.len() != expected.len() {
+        bail!("BaseRT did not complete exactly the requested prefill workloads");
+    }
+    for field in ["tg", "reps"] {
+        let requested = if field == "tg" { r.tg } else { r.reps };
+        if let Some(actual) = value["params"].get(field) {
+            if actual.as_u64() != Some(u64::from(requested)) {
+                bail!("BaseRT returned an unexpected {field} parameter");
+            }
+        }
+    }
+    let check_samples = |samples: &Value, key: &str, tokens: u64| -> Result<()> {
+        let samples = samples.as_array().context("missing samples")?;
+        if samples.len() != r.reps as usize {
+            bail!("BaseRT returned an unexpected repetition count");
+        }
+        for sample in samples {
+            if sample[key].as_u64() != Some(tokens) {
+                bail!("BaseRT returned an unexpected {key} count");
+            }
+            if !matches!(
+                sample["elapsed_ns"].as_u64(),
+                Some(1..=9_007_199_254_740_991)
+            ) {
+                bail!("BaseRT returned an invalid sample duration");
+            }
+        }
+        Ok(())
+    };
+    for tokens in expected {
+        let samples = prefill
+            .get(&tokens.to_string())
+            .context("BaseRT omitted a requested prefill workload")?;
+        check_samples(samples, "tokens", tokens)?;
+    }
+    check_samples(
+        &value["raw_samples"]["decode"],
+        "generated_tokens",
+        u64::from(r.tg),
+    )
 }
