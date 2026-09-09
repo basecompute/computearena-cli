@@ -8,7 +8,7 @@ pub(crate) fn client(request_timeout: Duration) -> Result<Client> {
     Client::builder()
         .connect_timeout(HTTP_CONNECT_TIMEOUT)
         .timeout(request_timeout)
-        .user_agent(format!("basert-computearena/{}", env!("CARGO_PKG_VERSION")))
+        .user_agent(format!("computearena/{}", env!("CARGO_PKG_VERSION")))
         .build()
         .context("building ComputeArena HTTP client")
 }

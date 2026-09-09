@@ -4,8 +4,8 @@ use crate::protocol::{
 };
 use crate::ui::{finish_activity, start_activity, TerminalUi};
 use anyhow::{bail, Context, Result};
-use base_sign::{b64_decode, b64_encode, sign_payload, signing_key_from_bytes, verify_payload};
-use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand_core::OsRng;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -78,6 +78,23 @@ fn load_installation_key(path: &Path) -> Result<SigningKey> {
     signing_key_from_bytes(&bytes)
 }
 
+fn signing_key_from_bytes(bytes: &[u8]) -> Result<SigningKey> {
+    let key: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid Ed25519 private key length"))?;
+    Ok(SigningKey::from_bytes(&key))
+}
+
+pub(crate) fn b64_encode(bytes: &[u8]) -> String {
+    BASE64_STANDARD.encode(bytes)
+}
+
+fn b64_decode(value: &str) -> Result<Vec<u8>> {
+    BASE64_STANDARD
+        .decode(value)
+        .context("invalid base64 encoding")
+}
+
 #[cfg(unix)]
 pub(crate) fn set_private_permissions(file: &fs::File) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -95,7 +112,7 @@ pub(crate) fn sign_report(report: &mut Value, key: &SigningKey) -> Result<()> {
         bail!("refusing to sign a report that already has a signature");
     }
     let payload = signature_payload(report)?;
-    let signature = sign_payload(key, &payload);
+    let signature = key.sign(&payload);
     report
         .as_object_mut()
         .context("report must be a JSON object")?
@@ -161,7 +178,7 @@ pub(crate) fn verify_report(report: &Value) -> Result<String> {
         .context("report must be a JSON object")?
         .remove("signature");
     let payload = signature_payload(&unsigned)?;
-    verify_payload(&public, &payload, &signature).map_err(|_| {
+    public.verify(&payload, &signature).map_err(|_| {
         anyhow::anyhow!(
             "signature verification failed; the report was modified after signing or has an invalid signature"
         )

@@ -26,8 +26,8 @@ use models::{
 use protocol::*;
 #[cfg(test)]
 use reports::{
-    format_unix_ms, peak_memory_for_report, sha256_hex, sign_report, throughput_for_report,
-    write_canonical_json,
+    b64_encode, format_unix_ms, peak_memory_for_report, sha256_hex, sign_report,
+    throughput_for_report, write_canonical_json,
 };
 use reports::{
     list_reports, model_identity_for_report, read_report, report_summaries, resolve_report,
@@ -39,8 +39,6 @@ use submission::{select_reports_for_submission, submit_reports};
 use ui::{finish_activity, prompt, start_activity, TerminalUi};
 
 use anyhow::{bail, Context, Result};
-#[cfg(test)]
-use base_sign::b64_encode;
 use clap::{Parser, Subcommand};
 #[cfg(test)]
 use ed25519_dalek::SigningKey;
@@ -49,6 +47,7 @@ use rand_core::OsRng;
 #[cfg(test)]
 use serde_json::json;
 use serde_json::Value;
+use std::ffi::OsString;
 #[cfg(test)]
 use std::fs;
 #[cfg(test)]
@@ -57,10 +56,11 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "basert-computearena",
-    bin_name = "basert computearena",
+    name = "computearena",
+    bin_name = "computearena",
     version,
-    about = "Run, retain, and verify ComputeArena benchmarks"
+    about = "Run, retain, and verify ComputeArena benchmarks",
+    after_help = "BaseRT runtime selector: computearena basert [OPTIONS] [COMMAND]"
 )]
 struct Cli {
     /// Override the local ComputeArena data directory.
@@ -133,6 +133,13 @@ enum Command {
     },
 }
 
+fn normalized_args(mut args: Vec<OsString>) -> Vec<OsString> {
+    if args.get(1).and_then(|arg| arg.to_str()) == Some("basert") {
+        args.remove(1);
+    }
+    args
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("error: {error:#}");
@@ -141,11 +148,13 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(normalized_args(std::env::args_os().collect()));
     let data_dir = match cli.data_dir {
         Some(path) => Some(path),
-        None => match std::env::var_os("BASERT_COMPUTEARENA_HOME") {
-            Some(path) if path.is_empty() => bail!("BASERT_COMPUTEARENA_HOME is set but empty"),
+        None => match std::env::var_os("COMPUTEARENA_HOME")
+            .or_else(|| std::env::var_os("BASERT_COMPUTEARENA_HOME"))
+        {
+            Some(path) if path.is_empty() => bail!("COMPUTEARENA_HOME is set but empty"),
             Some(path) => Some(PathBuf::from(path)),
             None => None,
         },
@@ -229,7 +238,7 @@ fn execute(command: Command, paths: &Paths, harness: Option<PathBuf>, api_url: &
 
 fn interactive(paths: &Paths, harness: Option<PathBuf>, api_url: &str) -> Result<()> {
     let ui = TerminalUi::detect();
-    ui.banner();
+
     loop {
         println!();
         println!(
@@ -239,7 +248,10 @@ fn interactive(paths: &Paths, harness: Option<PathBuf>, api_url: &str) -> Result
         println!(
             "  {}  {}",
             ui.brand_bold("ComputeArena"),
-            ui.muted("computearena.ai")
+            ui.muted(format!(
+                "{} · {}",
+                COMPUTEARENA_WEBSITE, COMPUTEARENA_DISCORD
+            ))
         );
         println!(
             "{}",
@@ -429,6 +441,56 @@ fn prompt_report_choice(paths: &Paths, ui: TerminalUi) -> Result<Option<PathBuf>
 mod tests {
     use super::*;
 
+    #[test]
+    fn basert_runtime_selector_is_forwarded_to_the_shared_cli() {
+        let args = normalized_args(
+            [
+                "computearena",
+                "basert",
+                "--harness",
+                "/tmp/harness",
+                "list",
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+        );
+        assert_eq!(
+            args,
+            ["computearena", "--harness", "/tmp/harness", "list"]
+                .into_iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>(),
+        );
+        assert!(Cli::try_parse_from(args).is_ok());
+    }
+
+    #[test]
+    fn reads_base_model_metadata_without_linking_basert() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("model.base");
+        let header = serde_json::to_vec(&json!({
+            "schema": 7,
+            "arch": "qwen",
+            "quant_scheme": "base_q4",
+            "quant_profile": "default-q4",
+            "target_backend": "metal",
+            "source": {"sha256": "abc123"}
+        }))
+        .unwrap();
+        let mut contents = b"BASE".to_vec();
+        contents.extend_from_slice(&1_u32.to_le_bytes());
+        contents.extend_from_slice(&(header.len() as u64).to_le_bytes());
+        contents.extend_from_slice(&header);
+        fs::write(&path, contents).unwrap();
+
+        let model = models::inspect_model(&path).unwrap();
+        assert_eq!(model["format_schema"], 7);
+        assert_eq!(model["architecture"], "qwen");
+        assert_eq!(model["quantization"], "base_q4");
+        assert_eq!(model["source_sha256"], "abc123");
+    }
+
     fn sample_report() -> Value {
         json!({
             "schema": REPORT_SCHEMA,
@@ -477,8 +539,7 @@ mod tests {
 
     #[test]
     fn submit_yes_flag_allows_non_interactive_submission() {
-        let cli =
-            Cli::try_parse_from(["basert-computearena", "submit", "--yes", "report.json"]).unwrap();
+        let cli = Cli::try_parse_from(["computearena", "submit", "--yes", "report.json"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Command::Submit {
@@ -489,7 +550,7 @@ mod tests {
         ));
 
         let cli = Cli::try_parse_from([
-            "basert-computearena",
+            "computearena",
             "submit",
             "--yes",
             "--skip-invalid",
@@ -503,13 +564,10 @@ mod tests {
                 ..
             })
         ));
-        assert!(Cli::try_parse_from([
-            "basert-computearena",
-            "submit",
-            "--skip-invalid",
-            "report.json",
-        ])
-        .is_err());
+        assert!(
+            Cli::try_parse_from(["computearena", "submit", "--skip-invalid", "report.json",])
+                .is_err()
+        );
     }
 
     #[test]
@@ -643,14 +701,8 @@ mod tests {
 
     #[test]
     fn run_flags_support_non_interactive_cooldown_execution() {
-        let cli = Cli::try_parse_from([
-            "basert-computearena",
-            "run",
-            "model.base",
-            "--cooldown",
-            "--yes",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["computearena", "run", "model.base", "--cooldown", "--yes"])
+            .unwrap();
         assert!(matches!(
             cli.command,
             Some(Command::Run {

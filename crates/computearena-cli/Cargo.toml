@@ -7,13 +7,12 @@ rust-version.workspace = true
 description = "Offline benchmark collection and submission client for computearena.ai"
 
 [[bin]]
-name = "basert-computearena"
+name = "computearena"
 path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-base-format.workspace = true
-base-sign.workspace = true
+base64.workspace = true
 clap.workspace = true
 dialoguer.workspace = true
 dirs.workspace = true

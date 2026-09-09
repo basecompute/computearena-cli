@@ -1,4 +1,3 @@
-use crate::config::{BASECOMPUTE_DISCORD, BASECOMPUTE_WEBSITE};
 use crate::theme::BASECOMPUTE_THEME;
 use anyhow::{Context, Result};
 use dialoguer::console::Style;
@@ -6,9 +5,6 @@ use std::fmt::Display;
 use std::io::{self, IsTerminal, Write};
 use std::time::Instant;
 
-// BaseRT supplies the branded launcher build. A future standalone repository
-// can replace this one compile-time asset without changing CLI behavior.
-const BASERT_BANNER_HEADER: &str = include_str!("../../../../tools/basert_banner.h");
 const RULE: &str = "────────────────────────────────────────────────────────────";
 
 #[derive(Clone, Copy)]
@@ -62,71 +58,6 @@ impl TerminalUi {
         println!("{}", self.brand_bold(title));
         println!("{}", self.muted(RULE));
     }
-
-    pub(crate) fn banner(self) {
-        println!();
-        for (line, style) in shared_banner_art()
-            .into_iter()
-            .zip(shared_banner_gradient())
-        {
-            println!("  {}", self.render(style.bold(), line));
-        }
-        println!(
-            "\n  {} {} {}\n",
-            self.render(BASECOMPUTE_THEME.brand.style().dim(), BASECOMPUTE_WEBSITE),
-            self.muted("·"),
-            self.render(BASECOMPUTE_THEME.brand.style().dim(), BASECOMPUTE_DISCORD)
-        );
-    }
-}
-
-fn shared_banner_array(marker: &str) -> Vec<&'static str> {
-    let block = BASERT_BANNER_HEADER
-        .split_once(marker)
-        .unwrap_or_else(|| panic!("missing {marker:?} in tools/basert_banner.h"))
-        .1
-        .split_once("};")
-        .unwrap_or_else(|| panic!("unterminated {marker:?} in tools/basert_banner.h"))
-        .0;
-    let mut values = Vec::new();
-    let mut rest = block;
-    while let Some((_, after_opening_quote)) = rest.split_once('"') {
-        let Some((value, after_closing_quote)) = after_opening_quote.split_once('"') else {
-            break;
-        };
-        values.push(value);
-        rest = after_closing_quote;
-    }
-    values
-}
-
-fn shared_banner_art() -> Vec<&'static str> {
-    shared_banner_array("static const char *art[8] = {")
-}
-
-fn shared_banner_gradient() -> Vec<Style> {
-    shared_banner_array("static const char *grad[8] = {")
-        .into_iter()
-        .map(banner_gradient_style)
-        .collect()
-}
-
-fn banner_gradient_style(value: &str) -> Style {
-    let values: Vec<u8> = value
-        .strip_prefix("\\x1b[")
-        .and_then(|value| value.strip_suffix('m'))
-        .unwrap_or_else(|| panic!("invalid gradient entry in tools/basert_banner.h"))
-        .split(';')
-        .map(|component| {
-            component
-                .parse()
-                .unwrap_or_else(|_| panic!("invalid gradient entry in tools/basert_banner.h"))
-        })
-        .collect();
-    let [38, 2, red, green, blue] = values.as_slice() else {
-        panic!("unsupported gradient entry in tools/basert_banner.h");
-    };
-    Style::new().true_color(*red, *green, *blue)
 }
 
 pub(crate) fn start_activity(ui: TerminalUi, message: impl Display) -> Instant {
@@ -167,18 +98,5 @@ pub(crate) fn prompt_yes_no(message: &str, default: bool) -> Result<bool> {
                 TerminalUi::detect().warning("!")
             ),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn shared_basert_banner_header_is_parseable() {
-        let art = shared_banner_art();
-        let gradient = shared_banner_gradient();
-        assert_eq!(art.len(), 8);
-        assert_eq!(gradient.len(), art.len());
     }
 }

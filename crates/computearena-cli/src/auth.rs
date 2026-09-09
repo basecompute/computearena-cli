@@ -23,6 +23,7 @@ pub(crate) struct ApiSession {
 }
 pub(crate) fn resolve_api_url(override_url: Option<String>) -> Result<String> {
     let value = override_url
+        .or_else(|| std::env::var("COMPUTEARENA_API_URL").ok())
         .or_else(|| std::env::var("BASERT_COMPUTEARENA_API_URL").ok())
         .unwrap_or_else(|| DEFAULT_API_URL.to_string());
     let value = value.trim().trim_end_matches('/');
@@ -47,7 +48,7 @@ pub(crate) fn login(paths: &Paths, api_url: &str) -> Result<()> {
                     "Logged in to {api_url} as {}.",
                     ui.success(format!("@{username}"))
                 );
-                println!("Run `basert computearena logout` before switching accounts.");
+                println!("Run `computearena logout` before switching accounts.");
                 return Ok(());
             }
             None => {
@@ -137,7 +138,7 @@ pub(crate) fn login(paths: &Paths, api_url: &str) -> Result<()> {
                 .unwrap_or_else(|| format!("server returned HTTP {}", status.as_u16()))
         );
     }
-    bail!("login code expired; run `basert computearena login` again")
+    bail!("login code expired; run `computearena login` again")
 }
 
 fn validate_api_session(api_url: &str, session: &ApiSession) -> Result<Option<String>> {

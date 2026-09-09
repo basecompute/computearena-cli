@@ -5,11 +5,11 @@ use crate::config::{
 use crate::theme::model_selector_theme;
 use crate::ui::{finish_activity, prompt, start_activity, TerminalUi};
 use anyhow::{bail, Context, Result};
-use base_format::BaseReader;
+
 use dialoguer::FuzzySelect;
 use serde_json::{json, Value};
-use std::fs;
-use std::io::{self, IsTerminal, Write};
+use std::fs::{self, File};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
@@ -23,19 +23,19 @@ pub(crate) struct InstalledModel {
 pub(crate) fn inspect_model(path: &Path) -> Result<Value> {
     let file = fs::metadata(path)
         .with_context(|| format!("reading model metadata for {}", path.display()))?;
-    let header = BaseReader::read_header(path)
+    let header = read_base_header(path)
         .with_context(|| format!("reading BaseRT model header from {}", path.display()))?;
     let fallback_name = fallback_model_name(path);
     let mut model = json!({
         "name": fallback_name,
         "file_name": path.file_name().and_then(|name| name.to_str()).unwrap_or("unknown"),
         "size_bytes": file.len(),
-        "format_schema": header.schema,
-        "architecture": header.arch,
-        "quantization": header.quant_scheme,
-        "quant_profile": header.quant_profile,
-        "target_backend": header.target_backend,
-        "source_sha256": header.source.sha256
+        "format_schema": required_header_u64(&header, "schema")?,
+        "architecture": required_header_string(&header, "arch")?,
+        "quantization": required_header_string(&header, "quant_scheme")?,
+        "quant_profile": header.get("quant_profile").and_then(Value::as_str),
+        "target_backend": header.get("target_backend").and_then(Value::as_str),
+        "source_sha256": header.pointer("/source/sha256").and_then(Value::as_str)
     });
     if let Some((id, variant)) = model_identity_from_path(path)? {
         model["name"] = json!(id);
@@ -43,6 +43,45 @@ pub(crate) fn inspect_model(path: &Path) -> Result<Value> {
         model["variant"] = json!(variant);
     }
     Ok(model)
+}
+
+fn read_base_header(path: &Path) -> Result<Value> {
+    const PREFIX_BYTES: usize = 16;
+    const MAX_HEADER_BYTES: u64 = 64 * 1024 * 1024;
+
+    let mut file = File::open(path)?;
+    let mut prefix = [0_u8; PREFIX_BYTES];
+    file.read_exact(&mut prefix)
+        .context("model is smaller than the BaseRT header prefix")?;
+    if &prefix[0..4] != b"BASE" {
+        bail!("invalid BaseRT model magic");
+    }
+    let version = u32::from_le_bytes(prefix[4..8].try_into().unwrap());
+    if version != 1 {
+        bail!("unsupported BaseRT model format version {version}");
+    }
+    let header_len = u64::from_le_bytes(prefix[8..16].try_into().unwrap());
+    if header_len > MAX_HEADER_BYTES {
+        bail!("BaseRT model header exceeds {MAX_HEADER_BYTES} bytes");
+    }
+    let mut bytes = vec![0_u8; usize::try_from(header_len)?];
+    file.read_exact(&mut bytes)
+        .context("model contains a truncated BaseRT JSON header")?;
+    serde_json::from_slice(&bytes).context("parsing BaseRT model JSON header")
+}
+
+fn required_header_string<'a>(header: &'a Value, field: &str) -> Result<&'a str> {
+    header
+        .get(field)
+        .and_then(Value::as_str)
+        .with_context(|| format!("BaseRT model header is missing {field}"))
+}
+
+fn required_header_u64(header: &Value, field: &str) -> Result<u64> {
+    header
+        .get(field)
+        .and_then(Value::as_u64)
+        .with_context(|| format!("BaseRT model header is missing {field}"))
 }
 
 pub(crate) fn fallback_model_name(path: &Path) -> String {
@@ -272,23 +311,25 @@ fn discover_installed_models() -> Result<Vec<InstalledModel>> {
             } else if file_type.is_file()
                 && path.file_name().and_then(|name| name.to_str()) == Some("model.base")
             {
-                let header = match BaseReader::read_header(&path) {
+                let header = match read_base_header(&path) {
                     Ok(header) => header,
                     Err(_) => continue,
                 };
-                if header.arch == "whisper" {
+                let Some(architecture) = header.get("arch").and_then(Value::as_str) else {
+                    continue;
+                };
+                if architecture == "whisper" {
                     continue;
                 }
-                let quantization = serde_json::to_value(header.quant_scheme)?
-                    .as_str()
-                    .unwrap_or("unknown")
-                    .to_string();
+                let Some(quantization) = header.get("quant_scheme").and_then(Value::as_str) else {
+                    continue;
+                };
                 let Some((id, variant)) = model_identity_from_path(&path)? else {
                     continue;
                 };
                 models.push(InstalledModel {
-                    architecture: header.arch,
-                    quantization,
+                    architecture: architecture.to_string(),
+                    quantization: quantization.to_string(),
                     variant,
                     id,
                     path,

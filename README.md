@@ -1,173 +1,91 @@
-# BaseRT ComputeArena
+# ComputeArena CLI
 
-`computearena/` is an independently buildable Cargo workspace included in the
-BaseRT repository. Its `computearena-cli` package builds the
-`basert-computearena` executable, which the main launcher exposes as:
+The workspace builds the standalone `computearena` client. It owns local
+report creation, Ed25519 signing, inspection, verification, device login, and
+submission. Runtime-specific measurements stay behind executable adapters, so
+the CLI does not link the BaseRT engine.
 
-```console
+Only BaseRT is supported today. llama.cpp, MLX, and vLLM adapters can be added
+without moving the report, authentication, or submission code.
+
+## Build
+
+From the ComputeArena repository root:
+
+```sh
+cargo build --release
+```
+
+The binary is written to `target/release/computearena`. Copy it to a
+directory on `PATH` if you want to invoke it globally.
+
+## BaseRT adapter
+
+ComputeArena looks for `basert-benchmark-harness` on `PATH`. The harness must
+advertise the `basert-benchmark-harness/1` result protocol through
+`describe --json`. If it is not on `PATH`, specify it explicitly:
+
+```sh
+computearena basert \
+  --harness /absolute/path/to/basert-benchmark-harness
+```
+
+The runtime selector starts the interactive session:
+
+```sh
+computearena basert
+```
+
+Common actions can also be called directly:
+
+```sh
+computearena run /path/to/model.base
+computearena list
+computearena inspect <run-id-or-path>
+computearena verify <run-id-or-path>
+computearena login
+computearena submit
+```
+
+`COMPUTEARENA_BASERT_HARNESS` is the environment equivalent of `--harness`.
+The older `BASERT_COMPUTEARENA_HARNESS` name remains accepted during migration.
+
+BaseRT releases containing the ComputeArena launcher shim can also delegate to
+this binary:
+
+```sh
 basert computearena
 ```
 
-The controller owns the user workflow, local report store, installation
-identity, report finalization, and signature verification. Benchmark execution
-stays behind the separate `basert-harness` process boundary so this module can
-be extracted into an independent binary without importing BaseRT engine
-internals.
+For that command, both `basert` and `computearena` must be installed, and the
+standalone `computearena` binary must be beside `basert` or on `PATH`.
 
-Build and test this workspace independently:
+## API and local data
 
-```console
-cargo build --manifest-path computearena/Cargo.toml
-cargo test --manifest-path computearena/Cargo.toml
+Production is the default. Override it for local or staging development:
+
+```sh
+computearena --api-url http://127.0.0.1:3000/api/v1 login
 ```
 
-The workspace owns its version, dependency set, lockfile, and CI job. BaseRT
-integration is deliberately limited to the `basert computearena` launcher
-dispatch, the separately built `basert-harness` executable, release packaging,
-and two temporary Rust path dependencies used to read `.base` metadata and
-reuse signing helpers. Moving model inspection behind the harness adapter and
-owning the small report-signing implementation are the remaining steps before
-the directory can move to another repository unchanged.
+`COMPUTEARENA_API_URL` and `COMPUTEARENA_HOME` provide environment overrides.
+The older `BASERT_COMPUTEARENA_API_URL` and `BASERT_COMPUTEARENA_HOME` names
+remain accepted. The default data directory intentionally remains the existing
+`basert/computearena` platform data directory so upgrading does not hide saved
+reports, credentials, or the installation signing key.
 
-## Current commands
+Benchmarks can be generated and verified offline. Login is only required to
+associate submissions with a profile. A report signature detects modification
+after the client finalized the file; it does not prove that a modified client,
+harness, driver, or operating system reported truthful measurements.
 
-```console
-basert computearena run /path/to/model.base
-basert computearena list
-basert computearena inspect <run-id-or-path>
-basert computearena verify <run-id-or-path>
-```
+## Protocol compatibility
 
-The default text workload measures prefill at powers of two from PP128 through
-PP16384 (`128,256,512,1024,2048,4096,8192,16384`) and decode at TG128. Use
-`run --pp <comma-separated-values> --tg <tokens>` to override the sweep. The
-public headline remains PP512/TG128 so new reports stay comparable with
-previous submissions while retaining the additional long-context measurements
-in their signed JSON.
+- Report envelope: `computearena-benchmark/1`
+- New BaseRT harness output: `basert-benchmark-harness/1`
+- Legacy BaseRT harness output remains accepted by the server:
+  `basert-harness/1`
+- Telemetry: `basert-telemetry/3`
+- Signing: Ed25519 over `computearena-json-v1` canonical JSON
 
-Before execution, the CLI shows the selected model, exact PP/TG workloads,
-warmup and recorded repetitions, device-load warning, local report policy, and
-duration estimates for warmup-only and thermally conditioned runs. Thermal
-cooldown is opt-in: interactive runs ask which profile to use, while scripts
-can pass `run --cooldown`. Use `run --yes` for non-interactive automation; the
-plan is still printed and cooldown remains off unless `--cooldown` is present.
-
-Running without a subcommand opens the interactive menu. Login and submission
-are menu/CLI placeholders until the `computearena.ai` server API is available;
-benchmark creation and verification do not require a network connection or a
-user account.
-
-The interactive UI embeds its BaseRT wordmark and gradient directly from the
-shared `tools/basert_banner.h` source at compile time, avoiding a second copy of
-the ASCII art and any runtime asset dependency. It uses BaseCompute terminal
-colors and reports potentially slow work—model discovery, benchmark execution,
-report loading, verification, and signing—before it begins. Selecting
-verification presents available reports as a numbered list, so users do not
-need to know report paths or IDs. ANSI color is disabled when output is
-redirected or `NO_COLOR` is set. Benchmark-harness progress uses the same
-BaseCompute palette: blue marks active work, lime marks completed measurements,
-neutral gray carries secondary detail, and red is reserved for timeouts or
-errors. Interactive cooldown updates replace one line in place; redirected logs
-retain plain periodic progress lines.
-
-For a source-tree build, build the companion harness once before running a real
-benchmark:
-
-```console
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --target baseRT_bench_multidevice
-```
-
-This produces both the internal `build/baseRT_bench_multidevice` name and the
-stable `build/basert-harness` name. Published BaseRT archives place the harness
-beside `basert-computearena`, so no separate build step is required there.
-
-## Local data and signing
-
-The default data root is the platform's local application-data directory under
-`basert/computearena`. `BASERT_COMPUTEARENA_HOME` or `--data-dir` can override
-it. Reports are immutable JSON files under `reports/`.
-
-The first benchmark creates a random Ed25519 installation key using the OS
-CSPRNG. On Unix, the private-key file is mode `0600`. A report is signed only
-after the harness exits and every report field has been assembled. The account
-ID is deliberately absent: a report may be generated offline and associated
-with an authenticated account during a later upload.
-
-The signature proves that the JSON has not changed since this installation
-finalized it. It does not prove that user-controlled hardware or software ran
-honestly; server-side validation and trust classification remain necessary.
-
-Each new report stores its human-readable model `name` inside the signed JSON.
-Models from the BaseRT cache also include their canonical `id` and `variant`,
-along with architecture and quantization metadata. The full local model path is
-not stored. This lets `computearena list` display the model without rescanning
-or parsing installed model files; model discovery is performed only when the
-user chooses to run a benchmark.
-
-## Process contracts
-
-- Harness output: `basert-harness/1`
-- Saved report: `computearena-benchmark/1`
-- Signature canonicalization: `computearena-json-v1`
-
-The harness includes raw `{tokens, elapsed_ns}` samples for prefill and
-`{generated_tokens, elapsed_ns}` samples for decode. Aggregate throughput is
-retained for local display, but the server can recompute it from raw samples.
-Available start/end thermal readings and current process-residency snapshots
-are captured beside the throughput measurements. A separately labelled
-process-lifetime RSS high-water mark remains as a coarse fit indicator.
-
-ComputeArena invokes text benchmarks with `--telemetry`, which adds an optional
-`benchmark.telemetry` object using the nested `basert-telemetry/3` schema.
-Workload-specific warmups always run for at least three seconds. Adaptive
-thermal cooldown is opt-in and is passed to the harness as `--cooldown`.
-
-With cooldown enabled, `basert-telemetry/3` conditions every independent PP/TG
-phase before measurement. It establishes a stable idle baseline and waits for
-a ten-second stable window within the configured temperature, power, and
-utilization limits. The adaptive wait is capped at three minutes; unavailable
-sensors use a recorded 30-second fallback. With cooldown disabled, those idle
-waits are skipped while warmups and all telemetry measurements remain enabled.
-Recorded repetitions stay contiguous, with no observer work or cooldown gaps
-inside their timing window.
-
-The runtime-neutral `computearena-conditioning/1` object records the selected
-mode, policy, baseline, actual wait, timeout/fallback result, temperature slope,
-and warmup work for headline performance and every diagnostic replay. Opted-out
-waits are explicit (`method: disabled`, `reason: user_opt_out`). Older signed
-`basert-telemetry/2` reports remain readable and submittable.
-
-Headline throughput samples remain uninstrumented: power-state, temperature,
-vendor power, cumulative energy, and peak-RSS snapshots are read only before
-or after those timers. The snapshots also record BaseRT's model-memory
-accounting and, where available, accelerator memory use. Every diagnostic
-replay also carries a `computearena-runtime-memory/1` boundary observation:
-runtime-allocated memory plus KV-cache capacity and logical usage (and block
-occupancy for paged caches). The provider-labelled shape is deliberately
-runtime-neutral so future llama.cpp, vLLM, and MLX adapters can populate the
-same fields without treating process RSS and accelerator allocations as the
-same measurement. The harness then runs five-second diagnostic replays that
-sample current process memory every 25 ms
-for every prefill length and decode. Each workload reports its baseline,
-observed peak, peak increase, ending footprint, sample count, missed sampling
-deadlines, and observer read time. On Apple Silicon, these replays also sample
-temperature, while energy uses separate replays:
-
-- energy uses start/end IOReport counters, a 1.5-second idle baseline, and
-  reports gross and idle-adjusted joules for every prefill length and decode;
-- temperature is sampled every 500 ms in the same diagnostic replay and reports
-  the maximum and mean die temperature for every workload; and
-- each replay records its elapsed time, iterations, and processed tokens so its
-  telemetry is auditable and is never confused with the headline performance
-  run.
-
-IOReport counters are system-wide estimates, so Apple energy values are
-advisory and are most useful on an otherwise-idle machine. NVIDIA and ROCm
-currently use deliberately basic accelerator telemetry: start/end GPU
-temperature, board power, memory use and cumulative energy when exposed by
-`nvidia-smi` or `rocm-smi`, plus Linux power-source and CPU-governor data. They
-use the same per-workload process-memory replay through `/proc/self/statm`;
-per-workload accelerator energy and continuous temperature collection remain
-explicitly unavailable until those paths have been measured on supported
-hardware.
+Community and support: [ComputeArena Discord](https://discord.gg/vENxergRG6).

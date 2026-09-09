@@ -6,17 +6,11 @@ members = ["crates/computearena-cli"]
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/basecompute/baseRT"
 rust-version = "1.85"
 
 [workspace.dependencies]
-# Temporary BaseRT adapter dependencies. Keeping these two paths explicit makes
-# the remaining extraction work visible; the CLI does not link the BaseRT
-# engine and communicates with it only through the basert-harness process.
-base-format = { path = "../tools/base-convert/crates/base-format" }
-base-sign = { path = "../tools/base-convert/crates/base-sign" }
-
 anyhow = "1"
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 dialoguer = { version = "0.12", default-features = false, features = ["fuzzy-select"] }
 dirs = "5"

@@ -33,10 +33,7 @@ pub(crate) const MODEL_QUANT_COLUMN_WIDTH: usize = 12;
 
 pub(crate) const PRIVATE_FILE_MODE: u32 = 0o600;
 
-pub(crate) const BASECOMPUTE_WEBSITE: &str = "https://basecompute.co";
-pub(crate) const BASECOMPUTE_DISCORD: &str = "https://discord.gg/tB9YFTKZUV";
+pub(crate) const COMPUTEARENA_WEBSITE: &str = "https://computearena.ai";
+pub(crate) const COMPUTEARENA_DISCORD: &str = "https://discord.gg/vENxergRG6";
 
-pub(crate) const PRIMARY_HARNESS_NAME: &str = "basert-harness";
-pub(crate) const LEGACY_HARNESS_NAME: &str = "baseRT_bench_multidevice";
-pub(crate) const DEVELOPMENT_HARNESS_PATHS: [&str; 2] =
-    ["build/basert-harness", "build/baseRT_bench_multidevice"];
+pub(crate) const BASERT_HARNESS_NAME: &str = "basert-benchmark-harness";

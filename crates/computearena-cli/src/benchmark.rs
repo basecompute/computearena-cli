@@ -1,18 +1,17 @@
 use crate::config::{
     APPLE_CONDITIONED_PHASES_PER_WORKLOAD, APPLE_TELEMETRY_IDLE_BASELINE_SECONDS,
-    CONDITIONING_FALLBACK_WAIT_SECONDS, CONDITIONING_MAXIMUM_WAIT_SECONDS,
+    BASERT_HARNESS_NAME, CONDITIONING_FALLBACK_WAIT_SECONDS, CONDITIONING_MAXIMUM_WAIT_SECONDS,
     CONDITIONING_MINIMUM_WARMUP_SECONDS, CONDITIONING_STABLE_WINDOW_SECONDS,
-    DEVELOPMENT_HARNESS_PATHS, LEGACY_HARNESS_NAME, PORTABLE_CONDITIONED_PHASES_PER_WORKLOAD,
-    PRIMARY_HARNESS_NAME, TELEMETRY_WINDOW_SECONDS,
+    PORTABLE_CONDITIONED_PHASES_PER_WORKLOAD, TELEMETRY_WINDOW_SECONDS,
 };
 use crate::models::{compact_home_path, inspect_model};
 use crate::protocol::{HARNESS_SCHEMA, REPORT_SCHEMA, RUNTIME_NAME, TELEMETRY_SCHEMA};
+use crate::reports::b64_encode;
 use crate::reports::{
     atomic_write_json, hex, load_or_create_installation_key, sha256_hex, sign_report, Paths,
 };
 use crate::ui::{finish_activity, prompt_yes_no, start_activity, TerminalUi};
 use anyhow::{bail, Context, Result};
-use base_sign::b64_encode;
 use rand_core::{OsRng, RngCore};
 use serde_json::{json, Value};
 use std::fs;
@@ -213,6 +212,15 @@ pub(crate) fn run_benchmark(
     paths.prepare()?;
     let harness = resolve_harness(harness_override)?;
     let ui = TerminalUi::detect();
+    let checking_started = start_activity(
+        ui,
+        format!(
+            "Checking BaseRT harness compatibility with {}…",
+            harness.display()
+        ),
+    );
+    validate_harness_descriptor(&harness)?;
+    finish_activity(ui, checking_started, "Benchmark harness is compatible");
     let benchmark_started = start_activity(
         ui,
         format!(
@@ -222,6 +230,7 @@ pub(crate) fn run_benchmark(
     );
     let mut command = ProcessCommand::new(&harness);
     command
+        .arg("run")
         .arg(model)
         .args(["--mode", "text", "-p", pp, "-n"])
         .arg(tg.to_string())
@@ -295,42 +304,6 @@ fn parse_pp(pp: &str) -> Result<Vec<u32>> {
     Ok(values)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn formats_preflight_profile_duration_estimates() {
-        let prefill_count = parse_pp("128,256,512,1024,2048,4096,8192,16384")
-            .unwrap()
-            .len();
-
-        let apple = benchmark_timing(prefill_count, true);
-        assert_eq!(format_duration(apple.scheduled_seconds), "2m 53s");
-        assert_eq!(format_duration(apple.cooldown_minimum_seconds()), "7m 33s");
-        assert_eq!(
-            format_duration(apple.cooldown_fallback_seconds()),
-            "16m 53s"
-        );
-        assert_eq!(format_duration(apple.cooldown_maximum_seconds()), "86m 53s");
-
-        let portable = benchmark_timing(prefill_count, false);
-        assert_eq!(format_duration(portable.scheduled_seconds), "1m 39s");
-        assert_eq!(
-            format_duration(portable.cooldown_minimum_seconds()),
-            "4m 39s"
-        );
-        assert_eq!(
-            format_duration(portable.cooldown_fallback_seconds()),
-            "10m 39s"
-        );
-        assert_eq!(
-            format_duration(portable.cooldown_maximum_seconds()),
-            "55m 39s"
-        );
-    }
-}
-
 pub(crate) fn validate_harness_result(value: &Value) -> Result<()> {
     if let Some(reason) = value.get("skip").and_then(Value::as_str) {
         bail!("benchmark skipped: {reason}");
@@ -343,7 +316,7 @@ pub(crate) fn validate_harness_result(value: &Value) -> Result<()> {
     }
     if value.pointer("/telemetry/schema").and_then(Value::as_str) != Some(TELEMETRY_SCHEMA) {
         bail!(
-            "benchmark harness omitted supported telemetry (expected {TELEMETRY_SCHEMA}); rebuild basert-harness"
+            "benchmark harness omitted supported telemetry (expected {TELEMETRY_SCHEMA}); rebuild basert-benchmark-harness"
         );
     }
     let raw = value
@@ -388,50 +361,49 @@ fn validate_duration_samples(value: &Value, token_key: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_harness_descriptor(path: &Path) -> Result<()> {
+    let output = ProcessCommand::new(path)
+        .args(["describe", "--json"])
+        .output()
+        .with_context(|| format!("describing benchmark harness {}", path.display()))?;
+    if !output.status.success() {
+        bail!(
+            "{} is not a compatible BaseRT benchmark harness",
+            path.display()
+        );
+    }
+    let descriptor: Value = serde_json::from_slice(&output.stdout)
+        .context("benchmark harness descriptor is not valid JSON")?;
+    if descriptor.get("schema").and_then(Value::as_str)
+        != Some("basert-benchmark-harness-descriptor/1")
+        || descriptor.pointer("/runtime/name").and_then(Value::as_str) != Some(RUNTIME_NAME)
+        || descriptor.get("result_schema").and_then(Value::as_str) != Some(HARNESS_SCHEMA)
+    {
+        bail!(
+            "{} does not advertise a compatible BaseRT benchmark protocol",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 fn resolve_harness(override_path: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = override_path {
         return executable_path(path);
     }
-    if let Some(path) = std::env::var_os("BASERT_COMPUTEARENA_HARNESS") {
-        if path.is_empty() {
-            bail!("BASERT_COMPUTEARENA_HARNESS is set but empty");
-        }
-        return executable_path(PathBuf::from(path));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let sibling = parent.join(PRIMARY_HARNESS_NAME);
-            if sibling.is_file() {
-                return Ok(sibling);
+    for variable in ["COMPUTEARENA_BASERT_HARNESS", "BASERT_COMPUTEARENA_HARNESS"] {
+        if let Some(path) = std::env::var_os(variable) {
+            if path.is_empty() {
+                bail!("{variable} is set but empty");
             }
-        }
-        // Source-tree builds place the Rust binary under
-        // tools/base-convert/target/{debug,release} and the C++ harness under
-        // the repository's build/. Walk ancestors so invocation does not
-        // depend on the caller's current directory.
-        for ancestor in exe.ancestors() {
-            for name in [PRIMARY_HARNESS_NAME, LEGACY_HARNESS_NAME] {
-                let candidate = ancestor.join("build").join(name);
-                if candidate.is_file() {
-                    return Ok(candidate);
-                }
-            }
+            return executable_path(PathBuf::from(path));
         }
     }
-    for development in DEVELOPMENT_HARNESS_PATHS {
-        let path = PathBuf::from(development);
-        if path.is_file() {
-            return Ok(path);
-        }
-    }
-    if let Some(path) = executable_on_path(PRIMARY_HARNESS_NAME) {
-        return Ok(path);
-    }
-    bail!(
-        "benchmark harness was not found; from the BaseRT repository root, run:\n  \
-         cmake -S . -B build -DCMAKE_BUILD_TYPE=Release\n  \
-         cmake --build build --target {LEGACY_HARNESS_NAME}"
-    )
+    executable_on_path(BASERT_HARNESS_NAME).with_context(|| {
+        format!(
+            "{BASERT_HARNESS_NAME} was not found on PATH; add it to PATH or pass --harness /path/to/{BASERT_HARNESS_NAME}"
+        )
+    })
 }
 
 fn executable_on_path(name: &str) -> Option<PathBuf> {
@@ -444,13 +416,19 @@ fn executable_on_path(name: &str) -> Option<PathBuf> {
 
 fn executable_path(path: PathBuf) -> Result<PathBuf> {
     if path.components().count() == 1 {
-        return Ok(path);
+        return executable_on_path(path.to_string_lossy().as_ref()).with_context(|| {
+            format!(
+                "benchmark harness was not found on PATH: {}",
+                path.display()
+            )
+        });
     }
     if !path.is_file() {
         bail!("benchmark harness not found: {}", path.display());
     }
     Ok(path)
 }
+
 fn unix_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -462,4 +440,40 @@ fn random_id() -> String {
     let mut bytes = [0u8; 16];
     OsRng.fill_bytes(&mut bytes);
     hex(&bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_preflight_profile_duration_estimates() {
+        let prefill_count = parse_pp("128,256,512,1024,2048,4096,8192,16384")
+            .unwrap()
+            .len();
+
+        let apple = benchmark_timing(prefill_count, true);
+        assert_eq!(format_duration(apple.scheduled_seconds), "2m 53s");
+        assert_eq!(format_duration(apple.cooldown_minimum_seconds()), "7m 33s");
+        assert_eq!(
+            format_duration(apple.cooldown_fallback_seconds()),
+            "16m 53s"
+        );
+        assert_eq!(format_duration(apple.cooldown_maximum_seconds()), "86m 53s");
+
+        let portable = benchmark_timing(prefill_count, false);
+        assert_eq!(format_duration(portable.scheduled_seconds), "1m 39s");
+        assert_eq!(
+            format_duration(portable.cooldown_minimum_seconds()),
+            "4m 39s"
+        );
+        assert_eq!(
+            format_duration(portable.cooldown_fallback_seconds()),
+            "10m 39s"
+        );
+        assert_eq!(
+            format_duration(portable.cooldown_maximum_seconds()),
+            "55m 39s"
+        );
+    }
 }
