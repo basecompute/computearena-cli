@@ -57,6 +57,7 @@ impl RuntimeAdapter for LlamaCppAdapter {
     }
 
     fn select_model(&self) -> Result<Option<PathBuf>> {
+        print_model_download_hint();
         let input = prompt("GGUF model path (or 0 to go back): ")?;
         let input = input.trim();
         if input.is_empty() || input == "0" {
@@ -146,6 +147,31 @@ impl RuntimeAdapter for LlamaCppAdapter {
         result.model = model;
         Ok(result)
     }
+}
+
+fn print_model_download_hint() {
+    let ui = TerminalUi::detect();
+    println!();
+    println!("{}", ui.neutral("Need a GGUF model for llama.cpp?"));
+    for (label, instruction) in [
+        ("Browse", "https://huggingface.co/models?library=gguf"),
+        (
+            "Download",
+            "hf download <repo-id> <filename.gguf> --local-dir ./models",
+        ),
+        (
+            "CLI setup",
+            "https://huggingface.co/docs/huggingface_hub/guides/cli",
+        ),
+    ] {
+        println!(
+            "  {}  {}",
+            ui.neutral(format!("{label:<9}")),
+            ui.accent_bold(instruction)
+        );
+    }
+    println!("{}", ui.muted("Or download a .gguf file from the repository's Files and versions tab in your browser."));
+    println!("{}", ui.muted("Choose a model and quantization that fit your device's memory, then enter the downloaded file's local path below."));
 }
 
 fn validate_model(path: &Path) -> Result<()> {
