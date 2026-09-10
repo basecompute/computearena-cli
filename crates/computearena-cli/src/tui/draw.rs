@@ -204,7 +204,12 @@ fn footer(frame: &mut Frame, area: Rect, app: &App) {
         }
         Screen::Reports { .. } => "↑/↓ move · Enter verify · Esc back",
         Screen::Preview { .. } => "↑/↓ or wheel scroll · Enter submit · Esc back",
-        Screen::Running => "↑/↓ or wheel scroll · PgUp/PgDn page · Enter/Esc back · Ctrl+C quit",
+        // While a job runs, Enter and Esc do nothing; once it is done, Enter
+        // is the way on, so the footer leads with it.
+        Screen::Running if app.job.as_ref().is_none_or(Job::finished) => {
+            "Enter continue · ↑/↓ or wheel scroll · PgUp/PgDn page · Esc back"
+        }
+        Screen::Running => "↑/↓ or wheel scroll · PgUp/PgDn page · Ctrl+C quit",
         Screen::Loading { .. } => "working…",
         Screen::HubSearch { .. } => "type a search · Enter search · Esc back",
         Screen::HubModels { .. } => "↑/↓ move · Enter list files · Esc back",
@@ -276,7 +281,13 @@ fn body(frame: &mut Frame, area: Rect, app: &mut App) {
             rows,
             cursor,
         } => hub_files_screen(frame, area, repository, rows, *cursor),
-        Screen::Account { cursor } => account_screen(frame, area, app.account.as_deref(), *cursor),
+        Screen::Account { cursor } => account_screen(
+            frame,
+            area,
+            app.account.as_deref(),
+            *cursor,
+            app.pending_submission.is_some(),
+        ),
     }
 }
 
@@ -632,9 +643,18 @@ fn hub_files_screen(
     );
 }
 
-fn account_screen(frame: &mut Frame, area: Rect, account: Option<&str>, cursor: usize) {
-    let areas = Layout::vertical([Constraint::Length(4), Constraint::Min(3)]).split(area);
-    let lines = match account {
+fn account_screen(
+    frame: &mut Frame,
+    area: Rect,
+    account: Option<&str>,
+    cursor: usize,
+    pending_submission: bool,
+) {
+    // One more line of explanation when this screen opened because a
+    // benchmark was just saved and signing in is what submits it.
+    let text_height = if pending_submission { 5 } else { 4 };
+    let areas = Layout::vertical([Constraint::Length(text_height), Constraint::Min(3)]).split(area);
+    let mut lines = match account {
         Some(user) => vec![
             Line::from(vec![
                 Span::styled("Signed in as ", Style::default().fg(neutral())),
@@ -659,23 +679,37 @@ fn account_screen(frame: &mut Frame, area: Rect, account: Option<&str>, cursor: 
             )),
         ],
     };
+    if pending_submission {
+        lines.push(Line::from(Span::styled(
+            "The benchmark you just ran is saved. Sign in to submit it, or Esc to keep it local.",
+            Style::default().fg(brand()),
+        )));
+    }
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .block(focus_panel("Account", false)),
         areas[0],
     );
-    let action = match account {
-        Some(_) => item("Log out", "Revoke this installation's session", cursor == 0),
-        None => item("Log in", "Opens your browser to connect", cursor == 0),
+    let action = match (account, pending_submission) {
+        (Some(_), _) => item("Log out", "Revoke this installation's session", cursor == 0),
+        (None, true) => item(
+            "Log in",
+            "Opens your browser to connect, then previews the saved benchmark",
+            cursor == 0,
+        ),
+        (None, false) => item("Log in", "Opens your browser to connect", cursor == 0),
     };
-    render_list(
-        frame,
-        areas[1],
-        "What next",
-        vec![action, item("Back", "", cursor == 1)],
-        cursor,
-    );
+    let back = if pending_submission {
+        item(
+            "Not now",
+            "Keep the benchmark local; submit it later from the menu",
+            cursor == 1,
+        )
+    } else {
+        item("Back", "", cursor == 1)
+    };
+    render_list(frame, areas[1], "What next", vec![action, back], cursor);
 }
 
 const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
@@ -700,6 +734,8 @@ fn job_screen(frame: &mut Frame, area: Rect, job: Option<&mut Job>) {
                 ),
             ])
         }
+        // Finished: the heading itself names the key that moves on, so the
+        // wait for Enter is never mistaken for the job still working.
         Some(Ok(summary)) => Line::from(vec![
             Span::styled("✓ ", Style::default().fg(positive())),
             Span::styled(
@@ -710,10 +746,18 @@ fn job_screen(frame: &mut Frame, area: Rect, job: Option<&mut Job>) {
                 format!("  {}s", elapsed.as_secs()),
                 Style::default().fg(neutral()),
             ),
+            Span::styled(
+                "  ·  press Enter to continue",
+                Style::default().fg(brand()).add_modifier(Modifier::BOLD),
+            ),
         ]),
         Some(Err(error)) => Line::from(vec![
             Span::styled("✗ ", Style::default().fg(danger())),
             Span::styled(error.clone(), Style::default().fg(danger())),
+            Span::styled(
+                "  ·  press Enter to go back",
+                Style::default().fg(brand()).add_modifier(Modifier::BOLD),
+            ),
         ]),
     };
     let areas = Layout::vertical([Constraint::Length(1), Constraint::Min(3)]).split(area);

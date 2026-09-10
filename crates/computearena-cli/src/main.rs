@@ -208,6 +208,28 @@ fn run() -> Result<()> {
     }
 }
 
+/// After a benchmark is saved outside the full-screen session, say how to
+/// get it onto ComputeArena: the command to run, and the sign-in it needs.
+fn print_submission_hint(paths: &Paths, api_url: &str, report: &std::path::Path) -> Result<()> {
+    let ui = TerminalUi::detect();
+    let submit = format!("computearena submit {}", report.display());
+    match load_api_session(paths, api_url)? {
+        Some(session) => println!(
+            "{} Submit it as @{} with: {}",
+            ui.neutral("Next:"),
+            session.username,
+            ui.strong(submit)
+        ),
+        None => println!(
+            "{} Sign in with {} then submit it with: {}",
+            ui.neutral("Next:"),
+            ui.strong("computearena login"),
+            ui.strong(submit)
+        ),
+    }
+    Ok(())
+}
+
 fn print_banner(ui: TerminalUi) {
     println!();
     println!("{}", ui.brand(rule('━')));
@@ -341,7 +363,7 @@ fn execute(
                 println!("Benchmark cancelled. Nothing was run.");
                 return Ok(());
             };
-            run_benchmark(
+            let report = run_benchmark(
                 runtime,
                 paths,
                 Some(harness),
@@ -353,6 +375,7 @@ fn execute(
                 cooldown_enabled,
                 output,
             )?;
+            print_submission_hint(paths, api_url, &report)?;
             Ok(())
         }
         Action::List { json } => list_reports(paths, json),
@@ -501,7 +524,7 @@ fn interactive(
                         continue;
                     }
                 };
-                if let Err(error) = run_benchmark(
+                match run_benchmark(
                     runtime,
                     paths,
                     Some(selected_harness),
@@ -513,7 +536,8 @@ fn interactive(
                     cooldown_enabled,
                     None,
                 ) {
-                    eprintln!("{} {error:#}", ui.error("Benchmark failed:"));
+                    Ok(report) => print_submission_hint(paths, api_url, &report)?,
+                    Err(error) => eprintln!("{} {error:#}", ui.error("Benchmark failed:")),
                 }
             }
             3 => {
