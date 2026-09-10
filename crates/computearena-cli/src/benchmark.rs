@@ -5,12 +5,15 @@ use crate::config::{
     CONDITIONING_MINIMUM_WARMUP_SECONDS, CONDITIONING_STABLE_WINDOW_SECONDS,
     PORTABLE_CONDITIONED_PHASES_PER_WORKLOAD, TELEMETRY_WINDOW_SECONDS,
 };
+use crate::models::compact_home_path;
 use crate::protocol::{HARNESS_SCHEMA, REPORT_SCHEMA, RUNTIME_NAME, TELEMETRY_SCHEMA};
 use crate::reports::b64_encode;
 use crate::reports::{
     atomic_write_json, hex, load_or_create_installation_key, sha256_hex, sign_report, Paths,
 };
-use crate::ui::{finish_activity, prompt, prompt_yes_no, start_activity, TerminalUi};
+use crate::ui::{
+    choose_default, finish_activity, print_fields, start_activity, MenuChoice, MenuItem, TerminalUi,
+};
 use anyhow::{bail, Context, Result};
 use rand_core::{OsRng, RngCore};
 use serde_json::{json, Value};
@@ -100,80 +103,135 @@ fn benchmark_timing(prefill_count: usize, apple: bool) -> BenchmarkTiming {
     }
 }
 
+/// The plan people read before starting: what will run, on what, and where it
+/// lands. Everything that is background rather than decision-making lives in
+/// `print_benchmark_details`, one keypress away from the start menu.
 pub(crate) fn print_benchmark_plan(runtime: Runtime, r: &BenchmarkRequest<'_>) -> Result<()> {
     let ui = TerminalUi::detect();
-    let prefill = parse_pp(r.pp)?
+    let prefill_tokens = parse_pp(r.pp)?;
+    let prefill_count = prefill_tokens.len();
+    let prefill = prefill_tokens
         .iter()
         .map(|n| format!("PP{n}"))
         .collect::<Vec<_>>()
         .join(", ");
     ui.section("Benchmark plan");
-    println!("  {} {}", ui.neutral("Runtime:"), runtime.adapter().name());
-    println!("  {} {}", ui.neutral("Model:"), r.model.display());
-    println!("  {} {prefill}", ui.neutral("Prefill:"));
-    println!("  {} TG{}", ui.neutral("Decode:"), r.tg);
-    match runtime {
-        Runtime::Basert => {
-            println!(
-                "  {} {} requested warmup {} + {} recorded {} per throughput workload",
-                ui.neutral("Sampling:"),
-                r.warmup,
-                repetition_label(r.warmup),
-                r.reps,
-                repetition_label(r.reps)
-            );
-            println!(
-                "            Warmup runs for at least {} before each measured phase",
-                format_duration(CONDITIONING_MINIMUM_WARMUP_SECONDS)
-            );
-            println!(
-                "  {} Collected by the BaseRT benchmark harness",
-                ui.neutral("Telemetry:")
-            );
-        }
-        Runtime::LlamaCpp => {
-            println!(
-                "  {} {} + {} recorded {} per throughput workload",
-                ui.neutral("Sampling:"),
-                if r.warmup == 0 {
-                    "No warmup"
-                } else {
-                    "Runtime-native warmup"
-                },
-                r.reps,
-                repetition_label(r.reps)
-            );
-            if r.warmup > 0 {
-                println!("            llama.cpp controls warmup; --warmup is not a repetition count for this runtime.");
-            }
-            println!(
-                "  {} Independent PP and TG tests; initial context depth 0",
-                ui.neutral("Context:")
-            );
-            println!(
-                "  {} Automatic process memory, temperature sensors, and power/device snapshots where available (whole run; 1-second sampling)",
-                ui.neutral("Telemetry:")
-            );
-        }
-    }
-    println!(
-        "  {} Synthetic token sequences; this does not test model accuracy",
-        ui.neutral("Input:")
+    print_fields(
+        ui,
+        &[
+            ("Runtime", runtime.adapter().display_name().to_string()),
+            ("Model", compact_home_path(r.model)),
+            ("Workloads", format!("{prefill} + TG{}", r.tg)),
+            ("Sampling", sampling_summary(runtime, r)),
+            ("Estimated", estimate_summary(runtime, prefill_count)),
+            (
+                "Output",
+                "Signed JSON report saved locally\nNothing is uploaded automatically".to_string(),
+            ),
+        ],
     );
-    println!(
-        "  {} Signed JSON report saved locally",
-        ui.neutral("Output:")
-    );
-    println!("          Nothing is uploaded automatically");
     println!();
     println!(
-        "{} This creates sustained CPU/GPU load and can consume substantial memory.",
+        "{} This creates sustained CPU/GPU load and the device may get hot. For comparable",
         ui.warning("!")
     );
-    println!("  The device may become hot during the benchmark.");
-    println!("  For comparable results, connect external power, disable power-saving mode,");
-    println!("  and close demanding apps.");
+    println!("  results use external power, turn off power saving, and close demanding apps.");
     Ok(())
+}
+
+fn sampling_summary(runtime: Runtime, r: &BenchmarkRequest<'_>) -> String {
+    match runtime {
+        Runtime::Basert => format!(
+            "{} warmup {} + {} recorded {} per workload",
+            r.warmup,
+            repetition_label(r.warmup),
+            r.reps,
+            repetition_label(r.reps)
+        ),
+        Runtime::LlamaCpp => format!(
+            "{} + {} recorded {} per workload",
+            if r.warmup == 0 {
+                "No warmup"
+            } else {
+                "Runtime-native warmup"
+            },
+            r.reps,
+            repetition_label(r.reps)
+        ),
+    }
+}
+
+/// Both run profiles, side by side, so the durations are on the plan itself and
+/// not only inside the start menu.
+fn estimate_summary(runtime: Runtime, prefill_count: usize) -> String {
+    match runtime {
+        Runtime::Basert => {
+            let timing = benchmark_timing(prefill_count, cfg!(target_os = "macos"));
+            format!(
+                "Standard {} · thermally controlled {} (about {} without sensors)\nExcludes model loading and recorded repetitions",
+                BenchmarkProfile::Standard.duration(timing),
+                BenchmarkProfile::ThermallyControlled.duration(timing),
+                format_duration(timing.cooldown_fallback_seconds())
+            )
+        }
+        Runtime::LlamaCpp => {
+            let count = (prefill_count + 1) as f64;
+            format!(
+                "Standard: no cooldown waits · thermally controlled adds {}–{} of waits\n(about {} without sensors); llama.cpp times the measured phase itself",
+                format_duration(count * CONDITIONING_STABLE_WINDOW_SECONDS),
+                format_duration(count * CONDITIONING_MAXIMUM_WAIT_SECONDS),
+                format_duration(count * CONDITIONING_FALLBACK_WAIT_SECONDS)
+            )
+        }
+    }
+}
+
+/// The long-form explanation, printed on request from the start menu.
+fn print_benchmark_details(runtime: Runtime, r: &BenchmarkRequest<'_>) {
+    let ui = TerminalUi::detect();
+    ui.section("What this runs");
+    let mut rows = vec![(
+        "Input",
+        "Synthetic token sequences; this does not test model accuracy".to_string(),
+    )];
+    match runtime {
+        Runtime::Basert => {
+            rows.push((
+                "Warmup",
+                format!(
+                    "Runs for at least {} before each measured phase",
+                    format_duration(CONDITIONING_MINIMUM_WARMUP_SECONDS)
+                ),
+            ));
+            rows.push((
+                "Telemetry",
+                "Collected by the BaseRT benchmark harness".to_string(),
+            ));
+        }
+        Runtime::LlamaCpp => {
+            if r.warmup > 0 {
+                rows.push((
+                    "Warmup",
+                    "llama.cpp controls warmup; --warmup is not a repetition count here"
+                        .to_string(),
+                ));
+            }
+            rows.push((
+                "Context",
+                "Independent PP and TG tests; initial context depth 0".to_string(),
+            ));
+            rows.push((
+                "Telemetry",
+                "Process memory, temperature, and power/device snapshots where available\n(whole run; 1-second sampling)".to_string(),
+            ));
+        }
+    }
+    rows.push((
+        "Report",
+        "Signed locally; submission is a separate, explicit step".to_string(),
+    ));
+    print_fields(ui, &rows);
+    println!();
 }
 
 /// Resolve once before confirmation and pass these exact paths to execution.
@@ -197,18 +255,17 @@ pub(crate) fn identify_benchmark_paths(
     let executable = fs::canonicalize(crate::runtimes::locate(runtime, override_path, paths)?.path)
         .context("resolving runtime executable path")?;
     let ui = TerminalUi::detect();
-    ui.section("Selected binaries");
-    println!(
-        "  {} {}",
-        ui.neutral("ComputeArena:"),
-        std::env::current_exe()?.display()
+    println!();
+    print_fields(
+        ui,
+        &[
+            (
+                "computearena",
+                std::env::current_exe()?.display().to_string(),
+            ),
+            (runtime.adapter().name(), executable.display().to_string()),
+        ],
     );
-    println!(
-        "  {} {}",
-        ui.neutral(format!("{}:", runtime.adapter().name())),
-        executable.display()
-    );
-    println!("  {} Compatibility is checked before execution; release provenance is checked at submission.", ui.muted("Note:"));
     Ok((executable, model))
 }
 
@@ -230,44 +287,54 @@ pub(crate) fn confirm_benchmark_run(
     }
 
     let ui = TerminalUi::detect();
-    print_benchmark_plan(
-        Runtime::Basert,
-        &BenchmarkRequest {
-            model,
-            pp,
-            tg,
-            reps,
-            warmup,
-            cooldown: cooldown_requested,
-        },
-    )?;
+    let request = BenchmarkRequest {
+        model,
+        pp,
+        tg,
+        reps,
+        warmup,
+        cooldown: cooldown_requested,
+    };
+    print_benchmark_plan(Runtime::Basert, &request)?;
 
     if !skip_confirmation && !io::stdin().is_terminal() {
         bail!("benchmark confirmation requires a terminal; pass --yes to run non-interactively");
     }
 
     let timing = benchmark_timing(prefill_tokens.len(), cfg!(target_os = "macos"));
-    print_run_profiles(ui, timing);
-    let profile = if cooldown_requested || skip_confirmation {
-        BenchmarkProfile::from_cooldown(cooldown_requested)
-    } else {
-        prompt_benchmark_profile()?
-    };
-    println!(
-        "{} {} — {}",
-        ui.success("✓"),
-        ui.strong(format!("Selected: {}", profile.name())),
-        ui.accent_bold(profile.duration(timing))
-    );
-
     if skip_confirmation {
+        let profile = BenchmarkProfile::from_cooldown(cooldown_requested);
+        announce_profile(ui, profile, &profile.duration(timing));
         return Ok(Some(profile.cooldown_enabled()));
     }
-    if prompt_yes_no("Start this benchmark?", false)? {
-        Ok(Some(profile.cooldown_enabled()))
-    } else {
-        Ok(None)
-    }
+
+    let options = [
+        RunProfileOption {
+            profile: BenchmarkProfile::Standard,
+            label: "Standard",
+            duration: BenchmarkProfile::Standard.duration(timing),
+            detail: "Fastest; thermal state may affect comparability".to_string(),
+        },
+        RunProfileOption {
+            profile: BenchmarkProfile::ThermallyControlled,
+            label: "Thermally controlled",
+            duration: BenchmarkProfile::ThermallyControlled.duration(timing),
+            detail: "Waits for thermal recovery between workloads".to_string(),
+        },
+    ];
+    let Some(index) = choose_run_profile(
+        ui,
+        Runtime::Basert,
+        &request,
+        &options,
+        usize::from(cooldown_requested),
+    )?
+    else {
+        return Ok(None);
+    };
+    let profile = options[index].profile;
+    announce_profile(ui, profile, &profile.duration(timing));
+    Ok(Some(profile.cooldown_enabled()))
 }
 
 pub(crate) fn confirm_llama_profile(r: &BenchmarkRequest<'_>, yes: bool) -> Result<Option<bool>> {
@@ -279,143 +346,100 @@ pub(crate) fn confirm_llama_profile(r: &BenchmarkRequest<'_>, yes: bool) -> Resu
     } else {
         "Standard — native warmup"
     };
-    println!();
-    println!("{}", ui.brand_bold("Run profile"));
-    println!(
-        "  {} {} {}",
-        ui.brand_bold("1."),
-        ui.strong(standard),
-        ui.neutral("(default)")
-    );
-    println!(
-        "     {}",
-        ui.accent_bold("No cooldown waits; total runtime depends on your model and device")
-    );
-    println!();
-    println!(
-        "  {} {}",
-        ui.brand_bold("2."),
-        ui.strong("Thermally controlled")
-    );
-    println!(
-        "     {}",
-        ui.accent_bold(format!(
-            "Adds approximately {}–{} of cooldown waits",
-            format_duration(count * CONDITIONING_STABLE_WINDOW_SECONDS),
-            format_duration(count * CONDITIONING_MAXIMUM_WAIT_SECONDS)
-        ))
-    );
-    println!(
-        "     {}",
-        ui.muted(format!(
-            "Without usable die-temperature sensors: about {} of timed rests",
-            format_duration(count * CONDITIONING_FALLBACK_WAIT_SECONDS)
-        ))
-    );
-    println!(
-        "     {}",
-        ui.muted("Runs each PP size and TG separately; reloads the model after each cooldown.")
-    );
-    println!(
-        "     {}",
-        ui.muted(
-            "Waits precede loading and native warmup, not the measured phase inside llama.cpp."
-        )
-    );
-    println!("  {}",ui.muted("Total time = loading + native warmup + recorded work + the waits above; no calibrated total estimate yet."));
     if !yes && !io::stdin().is_terminal() {
         bail!("benchmark confirmation requires a terminal; pass --yes to run non-interactively");
     }
-    let selected = if r.cooldown || yes {
-        BenchmarkProfile::from_cooldown(r.cooldown)
-    } else {
-        prompt_benchmark_profile()?
+    if yes {
+        let profile = BenchmarkProfile::from_cooldown(r.cooldown);
+        announce_profile(ui, profile, "");
+        return Ok(Some(profile.cooldown_enabled()));
+    }
+
+    let options = [
+        RunProfileOption {
+            profile: BenchmarkProfile::Standard,
+            label: standard,
+            duration: "no cooldown waits".to_string(),
+            detail: "Total runtime depends on your model and device".to_string(),
+        },
+        RunProfileOption {
+            profile: BenchmarkProfile::ThermallyControlled,
+            label: "Thermally controlled",
+            duration: format!(
+                "adds {}–{} of waits",
+                format_duration(count * CONDITIONING_STABLE_WINDOW_SECONDS),
+                format_duration(count * CONDITIONING_MAXIMUM_WAIT_SECONDS)
+            ),
+            detail: "Runs each workload separately, reloading the model after each cooldown"
+                .to_string(),
+        },
+    ];
+    let Some(index) =
+        choose_run_profile(ui, Runtime::LlamaCpp, r, &options, usize::from(r.cooldown))?
+    else {
+        return Ok(None);
     };
+    let selected = &options[index];
     println!(
         "{} {}",
         ui.success("✓"),
-        ui.strong(format!(
-            "Selected: {}",
-            if selected.cooldown_enabled() {
-                "Thermally controlled"
-            } else {
-                standard
-            }
-        ))
+        ui.strong(format!("Selected: {}", selected.label))
     );
-    if yes || prompt_yes_no("Start this benchmark?", false)? {
-        Ok(Some(selected.cooldown_enabled()))
-    } else {
-        Ok(None)
-    }
+    Ok(Some(selected.profile.cooldown_enabled()))
 }
 
-fn print_run_profiles(ui: TerminalUi, timing: BenchmarkTiming) {
-    println!();
-    println!("{}", ui.brand_bold("Run profile"));
-    println!();
-    println!(
-        "  {} {} {}",
-        ui.brand_bold("1."),
-        ui.strong(BenchmarkProfile::Standard.name()),
-        ui.neutral("(default)")
-    );
-    println!(
-        "     {}",
-        ui.accent_bold(BenchmarkProfile::Standard.duration(timing))
-    );
-    println!(
-        "     {}",
-        ui.muted("Fastest option. Thermal state may affect comparability.")
-    );
-    println!();
-    println!(
-        "  {} {}",
-        ui.brand_bold("2."),
-        ui.strong(BenchmarkProfile::ThermallyControlled.name())
-    );
-    println!(
-        "     {}",
-        ui.accent_bold(BenchmarkProfile::ThermallyControlled.duration(timing))
-    );
-    println!(
-        "     {}",
-        ui.muted("Waits for thermal recovery between workloads.")
-    );
-    println!(
-        "     {} {}",
-        ui.muted("Without a usable temperature sensor:"),
-        ui.accent_bold(format!(
-            "about {}",
-            format_duration(timing.cooldown_fallback_seconds())
-        ))
-    );
-    println!();
-    println!(
-        "  {}",
-        ui.muted("Times exclude model loading and recorded repetitions.")
-    );
+struct RunProfileOption {
+    profile: BenchmarkProfile,
+    label: &'static str,
+    duration: String,
+    detail: String,
 }
 
-fn prompt_benchmark_profile() -> Result<BenchmarkProfile> {
+/// One prompt decides everything: which profile, and whether to start at all.
+/// Picking a profile *is* the confirmation, so nothing stands between the plan
+/// and the run.
+fn choose_run_profile(
+    ui: TerminalUi,
+    runtime: Runtime,
+    request: &BenchmarkRequest<'_>,
+    options: &[RunProfileOption],
+    default: usize,
+) -> Result<Option<usize>> {
     loop {
-        let answer = prompt("Select a run profile [1]: ")?;
-        match parse_benchmark_profile(&answer) {
-            Some(profile) => return Ok(profile),
-            None => println!(
-                "{} Enter `1` for standard or `2` for thermally controlled.",
-                TerminalUi::detect().warning("!")
-            ),
+        let mut items: Vec<MenuItem> = options
+            .iter()
+            .map(|option| {
+                MenuItem::new(format!("Start — {} · {}", option.label, option.duration))
+                    .detail(option.detail.clone())
+            })
+            .collect();
+        items.push(
+            MenuItem::new("What does this run?")
+                .detail("Sampling, telemetry, and what the report contains"),
+        );
+        match choose_default(ui, "Start benchmark: ", &items, Some("Cancel"), default)? {
+            MenuChoice::Item(index) if index < options.len() => return Ok(Some(index)),
+            MenuChoice::Item(_) => print_benchmark_details(runtime, request),
+            MenuChoice::Escape => return Ok(None),
         }
     }
 }
 
-fn parse_benchmark_profile(answer: &str) -> Option<BenchmarkProfile> {
-    match answer.trim().to_ascii_lowercase().as_str() {
-        "" | "1" | "standard" | "warmup" => Some(BenchmarkProfile::Standard),
-        "2" | "thermal" | "cooldown" => Some(BenchmarkProfile::ThermallyControlled),
-        _ => None,
+fn announce_profile(ui: TerminalUi, profile: BenchmarkProfile, duration: &str) {
+    if duration.is_empty() {
+        println!(
+            "{} {}",
+            ui.success("✓"),
+            ui.strong(format!("Selected: {}", profile.name()))
+        );
+        return;
     }
+    println!(
+        "{} {} — {}",
+        ui.success("✓"),
+        ui.strong(format!("Selected: {}", profile.name())),
+        ui.accent_bold(duration)
+    );
 }
 
 fn format_duration(seconds: f64) -> String {
@@ -733,26 +757,5 @@ mod tests {
         assert_eq!(format_duration(3_600.0), "1h");
         assert_eq!(format_duration(3_660.0), "1h 1m");
         assert_eq!(format_duration(5_213.0), "1h 26m 53s");
-    }
-
-    #[test]
-    fn parses_run_profile_numbers_names_and_default() {
-        assert_eq!(
-            parse_benchmark_profile(""),
-            Some(BenchmarkProfile::Standard)
-        );
-        assert_eq!(
-            parse_benchmark_profile("1"),
-            Some(BenchmarkProfile::Standard)
-        );
-        assert_eq!(
-            parse_benchmark_profile("COOLDOWN"),
-            Some(BenchmarkProfile::ThermallyControlled)
-        );
-        assert_eq!(
-            parse_benchmark_profile("2"),
-            Some(BenchmarkProfile::ThermallyControlled)
-        );
-        assert_eq!(parse_benchmark_profile("3"), None);
     }
 }

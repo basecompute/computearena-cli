@@ -2,7 +2,7 @@ use crate::config::{
     MODEL_ID_COLUMN_WIDTH, MODEL_QUANT_COLUMN_WIDTH, MODEL_SELECTOR_VISIBLE_ROWS,
     MODEL_VARIANT_COLUMN_WIDTH,
 };
-use crate::theme::model_selector_theme;
+use crate::theme::selector_theme;
 use crate::ui::{finish_activity, prompt, start_activity, TerminalUi};
 use anyhow::{bail, Context, Result};
 
@@ -164,7 +164,7 @@ fn prompt_model_path_interactive(
     );
     io::stdout().flush()?;
 
-    let theme = model_selector_theme();
+    let theme = selector_theme();
     let selected = FuzzySelect::with_theme(&theme)
         .with_prompt(format!("Select a model · {} installed", installed.len()))
         .items(&choices)

@@ -144,23 +144,27 @@ fn the_runtime_chooser_lists_one_numbered_option_per_line() {
 }
 
 #[test]
-fn choosing_a_runtime_reports_the_executable_that_will_run() {
+fn a_single_installed_runtime_is_used_without_asking_which_one() {
     let sandbox = Sandbox::new();
     sandbox.fake_runtime(&sandbox.path().join("bin").join("llama-bench"));
-    let output = sandbox.interact(&[], "llama-cpp\n6\n");
+    let output = sandbox.interact(&[], "6\n");
     assert!(output.status.success(), "{}", text(&output));
     let text = text(&output);
+    assert!(!text.contains("Choose a runtime"));
+    assert!(text.contains("the only one installed"));
+    assert!(text.contains("switch with `computearena basert`"));
     let found = line_index(&text, "Found llama.cpp on PATH");
     let path = text.lines().nth(found + 1).unwrap();
     assert!(path.contains("bin/llama-bench"), "{path}");
     assert!(text.contains("Runtime: llama-cpp"));
     assert!(line_index(&text, "Runtime: llama-cpp") > found);
+    // Running a benchmark leads the menu; the cursor starts there.
     for option in [
-        "1. Log in",
-        "2. Run benchmarks",
-        "3. Submit previous benchmarks",
-        "4. List local benchmarks",
-        "5. Verify a local benchmark",
+        "1. Run benchmarks",
+        "2. Submit previous benchmarks",
+        "3. List local benchmarks",
+        "4. Verify a local benchmark",
+        "5. Log in",
         "6. Exit",
     ] {
         assert!(text.contains(option), "{option}");

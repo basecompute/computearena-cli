@@ -33,7 +33,7 @@ pub(crate) const BASECOMPUTE_THEME: TerminalTheme = TerminalTheme {
     selection_background: Rgb(0, 18, 27),
 };
 
-pub(crate) fn model_selector_theme() -> ColorfulTheme {
+pub(crate) fn selector_theme() -> ColorfulTheme {
     let theme = BASECOMPUTE_THEME;
     ColorfulTheme {
         prompt_style: theme.brand.stderr_style().bold(),

@@ -42,7 +42,9 @@ use runtimes::{ensure_runtime, RuntimeSetup};
 #[cfg(test)]
 use submission::{parse_report_selection, preflight_submissions, should_stop_submission};
 use submission::{select_reports_for_submission, submit_reports};
-use ui::{choose, finish_activity, prompt, start_activity, MenuChoice, MenuItem, TerminalUi};
+use ui::{
+    choose, choose_default, finish_activity, start_activity, MenuChoice, MenuItem, TerminalUi,
+};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -222,9 +224,21 @@ fn print_banner(ui: TerminalUi) {
     );
 }
 
+/// Runtimes whose executable is already resolvable, without probing them.
+fn installed_runtimes(paths: &Paths, harness: Option<&PathBuf>) -> Vec<Runtime> {
+    [Runtime::Basert, Runtime::LlamaCpp]
+        .into_iter()
+        .filter(|runtime| runtimes::locate(*runtime, harness.cloned(), paths).is_ok())
+        .collect()
+}
+
 /// Choose a runtime when none was named, then make sure its executable is
 /// present before the menu opens, so the first thing people see is which
 /// binary will run or how to get one.
+///
+/// When exactly one runtime is installed there is nothing to decide, so the
+/// question is not asked: naming a runtime on the command line
+/// (`computearena llama-cpp`) still overrides it.
 fn session(
     mut runtime: Runtime,
     choose_runtime: bool,
@@ -233,9 +247,28 @@ fn session(
     api_url: &str,
 ) -> Result<()> {
     let ui = TerminalUi::detect();
+    print_banner(ui);
+    let mut ask_runtime = choose_runtime;
+    if choose_runtime {
+        if let [only] = installed_runtimes(paths, harness.as_ref())[..] {
+            runtime = only;
+            ask_runtime = false;
+            println!(
+                "  {} {}",
+                ui.muted("Runtime:"),
+                ui.muted(format!(
+                    "{} (the only one installed) · switch with `computearena {}`",
+                    only.adapter().display_name(),
+                    match only {
+                        Runtime::Basert => "llama-cpp",
+                        Runtime::LlamaCpp => "basert",
+                    }
+                ))
+            );
+        }
+    }
     loop {
-        if choose_runtime {
-            print_banner(ui);
+        if ask_runtime {
             println!("  {}", ui.strong("Choose a runtime"));
             let items = [
                 MenuItem::new("BaseRT")
@@ -255,7 +288,7 @@ fn session(
         let executable = match ensure_runtime(runtime, paths, harness.clone(), ui)? {
             RuntimeSetup::Ready(path) => Some(path),
             RuntimeSetup::Skipped => None,
-            RuntimeSetup::Back if choose_runtime => continue,
+            RuntimeSetup::Back if ask_runtime => continue,
             RuntimeSetup::Back => return Ok(()),
         };
         return interactive(runtime, paths, executable, api_url);
@@ -362,31 +395,38 @@ fn interactive(
     let ui = TerminalUi::detect();
 
     loop {
-        print_banner(ui);
+        let session = load_api_session(paths, api_url)?;
+        println!();
         println!(
-            "  Runtime: {}{}",
+            "  Runtime: {}{}{}",
             runtime.adapter().name(),
             match &harness {
                 Some(path) => ui.muted(format!(" · {}", runtimes::compact_path(path))),
-                None => ui.muted(" · executable not set up yet"),
+                None => ui.muted(" · executable not set up yet".to_string()),
+            },
+            match &session {
+                Some(session) => ui.muted(format!(" · @{}", session.username)),
+                None => String::new(),
             }
         );
-        let session = load_api_session(paths, api_url)?;
+        // Running a benchmark is why people open this, so it leads the list and
+        // the cursor starts on it: Enter twice gets to the model picker.
         let items = [
+            MenuItem::new("Run benchmarks").detail("Pick a model, pick a profile, start"),
+            MenuItem::new("Submit previous benchmarks"),
+            MenuItem::new("List local benchmarks"),
+            MenuItem::new("Verify a local benchmark"),
             MenuItem::new(match &session {
                 Some(session) => {
                     format!("Log out ({})", ui.brand(format!("@{}", session.username)))
                 }
                 None => "Log in".to_string(),
             }),
-            MenuItem::new("Run benchmarks"),
-            MenuItem::new("Submit previous benchmarks"),
-            MenuItem::new("List local benchmarks"),
-            MenuItem::new("Verify a local benchmark"),
             MenuItem::new("Exit").aliases(&["0", "q", "quit", "exit"]),
         ];
-        let choice = match choose(ui, "Choose an option: ", &items, None)? {
-            MenuChoice::Item(index) => index + 1,
+        const ACTIONS: [usize; 6] = [2, 3, 4, 5, 1, 0];
+        let choice = match choose_default(ui, "Choose an option: ", &items, None, 0)? {
+            MenuChoice::Item(index) => ACTIONS[index],
             MenuChoice::Escape => return Ok(()),
         };
         match choice {
@@ -536,56 +576,33 @@ fn prompt_report_choice(paths: &Paths, ui: TerminalUi) -> Result<Option<PathBuf>
         return Ok(None);
     }
 
-    println!("Choose a saved benchmark:\n");
-    for (index, report) in reports.iter().enumerate() {
-        let status = if report["status"].as_str() == Some("valid") {
-            ui.success("VALID")
-        } else {
-            ui.error("INVALID")
-        };
-        println!(
-            "  {} {}  [{}]",
-            ui.brand_bold(format!("{}.", index + 1)),
-            report["model"].as_str().unwrap_or("Unknown model"),
-            status
-        );
-        println!(
-            "     {}  •  report {}",
-            report["created_at"].as_str().unwrap_or("Unknown time"),
-            report["short_id"].as_str().unwrap_or("unknown")
-        );
-    }
-    println!("\n  {} Back", ui.brand_bold("0."));
-
-    loop {
-        let input = prompt("Choose a benchmark: ")?;
-        let input = input.trim();
-        if matches!(input, "0" | "q" | "quit" | "back") {
-            return Ok(None);
-        }
-        if let Ok(number) = input.parse::<usize>() {
-            if let Some(report) = number.checked_sub(1).and_then(|index| reports.get(index)) {
-                let path = report["path"]
-                    .as_str()
-                    .context("saved benchmark has no file path")?;
-                return Ok(Some(PathBuf::from(path)));
-            }
-            println!(
-                "{} Choose a number from 1 to {}, or 0 to go back.",
-                ui.warning("!"),
-                reports.len()
-            );
-            continue;
-        }
-
-        // Advanced users can still paste a full path, run ID, or ID prefix.
-        match resolve_report(paths, input) {
-            Ok(path) => return Ok(Some(path)),
-            Err(_) => println!(
-                "{} Choose a listed number, or paste a valid report ID or path.",
-                ui.warning("!")
-            ),
-        }
+    let items: Vec<MenuItem> = reports
+        .iter()
+        .map(|report| {
+            let status = if report["status"].as_str() == Some("valid") {
+                ui.success("VALID")
+            } else {
+                ui.error("INVALID")
+            };
+            MenuItem::new(format!(
+                "{}  [{}]",
+                report["model"].as_str().unwrap_or("Unknown model"),
+                status
+            ))
+            .detail(format!(
+                "{}  •  report {}",
+                report["created_at"].as_str().unwrap_or("Unknown time"),
+                report["short_id"].as_str().unwrap_or("unknown")
+            ))
+        })
+        .collect();
+    match choose(ui, "Choose a benchmark: ", &items, Some("Back"))? {
+        MenuChoice::Item(index) => Ok(Some(PathBuf::from(
+            reports[index]["path"]
+                .as_str()
+                .context("saved benchmark has no file path")?,
+        ))),
+        MenuChoice::Escape => Ok(None),
     }
 }
 

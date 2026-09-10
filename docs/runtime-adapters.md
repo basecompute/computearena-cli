@@ -8,8 +8,9 @@ Both retain the computearena-benchmark/1 signed envelope, so old reports remain 
 
 ## Commands
 
-- computearena: choose BaseRT or llama.cpp from a numbered list, see which executable
-  will run (or how to obtain one), then open the shared interactive session.
+- computearena: pick BaseRT or llama.cpp from an arrow-key list — skipped when only one
+  of them is installed — see which executable will run (or how to obtain one), then open
+  the shared interactive session. Piped or redirected input falls back to numbered menus.
 - computearena basert [run|list|inspect|verify|login|logout|submit|install]
 - computearena llama-cpp [run|list|inspect|verify|login|logout|submit|install]
 - install downloads the runtime's prebuilt release after showing the plan; --archive

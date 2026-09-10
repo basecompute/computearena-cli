@@ -4,7 +4,10 @@ use crate::config::SUBMISSION_HTTP_TIMEOUT;
 use crate::reports::{
     model_identity_for_report, report_summaries, resolve_report, short_id, verify_report, Paths,
 };
-use crate::ui::{finish_activity, prompt, prompt_yes_no, start_activity, TerminalUi};
+use crate::ui::{
+    choose_many, finish_activity, print_menu, prompt, prompt_yes_no, start_activity, MenuItem,
+    TerminalUi,
+};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -75,49 +78,68 @@ pub(crate) fn select_reports_for_submission(
         return Ok(Vec::new());
     }
 
-    println!("Choose one or more saved benchmarks:\n");
-    for (index, report) in reports.iter().enumerate() {
-        let status = if report["status"].as_str() == Some("valid") {
-            ui.success("VALID")
-        } else {
-            ui.error("INVALID")
-        };
-        println!(
-            "  {} {}  [{}]",
-            ui.brand_bold(format!("{}.", index + 1)),
-            report["model"].as_str().unwrap_or("Unknown model"),
-            status
-        );
-        println!(
-            "     {}  •  report {}",
-            report["created_at"].as_str().unwrap_or("Unknown time"),
-            report["short_id"].as_str().unwrap_or("unknown")
-        );
-    }
-    println!("\nEnter numbers separated by commas, `all`, or `0` to go back.");
+    let items: Vec<MenuItem> = reports
+        .iter()
+        .map(|report| {
+            let status = if report["status"].as_str() == Some("valid") {
+                ui.success("VALID")
+            } else {
+                ui.error("INVALID")
+            };
+            MenuItem::new(format!(
+                "{}  [{}]",
+                report["model"].as_str().unwrap_or("Unknown model"),
+                status
+            ))
+            .detail(format!(
+                "{}  •  report {}",
+                report["created_at"].as_str().unwrap_or("Unknown time"),
+                report["short_id"].as_str().unwrap_or("unknown")
+            ))
+        })
+        .collect();
+    // Valid benchmarks start ticked: submitting everything submittable is the
+    // usual intent, so most people only press Enter.
+    let preselected: Vec<bool> = reports
+        .iter()
+        .map(|report| report["status"].as_str() == Some("valid"))
+        .collect();
 
+    let indexes = match choose_many(ui, "Benchmarks to submit: ", &items, &preselected)? {
+        Some(indexes) => indexes,
+        None => prompt_report_numbers(ui, &items)?,
+    };
+    if indexes.is_empty() {
+        println!("No benchmarks selected. Nothing was submitted.");
+        return Ok(Vec::new());
+    }
+    indexes
+        .into_iter()
+        .map(|index| {
+            reports[index]["path"]
+                .as_str()
+                .map(PathBuf::from)
+                .context("saved benchmark has no file path")
+        })
+        .collect()
+}
+
+/// Non-terminal fallback: the numbered list and a comma-separated answer.
+fn prompt_report_numbers(ui: TerminalUi, items: &[MenuItem]) -> Result<Vec<usize>> {
+    let count = items.len();
+    println!("Choose one or more saved benchmarks:\n");
+    print_menu(ui, items, None);
+    println!("\nEnter numbers separated by commas, `all`, or `0` to go back.");
     loop {
         let input = prompt("Benchmarks to submit: ")?;
         let input = input.trim();
         if matches!(input, "0" | "q" | "quit" | "back") {
             return Ok(Vec::new());
         }
-        let indexes = match parse_report_selection(input, reports.len()) {
-            Ok(indexes) => indexes,
-            Err(error) => {
-                println!("{} {error}", ui.warning("!"));
-                continue;
-            }
-        };
-        return indexes
-            .into_iter()
-            .map(|index| {
-                reports[index]["path"]
-                    .as_str()
-                    .map(PathBuf::from)
-                    .context("saved benchmark has no file path")
-            })
-            .collect();
+        match parse_report_selection(input, count) {
+            Ok(indexes) => return Ok(indexes),
+            Err(error) => println!("{} {error}", ui.warning("!")),
+        }
     }
 }
 

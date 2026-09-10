@@ -27,6 +27,7 @@ pub(crate) const SUBMISSION_HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) const DEFAULT_DEVICE_AUTH_EXPIRES_SECS: u64 = 600;
 
 pub(crate) const MODEL_SELECTOR_VISIBLE_ROWS: usize = 10;
+pub(crate) const MENU_VISIBLE_ROWS: usize = 12;
 pub(crate) const MODEL_ID_COLUMN_WIDTH: usize = 42;
 pub(crate) const MODEL_VARIANT_COLUMN_WIDTH: usize = 20;
 pub(crate) const MODEL_QUANT_COLUMN_WIDTH: usize = 12;

@@ -6,9 +6,13 @@ sizes, memory/heat warning, offline-save notice, and the same profile selector:
 1. Standard (default): no cooldown waits.
 2. Thermally controlled: opt-in waits before workloads.
 
+Picking a profile is the start confirmation: the selector's entries read
+`Start — <profile> · <estimate>`, alongside a details entry and `Cancel`, so one
+answer both chooses the profile and starts the run. `--cooldown` places the cursor
+on the thermally controlled entry.
+
 `--yes` selects standard without prompts. `--yes --cooldown` selects thermally
-controlled. Interactive selection is followed by a separate start confirmation.
-Piped input must use `--yes`. Bad model selections or preparation errors return to
+controlled. Piped input must use `--yes`. Bad model selections or preparation errors return to
 the menu; end-of-input exits instead of repeatedly prompting.
 
 ## llama.cpp cooldown semantics

@@ -30,7 +30,7 @@ fn gguf_download_guidance_precedes_the_model_prompt_and_back_returns_to_menu() {
         .spawn()
         .unwrap();
     // Open model selection, return without a model, then exit. No benchmark runs.
-    child.stdin.take().unwrap().write_all(b"2\n0\n6\n").unwrap();
+    child.stdin.take().unwrap().write_all(b"1\n0\n6\n").unwrap();
     let output = child.wait_with_output().unwrap();
     assert!(
         output.status.success(),
