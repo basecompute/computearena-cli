@@ -20,6 +20,38 @@ cargo build --release
 The binary is written to `target/release/computearena`. Copy it to a
 directory on `PATH` if you want to invoke it globally.
 
+## Choosing a runtime
+
+Starting `computearena` without arguments opens a numbered runtime chooser, one
+option per line, in the same style as every other menu. Choosing a runtime, or
+starting `computearena basert` or `computearena llama-cpp` directly, first
+reports the executable that will run and where it came from, for example
+`Found llama.cpp on PATH` followed by its path. Discovery looks, in order, at
+`--runtime-path`, the runtime's environment variables, a copy installed by
+ComputeArena, `PATH`, and the runtime's own default install location
+(`~/.basert` for BaseRT). An executable that is present but does not speak the
+adapter's protocol is reported as unusable rather than used.
+
+When the runtime is missing, the session explains how to install it yourself
+and offers to install it for you:
+
+```sh
+computearena basert install
+computearena llama-cpp install [--yes] [--archive bundle.tar.gz]
+```
+
+Before anything is downloaded, the plan shows the release, the asset and its
+size, the download URL, the destination, the backend of that build, and how
+the download is checked. BaseRT installs into the official installer's
+location (`~/.basert`, or `BASERT_INSTALL_DIR`) and is verified against the
+SHA-256 published with the release; llama.cpp installs its prebuilt build under
+`runtimes/llama-cpp/<build>` in the ComputeArena data directory, is not added
+to `PATH`, and replaces an earlier copy installed the same way. Neither runtime
+modifies shell profiles. `--archive` unpacks a bundle you already downloaded
+instead of contacting GitHub. Prebuilt bundles exist for macOS/arm64 and
+Linux/arm64 with CUDA (BaseRT) and for macOS and Linux CPU or Metal builds
+(llama.cpp); other platforms and GPU builds of llama.cpp are installed by hand.
+
 ## BaseRT adapter
 
 ComputeArena looks for `basert-benchmark-harness` on `PATH`. The harness must
@@ -63,8 +95,10 @@ standalone `computearena` binary must be beside `basert` or on `PATH`.
 
 ## llama.cpp adapter
 
-Install llama.cpp from https://github.com/ggml-org/llama.cpp/releases and make
-`llama-bench` available on PATH, or provide its path:
+Install llama.cpp with `brew install llama.cpp`, from
+https://github.com/ggml-org/llama.cpp/releases, or with
+`computearena llama-cpp install`, and make `llama-bench` available on PATH or
+provide its path:
 
 ```sh
 computearena llama-cpp

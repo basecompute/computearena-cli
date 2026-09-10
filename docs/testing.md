@@ -13,6 +13,7 @@ For just the black-box contracts:
 ```sh
 cargo test --test adapter_contract
 cargo test --test runtime_flow
+cargo test --test runtime_setup
 ```
 
 The existing GitHub Actions workflow runs all of these tests on Linux and macOS.
@@ -31,8 +32,9 @@ They do not run GPU workloads. See [telemetry.md](telemetry.md) for collector co
 
 | Area | Contract |
 | --- | --- |
-| CLI UX | Runtime-scoped help, no nested runtime selectors, menu exit, common list/inspect/verify commands, NO_COLOR output, explicit install/capability guidance |
-| Discovery | PATH discovery, explicit executable path override, paths containing spaces, missing/incompatible executables |
+| CLI UX | Runtime-scoped help, no nested runtime selectors, numbered one-per-line runtime chooser, menu exit, common list/inspect/verify commands, NO_COLOR output, explicit install/capability guidance |
+| Discovery | PATH discovery, explicit executable path override, paths containing spaces, missing/incompatible executables, executable feedback on selection, ComputeArena-installed copies, BaseRT's default install location |
+| Installation | Plan shown before installing, local bundle unpacking, install records, replacement of earlier copies, refusal without a terminal or --yes, non-interactive runs pointing at install |
 | Runtime invocation | Requested PP sweep forwarded, separate PP/TG samples, llama.cpp depth zero and JSON output, BaseRT telemetry flag, no default cooldown, native warmup disablement |
 | Result consistency | Identical raw measurements produce identical token/second metrics and units across adapters; bogus llama.cpp aggregate rates are ignored |
 | Protocol differences | llama.cpp records native warmup, zero initial context, and concurrent whole-run telemetry; conditioned runs use a distinct per-workload-process protocol |

@@ -102,7 +102,7 @@ fn detect(backend: &str) -> Option<(String, &'static str)> {
             {
                 return None;
             }
-            let executable = crate::benchmark::executable_on_path("rocminfo").or_else(|| {
+            let executable = crate::runtimes::executable_on_path("rocminfo").or_else(|| {
                 Path::new("/opt/rocm/bin/rocminfo")
                     .is_file()
                     .then(|| Path::new("/opt/rocm/bin/rocminfo").to_path_buf())

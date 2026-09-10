@@ -1,5 +1,5 @@
 use super::{BenchmarkRequest, RuntimeAdapter, RuntimeOutput};
-use crate::benchmark::{executable_on_path, executable_path, validate_pp};
+use crate::benchmark::validate_pp;
 use crate::ui::TerminalUi;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Map, Value};
@@ -17,13 +17,20 @@ impl RuntimeAdapter for LlamaCppAdapter {
         "llama-cpp"
     }
 
-    fn discover(&self, path: Option<PathBuf>) -> Result<PathBuf> {
-        if let Some(path) = path {
-            return executable_path(path);
-        }
-        executable_on_path("llama-bench").with_context(|| format!(
-            "llama.cpp was not found. Download it from {DOWNLOAD} and add its binaries to PATH, or use --runtime-path /path/to/llama-bench."
-        ))
+    fn display_name(&self) -> &'static str {
+        "llama.cpp"
+    }
+
+    fn binary_name(&self) -> &'static str {
+        "llama-bench"
+    }
+
+    fn environment_overrides(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    fn known_locations(&self) -> Vec<PathBuf> {
+        Vec::new()
     }
 
     fn probe(&self, executable: &Path) -> Result<Value> {

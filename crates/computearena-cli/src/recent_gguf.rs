@@ -81,12 +81,13 @@ pub(crate) fn select(
             };
             println!(
                 "  {} {}{missing}",
-                ui.strong(format!("{}.", index + 1)),
+                ui.brand_bold(format!("{}.", index + 1)),
                 display_safe(&name)
             );
             println!("     {}", ui.muted(display_safe(&path.to_string_lossy())));
         }
-        println!("  p. Enter another GGUF path\n  0. Back");
+        println!("  {} Enter another GGUF path", ui.brand_bold("p."));
+        println!("  {} Back", ui.brand_bold("0."));
     }
     loop {
         let input = if recent.is_empty() {

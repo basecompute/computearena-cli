@@ -43,8 +43,17 @@ pub(crate) struct RuntimeOutput {
 }
 
 pub(crate) trait RuntimeAdapter {
+    /// Identifier used in reports and on the command line.
     fn name(&self) -> &'static str;
-    fn discover(&self, override_path: Option<PathBuf>) -> Result<PathBuf>;
+    /// Name shown to people.
+    fn display_name(&self) -> &'static str;
+    /// The executable ComputeArena looks for.
+    fn binary_name(&self) -> &'static str;
+    /// Environment variables that point at the executable, most specific first.
+    fn environment_overrides(&self) -> &'static [&'static str];
+    /// Conventional install directories searched after PATH.
+    fn known_locations(&self) -> Vec<PathBuf>;
+    /// Check that the executable speaks this adapter's protocol and describe it.
     fn probe(&self, executable: &Path) -> Result<Value>;
     fn select_model(&self, paths: &crate::reports::Paths) -> Result<Option<PathBuf>>;
     fn confirm(&self, request: &BenchmarkRequest<'_>, yes: bool) -> Result<Option<bool>>;

@@ -9,6 +9,7 @@ mod models;
 mod protocol;
 mod recent_gguf;
 mod reports;
+mod runtimes;
 mod submission;
 mod telemetry;
 mod theme;
@@ -37,10 +38,11 @@ use reports::{
     list_reports, model_identity_for_report, read_report, report_summaries, resolve_report,
     short_id, verify_report, Paths,
 };
+use runtimes::{ensure_runtime, RuntimeSetup};
 #[cfg(test)]
 use submission::{parse_report_selection, preflight_submissions, should_stop_submission};
 use submission::{select_reports_for_submission, submit_reports};
-use ui::{finish_activity, prompt, start_activity, TerminalUi};
+use ui::{choose, finish_activity, prompt, start_activity, MenuChoice, MenuItem, TerminalUi};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -141,6 +143,15 @@ enum Action {
     Login,
     /// Revoke and remove the session for the selected API URL.
     Logout,
+    /// Download and install the selected runtime's prebuilt release.
+    Install {
+        /// Install without the confirmation prompt.
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// Unpack this .tar.gz bundle instead of downloading a release.
+        #[arg(long)]
+        archive: Option<PathBuf>,
+    },
     /// Submit one or more saved reports. Prompts for reports when omitted.
     Submit {
         reports: Vec<String>,
@@ -184,27 +195,70 @@ fn run() -> Result<()> {
     let paths = Paths::resolve(data_dir)?;
     let api_url = resolve_api_url(cli.api_url)?;
     let choose_runtime = cli.command.is_none();
-    let (mut runtime, command) = select_runtime(cli.command);
-    if choose_runtime {
-        println!("Choose a runtime: 1. BaseRT  2. llama.cpp  0. Exit");
-        loop {
-            match prompt("Runtime: ")?.as_str() {
-                "1" | "basert" => {
-                    runtime = Runtime::Basert;
-                    break;
-                }
-                "2" | "llama-cpp" | "llamacpp" => {
-                    runtime = Runtime::LlamaCpp;
-                    break;
-                }
-                "0" | "" => return Ok(()),
-                _ => println!("Choose 1, 2, or 0."),
-            }
-        }
-    }
+    let (runtime, command) = select_runtime(cli.command);
     match command {
         Some(command) => execute(runtime, command, &paths, cli.harness, &api_url),
-        None => interactive(runtime, &paths, cli.harness, &api_url),
+        None => session(runtime, choose_runtime, &paths, cli.harness, &api_url),
+    }
+}
+
+fn print_banner(ui: TerminalUi) {
+    println!();
+    println!(
+        "{}",
+        ui.brand("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    );
+    println!(
+        "  {}  {}",
+        ui.brand_bold("ComputeArena"),
+        ui.muted(format!(
+            "{} · {}",
+            COMPUTEARENA_WEBSITE, COMPUTEARENA_DISCORD
+        ))
+    );
+    println!(
+        "{}",
+        ui.brand("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    );
+}
+
+/// Choose a runtime when none was named, then make sure its executable is
+/// present before the menu opens, so the first thing people see is which
+/// binary will run or how to get one.
+fn session(
+    mut runtime: Runtime,
+    choose_runtime: bool,
+    paths: &Paths,
+    harness: Option<PathBuf>,
+    api_url: &str,
+) -> Result<()> {
+    let ui = TerminalUi::detect();
+    loop {
+        if choose_runtime {
+            print_banner(ui);
+            println!("  {}", ui.strong("Choose a runtime"));
+            let items = [
+                MenuItem::new("BaseRT")
+                    .detail("basert-benchmark-harness · .base models")
+                    .aliases(&["basert"]),
+                MenuItem::new("llama.cpp")
+                    .detail("llama-bench · .gguf models")
+                    .aliases(&["llama-cpp", "llamacpp", "llama.cpp"]),
+            ];
+            runtime = match choose(ui, "Runtime: ", &items, Some("Exit"))? {
+                MenuChoice::Item(0) => Runtime::Basert,
+                MenuChoice::Item(_) => Runtime::LlamaCpp,
+                MenuChoice::Escape => return Ok(()),
+            };
+        }
+        ui.section(&format!("{} runtime", runtime.adapter().display_name()));
+        let executable = match ensure_runtime(runtime, paths, harness.clone(), ui)? {
+            RuntimeSetup::Ready(path) => Some(path),
+            RuntimeSetup::Skipped => None,
+            RuntimeSetup::Back if choose_runtime => continue,
+            RuntimeSetup::Back => return Ok(()),
+        };
+        return interactive(runtime, paths, executable, api_url);
     }
 }
 
@@ -233,7 +287,8 @@ fn execute(
                     None => return Ok(()),
                 },
             };
-            let (harness, model) = benchmark::identify_benchmark_paths(runtime, harness, &model)?;
+            let (harness, model) =
+                benchmark::identify_benchmark_paths(runtime, harness, &model, paths)?;
             let Some(cooldown_enabled) = runtime.adapter().confirm(
                 &BenchmarkRequest {
                     model: &model,
@@ -283,6 +338,10 @@ fn execute(
         }
         Action::Login => login(paths, api_url),
         Action::Logout => logout(paths, api_url),
+        Action::Install { yes, archive } => {
+            runtimes::install(runtime, paths, TerminalUi::detect(), yes, archive)?;
+            Ok(())
+        }
         Action::Submit {
             reports,
             yes,
@@ -297,48 +356,41 @@ fn execute(
 fn interactive(
     runtime: Runtime,
     paths: &Paths,
-    harness: Option<PathBuf>,
+    mut harness: Option<PathBuf>,
     api_url: &str,
 ) -> Result<()> {
     let ui = TerminalUi::detect();
 
     loop {
-        println!();
+        print_banner(ui);
         println!(
-            "{}",
-            ui.brand("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            "  Runtime: {}{}",
+            runtime.adapter().name(),
+            match &harness {
+                Some(path) => ui.muted(format!(" · {}", runtimes::compact_path(path))),
+                None => ui.muted(" · executable not set up yet"),
+            }
         );
-        println!(
-            "  {}  {}",
-            ui.brand_bold("ComputeArena"),
-            ui.muted(format!(
-                "{} · {}",
-                COMPUTEARENA_WEBSITE, COMPUTEARENA_DISCORD
-            ))
-        );
-        println!(
-            "{}",
-            ui.brand("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        );
-        println!("  Runtime: {}", runtime.adapter().name());
         let session = load_api_session(paths, api_url)?;
-        if let Some(session) = &session {
-            println!(
-                "  {} Log out ({})",
-                ui.brand_bold("1."),
-                ui.brand(format!("@{}", session.username))
-            );
-        } else {
-            println!("  {} Log in", ui.brand_bold("1."));
-        }
-        println!("  {} Run benchmarks", ui.brand_bold("2."));
-        println!("  {} Submit previous benchmarks", ui.brand_bold("3."));
-        println!("  {} List local benchmarks", ui.brand_bold("4."));
-        println!("  {} Verify a local benchmark", ui.brand_bold("5."));
-        println!("  {} Exit", ui.brand_bold("6."));
-        let choice = prompt("Choose an option: ")?;
-        match choice.trim() {
-            "1" => {
+        let items = [
+            MenuItem::new(match &session {
+                Some(session) => {
+                    format!("Log out ({})", ui.brand(format!("@{}", session.username)))
+                }
+                None => "Log in".to_string(),
+            }),
+            MenuItem::new("Run benchmarks"),
+            MenuItem::new("Submit previous benchmarks"),
+            MenuItem::new("List local benchmarks"),
+            MenuItem::new("Verify a local benchmark"),
+            MenuItem::new("Exit").aliases(&["0", "q", "quit", "exit"]),
+        ];
+        let choice = match choose(ui, "Choose an option: ", &items, None)? {
+            MenuChoice::Item(index) => index + 1,
+            MenuChoice::Escape => return Ok(()),
+        };
+        match choice {
+            1 => {
                 if session.is_some() {
                     ui.section("Log out");
                     if let Err(error) = logout(paths, api_url) {
@@ -351,8 +403,18 @@ fn interactive(
                     }
                 }
             }
-            "2" => {
+            2 => {
                 ui.section("Run a benchmark");
+                if harness.is_none() {
+                    match ensure_runtime(runtime, paths, None, ui) {
+                        Ok(RuntimeSetup::Ready(path)) => harness = Some(path),
+                        Ok(_) => continue,
+                        Err(error) => {
+                            eprintln!("{} {error:#}", ui.error("Could not set up the runtime:"));
+                            continue;
+                        }
+                    }
+                }
                 let model = match runtime.adapter().select_model(paths) {
                     Ok(Some(model)) => model,
                     Ok(None) => continue,
@@ -361,14 +423,18 @@ fn interactive(
                         continue;
                     }
                 };
-                let (selected_harness, model) =
-                    match benchmark::identify_benchmark_paths(runtime, harness.clone(), &model) {
-                        Ok(selected) => selected,
-                        Err(error) => {
-                            eprintln!("{} {error:#}", ui.error("Could not select runtime:"));
-                            continue;
-                        }
-                    };
+                let (selected_harness, model) = match benchmark::identify_benchmark_paths(
+                    runtime,
+                    harness.clone(),
+                    &model,
+                    paths,
+                ) {
+                    Ok(selected) => selected,
+                    Err(error) => {
+                        eprintln!("{} {error:#}", ui.error("Could not select runtime:"));
+                        continue;
+                    }
+                };
                 let confirmation = runtime.adapter().confirm(
                     &BenchmarkRequest {
                         model: &model,
@@ -406,7 +472,7 @@ fn interactive(
                     eprintln!("{} {error:#}", ui.error("Benchmark failed:"));
                 }
             }
-            "3" => {
+            3 => {
                 ui.section("Submit previous benchmarks");
                 match select_reports_for_submission(paths, &[], ui) {
                     Ok(reports) if !reports.is_empty() => {
@@ -418,11 +484,11 @@ fn interactive(
                     Err(error) => eprintln!("{} {error:#}", ui.error("Could not select reports:")),
                 }
             }
-            "4" => {
+            4 => {
                 ui.section("Local benchmarks");
                 list_reports(paths, false)?;
             }
-            "5" => {
+            5 => {
                 ui.section("Verify a benchmark");
                 if let Some(path) = prompt_report_choice(paths, ui)? {
                     let started = start_activity(ui, "Reading and verifying the benchmark…");
@@ -452,8 +518,7 @@ fn interactive(
                     }
                 }
             }
-            "0" | "6" | "q" | "quit" | "exit" => return Ok(()),
-            _ => println!("{} Choose a number from 1 to 6.", ui.warning("!")),
+            _ => return Ok(()),
         }
     }
 }
