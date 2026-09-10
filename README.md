@@ -119,6 +119,15 @@ associate submissions with a profile. A report signature detects modification
 after the client finalized the file; it does not prove that a modified client,
 harness, driver, or operating system reported truthful measurements.
 
+For older BaseRT CUDA harnesses reporting a missing or unknown chip, the CLI
+uses a best-effort NVIDIA device-name fallback after measurement and before
+signing. It only resolves a single physical GPU with unambiguous visibility;
+multi-GPU systems and unsupported visibility masks remain unresolved. The
+signed benchmark includes `chip_detection` with the original `reported_chip`,
+the `resolved_chip`, and detection source. Valid harness names are preserved.
+The probe times out after two seconds and failures do not prevent saving a
+report. Existing signed reports are never rewritten.
+
 ## Protocol compatibility
 
 - Report envelope: `computearena-benchmark/1`

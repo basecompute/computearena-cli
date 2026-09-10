@@ -1,5 +1,6 @@
 //! Runtime-specific execution behind one report and CLI workflow.
 pub(crate) mod basert;
+mod chip;
 mod gguf;
 pub(crate) mod llama_cpp;
 

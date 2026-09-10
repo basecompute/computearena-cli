@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_OUTPUT: u64 = 65_536;
 
-fn query(program: &Path, args: &[&str], timeout: Duration) -> Option<String> {
+pub(crate) fn query(program: &Path, args: &[&str], timeout: Duration) -> Option<String> {
     // A file avoids a full stdout pipe blocking the child before wait finishes.
     let mut output = tempfile::tempfile().ok()?;
     let mut child = Command::new(program)

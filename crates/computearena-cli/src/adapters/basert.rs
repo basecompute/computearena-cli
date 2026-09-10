@@ -55,10 +55,13 @@ impl RuntimeAdapter for BaseRtAdapter {
         if !output.status.success() {
             bail!("BaseRT benchmark exited with {}", output.status);
         }
-        let benchmark: Value =
+        let mut benchmark: Value =
             serde_json::from_slice(&output.stdout).context("BaseRT returned invalid JSON")?;
         crate::benchmark::validate_harness_result(&benchmark)?;
         validate_requested_workloads(&benchmark, r)?;
+        // Resolve metadata after measurement, before the envelope is signed.
+        // Never rewrite previously saved/signed reports.
+        super::chip::resolve(&mut benchmark);
         Ok(RuntimeOutput {
             benchmark,
             model: crate::models::inspect_model(r.model)?,
