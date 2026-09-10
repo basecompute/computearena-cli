@@ -458,6 +458,7 @@ pub(crate) fn run_benchmark(
     warmup: u32,
     cooldown_enabled: bool,
     output: Option<PathBuf>,
+    model_id: Option<&str>,
 ) -> Result<PathBuf> {
     if !model.is_file() {
         bail!("model does not exist or is not a file: {}", model.display());
@@ -507,7 +508,8 @@ pub(crate) fn run_benchmark(
     let public_bytes = public.to_bytes();
     let key_id = sha256_hex(&public_bytes);
     let run_id = random_id();
-    let model_metadata = result.model;
+    let mut model_metadata = result.model;
+    crate::model_identity::record(&mut model_metadata, model_id)?;
 
     // Intentionally omit the user's account and local model path: a benchmark
     // can be created offline and attached to an authenticated account later.

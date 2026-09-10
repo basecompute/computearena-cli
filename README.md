@@ -158,3 +158,20 @@ release; this implementation does not claim Windows compatibility.
 - Signing: Ed25519 over `computearena-json-v1` canonical JSON
 
 Community and support: [ComputeArena Discord](https://discord.gg/vENxergRG6).
+
+## Upstream model identity
+
+Reports retain the original model/package name and quantization and add signed
+`model.upstream_id` and `model.upstream_id_source` fields. Exact known aliases
+are resolved through `crates/computearena-cli/src/model-identities.json`; unknown
+models have a null upstream ID, not a guessed identity.
+
+For models outside that catalogue, declare the actual upstream repository:
+```sh
+computearena llama-cpp run /path/to/model.gguf --model-id owner/Model-Instruct
+computearena basert run /path/to/model.base --model-id Qwen/Qwen3-0.6B
+```
+Use the full identity of the actual model, including Instruct, MoE, revisions
+and fine-tunes. A declaration is user-provided metadata, not proof of origin.
+Quantization formats remain separate; Q4 formats are not assumed equivalent.
+The web carries the matching legacy alias catalogue for historical reports.
