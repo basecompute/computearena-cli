@@ -71,7 +71,7 @@ jobs:
     needs: meta
     uses: ./.github/workflows/build.yml
     with:
-      ref: ${{ needs.meta.outputs.sha }}
+      expected_sha: ${{ needs.meta.outputs.sha }}
       version: ${{ needs.meta.outputs.version }}
       suffix: ""
 

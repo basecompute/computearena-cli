@@ -22,8 +22,8 @@ name: Build bundles
 on:
   workflow_call:
     inputs:
-      ref:
-        description: Commit SHA to build. Callers resolve branches and tags to a SHA first so every bundle and the release target agree.
+      expected_sha:
+        description: Commit SHA expected after checking out the caller's trusted triggering ref. Callers resolve tags to a commit so every bundle and the release target agree.
         required: true
         type: string
       version:
@@ -53,8 +53,17 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref }}
+
+      - name: Verify checked-out commit
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::Checked out $ACTUAL_SHA, expected $EXPECTED_SHA"
+            exit 1
+          fi
+          echo "Building verified commit $ACTUAL_SHA"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -100,8 +109,17 @@ jobs:
       PLATFORM: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref }}
+
+      - name: Verify checked-out commit
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::Checked out $ACTUAL_SHA, expected $EXPECTED_SHA"
+            exit 1
+          fi
+          echo "Building verified commit $ACTUAL_SHA"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
