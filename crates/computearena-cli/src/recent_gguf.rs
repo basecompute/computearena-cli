@@ -10,7 +10,7 @@ const HISTORY_FILE: &str = "recent-gguf.json";
 const MAX_RECENT: usize = 10;
 const MAX_HISTORY_BYTES: u64 = 128 * 1024;
 
-fn load(paths: &Paths) -> Result<Vec<PathBuf>> {
+pub(crate) fn recent(paths: &Paths) -> Result<Vec<PathBuf>> {
     let file = match fs::File::open(paths.root.join(HISTORY_FILE)) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -39,7 +39,7 @@ fn load(paths: &Paths) -> Result<Vec<PathBuf>> {
 /// Only called after saving a successful benchmark, including noninteractive runs.
 pub(crate) fn remember(paths: &Paths, model: &Path) -> Result<()> {
     let model = fs::canonicalize(model).context("resolving recent GGUF path")?;
-    let mut recent = load(paths)?;
+    let mut recent = recent(paths)?;
     recent.retain(|path| path != &model);
     recent.insert(0, model);
     recent.truncate(MAX_RECENT);
@@ -59,7 +59,7 @@ pub(crate) fn select(
     validate: impl Fn(&Path) -> Result<()>,
 ) -> Result<Option<PathBuf>> {
     let ui = TerminalUi::detect();
-    let recent = load(paths).unwrap_or_else(|error| {
+    let recent = recent(paths).unwrap_or_else(|error| {
         eprintln!(
             "{} Could not read recent GGUF files: {error:#}. Enter a path instead.",
             ui.warning("!")
@@ -166,7 +166,7 @@ mod tests {
     fn history_is_bounded_deduplicated_canonical_and_isolated() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::resolve(Some(dir.path().join("data"))).unwrap();
-        assert!(load(&paths).unwrap().is_empty());
+        assert!(recent(&paths).unwrap().is_empty());
         for index in 0..12 {
             let model = dir.path().join(format!("{index}.gguf"));
             fs::write(&model, b"GGUF").unwrap();
@@ -174,13 +174,13 @@ mod tests {
         }
         let model = dir.path().join("./5.gguf");
         remember(&paths, &model).unwrap();
-        let recent = load(&paths).unwrap();
-        assert_eq!(recent.len(), MAX_RECENT);
-        assert_eq!(recent[0], fs::canonicalize(model).unwrap());
-        assert!(recent[1].ends_with("11.gguf"));
-        assert!(!recent.iter().any(|p| p.ends_with("0.gguf")));
+        let history = recent(&paths).unwrap();
+        assert_eq!(history.len(), MAX_RECENT);
+        assert_eq!(history[0], fs::canonicalize(model).unwrap());
+        assert!(history[1].ends_with("11.gguf"));
+        assert!(!history.iter().any(|p| p.ends_with("0.gguf")));
         let other = Paths::resolve(Some(dir.path().join("other"))).unwrap();
-        assert!(load(&other).unwrap().is_empty());
+        assert!(recent(&other).unwrap().is_empty());
         assert!(!paths.reports.exists());
         #[cfg(unix)]
         {
@@ -204,7 +204,7 @@ mod tests {
         fs::write(&history, b"broken").unwrap();
         let model = dir.path().join("model.gguf");
         fs::write(&model, b"GGUF").unwrap();
-        assert!(load(&paths).is_err());
+        assert!(recent(&paths).is_err());
         assert!(remember(&paths, &model).is_err());
         assert_eq!(fs::read(history).unwrap(), b"broken");
         assert_eq!(

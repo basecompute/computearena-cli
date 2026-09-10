@@ -1,11 +1,44 @@
-use crate::theme::BASECOMPUTE_THEME;
+use crate::config::{MENU_MINIMUM_ROWS, MENU_RESERVED_ROWS};
+use crate::theme::{selector_theme, BASECOMPUTE_THEME};
 use anyhow::{Context, Result};
-use dialoguer::console::Style;
+use dialoguer::console::{Style, Term};
+use dialoguer::{MultiSelect, Select};
 use std::fmt::Display;
 use std::io::{self, IsTerminal, Write};
 use std::time::Instant;
 
-const RULE: &str = "────────────────────────────────────────────────────────────";
+/// Rules and lists follow the window instead of a fixed 60 columns, so they
+/// still span the terminal when it is wider or taller.
+pub(crate) fn terminal_columns() -> usize {
+    usize::from(Term::stdout().size().1).max(20)
+}
+
+pub(crate) fn rule(character: char) -> String {
+    character.to_string().repeat(terminal_columns())
+}
+
+/// A heading centred in its own rule: `──── TITLE ────` across the window.
+pub(crate) fn rule_with_title(title: &str, character: char) -> String {
+    let columns = terminal_columns();
+    let width = title.chars().count() + 2;
+    if columns <= width {
+        return format!(" {title} ");
+    }
+    let left = (columns - width) / 2;
+    let right = columns - width - left;
+    format!(
+        "{} {title} {}",
+        character.to_string().repeat(left),
+        character.to_string().repeat(right)
+    )
+}
+
+/// How many options a selector shows at once: as many as the window has room
+/// for, so long lists use the whole screen instead of a fixed ten rows.
+pub(crate) fn visible_rows(items: usize) -> usize {
+    let available = usize::from(Term::stdout().size().0).saturating_sub(MENU_RESERVED_ROWS);
+    available.clamp(MENU_MINIMUM_ROWS, items.max(MENU_MINIMUM_ROWS))
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct TerminalUi {
@@ -45,12 +78,15 @@ impl TerminalUi {
         self.render(Style::new().dim(), text)
     }
 
+    /// Positive from the system palette: work that finished.
     pub(crate) fn success(self, text: impl Display) -> String {
-        self.brand_bold(text)
+        self.render(BASECOMPUTE_THEME.positive.style().bold(), text)
     }
 
+    /// The palette has no warning colour, so attention borrows the brand
+    /// accent; failure stays Negative.
     pub(crate) fn warning(self, text: impl Display) -> String {
-        self.render(Style::new().yellow().bold(), text)
+        self.brand_bold(text)
     }
 
     pub(crate) fn error(self, text: impl Display) -> String {
@@ -62,9 +98,9 @@ impl TerminalUi {
     }
 
     pub(crate) fn section(self, title: &str) {
-        println!("\n{}", self.muted(RULE));
+        println!("\n{}", self.muted(rule('─')));
         println!("{}", self.brand_bold(title));
-        println!("{}", self.muted(RULE));
+        println!("{}", self.muted(rule('─')));
     }
 }
 
@@ -166,9 +202,76 @@ pub(crate) fn print_menu(ui: TerminalUi, items: &[MenuItem], escape: Option<&str
     }
 }
 
+/// Ask for one option. On a terminal this is an arrow-key list: nothing to
+/// type, Enter selects, Esc leaves. Everywhere else it falls back to the
+/// numbered prompt so scripts and pipes keep working.
+pub(crate) fn choose(
+    ui: TerminalUi,
+    label: &str,
+    items: &[MenuItem],
+    escape: Option<&str>,
+) -> Result<MenuChoice> {
+    choose_default(ui, label, items, escape, 0)
+}
+
+/// `choose` with the cursor pre-placed on the option most people want.
+pub(crate) fn choose_default(
+    ui: TerminalUi,
+    label: &str,
+    items: &[MenuItem],
+    escape: Option<&str>,
+    default: usize,
+) -> Result<MenuChoice> {
+    if io::stdin().is_terminal() && io::stderr().is_terminal() {
+        return select_interactive(ui, label, items, escape, default);
+    }
+    choose_numbered(ui, label, items, escape)
+}
+
+fn select_interactive(
+    ui: TerminalUi,
+    label: &str,
+    items: &[MenuItem],
+    escape: Option<&str>,
+    default: usize,
+) -> Result<MenuChoice> {
+    let mut choices: Vec<String> = items
+        .iter()
+        .map(|item| match &item.detail {
+            Some(detail) => format!("{}  {}", item.label, ui.muted(detail)),
+            None => item.label.clone(),
+        })
+        .collect();
+    if let Some(escape) = escape {
+        choices.push(ui.neutral(format!("← {escape}")));
+    }
+    println!("{}", ui.muted("↑/↓ move · Enter select · Esc back"));
+    io::stdout().flush()?;
+
+    let selected = Select::with_theme(&selector_theme())
+        .with_prompt(menu_prompt(label))
+        .items(&choices)
+        .default(default.min(choices.len().saturating_sub(1)))
+        .max_length(visible_rows(choices.len()))
+        .report(false)
+        .interact_opt()
+        .context("reading a menu selection")?;
+
+    match selected {
+        Some(index) if index < items.len() => Ok(MenuChoice::Item(index)),
+        _ => Ok(MenuChoice::Escape),
+    }
+}
+
+/// Menu labels are written as prompts (`"Choose an option: "`); the list
+/// selector adds its own separator.
+fn menu_prompt(label: &str) -> String {
+    label.trim_end().trim_end_matches([':', '?']).to_string()
+}
+
 /// Print a numbered menu and read a choice, repeating until the answer is one
 /// of the listed options.
-pub(crate) fn choose(
+fn choose_numbered(
     ui: TerminalUi,
     label: &str,
     items: &[MenuItem],
@@ -203,6 +306,42 @@ pub(crate) fn choose(
             }
         );
     }
+}
+
+/// Pick several options at once. On a terminal this is a checklist — Space
+/// toggles, Enter confirms, Esc leaves — with `preselected` already ticked.
+/// Elsewhere it falls back to reading a comma-separated list of numbers.
+pub(crate) fn choose_many(
+    ui: TerminalUi,
+    label: &str,
+    items: &[MenuItem],
+    preselected: &[bool],
+) -> Result<Option<Vec<usize>>> {
+    if !(io::stdin().is_terminal() && io::stderr().is_terminal()) {
+        return Ok(None);
+    }
+    let choices: Vec<String> = items
+        .iter()
+        .map(|item| match &item.detail {
+            Some(detail) => format!("{}  {}", item.label, ui.muted(detail)),
+            None => item.label.clone(),
+        })
+        .collect();
+    println!(
+        "{}",
+        ui.muted("↑/↓ move · Space toggle · Enter confirm · Esc back")
+    );
+    io::stdout().flush()?;
+
+    let selected = MultiSelect::with_theme(&selector_theme())
+        .with_prompt(menu_prompt(label))
+        .items(&choices)
+        .defaults(preselected)
+        .max_length(visible_rows(choices.len()))
+        .report(false)
+        .interact_opt()
+        .context("reading a menu selection")?;
+    Ok(Some(selected.unwrap_or_default()))
 }
 
 /// Aligned `label  value` rows for plans and summaries.

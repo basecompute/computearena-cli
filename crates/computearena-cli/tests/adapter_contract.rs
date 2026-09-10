@@ -13,12 +13,10 @@ fn cooldown_plan_estimates_waits_and_requires_confirmation_before_execution() {
         .unwrap();
     failure(&output, "confirmation requires a terminal");
     for hint in [
-        "Standard — native warmup",
-        "Thermally controlled",
+        "Standard: no cooldown waits",
+        "thermally controlled adds",
         "30s–9m 0s",
         "1m 30s",
-        "reloads the model",
-        "Total time =",
     ] {
         assert!(
             text(&output).contains(hint),
@@ -54,7 +52,7 @@ fn invalid_model_selection_returns_to_the_menu_instead_of_exiting() {
         .stdin
         .take()
         .unwrap()
-        .write_all(b"2\n/definitely-missing-computearena-model.gguf\n6\n")
+        .write_all(b"1\n/definitely-missing-computearena-model.gguf\n6\n")
         .unwrap();
     let output = child.wait_with_output().unwrap();
     success(&output);
@@ -106,15 +104,13 @@ fn plans_share_layout_and_identify_full_binary_paths_before_execution() {
         assert!(output.contains(env!("CARGO_BIN_EXE_computearena")));
         let mut previous = plan;
         for label in [
-            "Runtime:",
-            "Model:",
-            "Prefill:",
-            "Decode:",
-            "Sampling:",
-            "Telemetry:",
-            "Input:",
-            "Output:",
-            "Run profile",
+            "Runtime",
+            "Model",
+            "Workloads",
+            "Sampling",
+            "Estimated",
+            "Output",
+            "Selected:",
         ] {
             let position = output[previous..].find(label).unwrap() + previous;
             assert!(position < running);

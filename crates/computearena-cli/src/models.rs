@@ -1,9 +1,6 @@
-use crate::config::{
-    MODEL_ID_COLUMN_WIDTH, MODEL_QUANT_COLUMN_WIDTH, MODEL_SELECTOR_VISIBLE_ROWS,
-    MODEL_VARIANT_COLUMN_WIDTH,
-};
-use crate::theme::model_selector_theme;
-use crate::ui::{finish_activity, prompt, start_activity, TerminalUi};
+use crate::config::{MODEL_ID_COLUMN_WIDTH, MODEL_QUANT_COLUMN_WIDTH, MODEL_VARIANT_COLUMN_WIDTH};
+use crate::theme::selector_theme;
+use crate::ui::{finish_activity, prompt, start_activity, visible_rows, TerminalUi};
 use anyhow::{bail, Context, Result};
 
 use dialoguer::FuzzySelect;
@@ -104,10 +101,20 @@ pub(crate) fn fallback_model_name(path: &Path) -> String {
         .unwrap_or("Unknown model")
         .to_string()
 }
+/// What to call a model on screen. Installed BaseRT models are all stored as
+/// `<id>/<variant>/model.base`, so the file name alone names every one of them
+/// the same thing; the identity in the path is what people recognise.
+pub(crate) fn display_name(path: &Path) -> String {
+    match model_identity_from_path(path) {
+        Ok(Some((id, variant))) => format!("{id}/{variant}"),
+        _ => fallback_model_name(path),
+    }
+}
+
 pub(crate) fn prompt_model_path() -> Result<Option<PathBuf>> {
     let ui = TerminalUi::detect();
     let started = start_activity(ui, "Scanning installed BaseRT model metadata…");
-    let installed = discover_installed_models()?;
+    let installed = installed_models()?;
     finish_activity(
         ui,
         started,
@@ -164,11 +171,11 @@ fn prompt_model_path_interactive(
     );
     io::stdout().flush()?;
 
-    let theme = model_selector_theme();
+    let theme = selector_theme();
     let selected = FuzzySelect::with_theme(&theme)
         .with_prompt(format!("Select a model · {} installed", installed.len()))
         .items(&choices)
-        .max_length(MODEL_SELECTOR_VISIBLE_ROWS)
+        .max_length(visible_rows(choices.len()))
         .report(false)
         .interact_opt()
         .context("reading model selection")?;
@@ -316,7 +323,7 @@ fn model_identity_from_path(path: &Path) -> Result<Option<(String, String)>> {
     Ok(Some((components.join("/"), variant)))
 }
 
-fn discover_installed_models() -> Result<Vec<InstalledModel>> {
+pub(crate) fn installed_models() -> Result<Vec<InstalledModel>> {
     let root = model_cache_root()?;
     if !root.is_dir() {
         return Ok(Vec::new());

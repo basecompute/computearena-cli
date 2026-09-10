@@ -32,7 +32,7 @@ They do not run GPU workloads. See [telemetry.md](telemetry.md) for collector co
 
 | Area | Contract |
 | --- | --- |
-| CLI UX | Runtime-scoped help, no nested runtime selectors, numbered one-per-line runtime chooser, menu exit, common list/inspect/verify commands, NO_COLOR output, explicit install/capability guidance |
+| CLI UX | Runtime-scoped help, no nested runtime selectors, one-per-line runtime chooser skipped when a single runtime is installed, menu exit, common list/inspect/verify commands, NO_COLOR output, explicit install/capability guidance |
 | Discovery | PATH discovery, explicit executable path override, paths containing spaces, missing/incompatible executables, executable feedback on selection, ComputeArena-installed copies, BaseRT's default install location |
 | Installation | Plan shown before installing, local bundle unpacking, install records, replacement of earlier copies, refusal without a terminal or --yes, non-interactive runs pointing at install |
 | Runtime invocation | Requested PP sweep forwarded, separate PP/TG samples, llama.cpp depth zero and JSON output, BaseRT telemetry flag, no default cooldown, native warmup disablement |
@@ -69,3 +69,20 @@ The new tests exposed a BaseRT adapter gap: structurally valid samples could des
 different workloads from the CLI request. The adapter now checks the requested PP
 groups, TG token count, per-group repetition count, and safe nanosecond values before
 signing. Existing reports retain their original signature-verification behavior.
+
+## The full-screen interface
+
+`computearena` with no arguments draws a ratatui interface when stdin and stdout are both
+terminals; everything else — every command with arguments, piped or redirected input, and
+non-unix platforms — keeps the printed session, which is what the contract tests drive.
+That split is deliberate: the tests below exercise the same code paths users script, and
+the interface is a shell around them rather than a second implementation.
+
+Long operations (benchmarks, installs, submissions, logins) run on a worker thread with the
+process's stdout and stderr redirected into a pipe, so the lines the printed session would
+have shown stream into the interface's output pane instead — including a runtime's own
+output, since child processes inherit the redirection. `tui::job` covers that mechanism.
+
+Driving it in a test harness needs a pty whose output is drained continuously; `expect`'s
+`sleep` does not drain, so the app blocks on a full pty buffer and appears frozen. Wait with
+a draining `expect { timeout {} }` instead.

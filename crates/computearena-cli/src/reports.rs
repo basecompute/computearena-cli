@@ -273,7 +273,10 @@ pub(crate) fn list_reports(paths: &Paths, as_json: bool) -> Result<()> {
         "{}",
         ui.brand_bold(format!("Local benchmarks ({})", reports.len()))
     );
-    for (index, report) in reports.iter().enumerate() {
+    // Oldest first, so the newest benchmark is the one left in front of you
+    // when the listing ends — at the prompt, or at the bottom of a log pane.
+    // `--json` keeps the newest-first order machines and the pickers use.
+    for (index, report) in reports.iter().rev().enumerate() {
         let status = report["status"].as_str().unwrap_or("invalid");
         let status_label = if status == "valid" {
             ui.success("VALID")
