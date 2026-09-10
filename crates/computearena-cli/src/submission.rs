@@ -178,20 +178,16 @@ pub(crate) fn submit_reports(
         bail!("no valid benchmarks were selected; nothing was uploaded");
     }
 
-    let session = load_api_session(paths, api_url)?;
+    let session = load_api_session(paths, api_url)?.with_context(|| format!(
+        "Login is required to upload benchmarks. Run `computearena --api-url {api_url} login`, then retry. Offline benchmarks and saved reports are unchanged."
+    ))?;
 
     println!();
-    match &session {
-        Some(session) => println!(
-            "Ready to submit {} benchmark(s) to {api_url} as @{}.",
-            preflight.ready.len(),
-            session.username
-        ),
-        None => println!(
-            "Ready to submit {} benchmark(s) to {api_url} anonymously.",
-            preflight.ready.len()
-        ),
-    }
+    println!(
+        "Ready to submit {} benchmark(s) to {api_url} as @{}.",
+        preflight.ready.len(),
+        session.username
+    );
     println!(
         "{}",
         ui.neutral(
@@ -243,14 +239,12 @@ pub(crate) fn submit_reports(
                 short_id(&run_id)
             ),
         );
-        let mut request = client
+        let request = client
             .post(&endpoint)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header(reqwest::header::ACCEPT, "application/json")
+            .bearer_auth(&session.access_token)
             .body(report.bytes);
-        if let Some(session) = &session {
-            request = request.bearer_auth(&session.access_token);
-        }
         match request.send() {
             Ok(response) => {
                 let status = response.status();

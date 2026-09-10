@@ -114,12 +114,17 @@ remain accepted. The default data directory intentionally remains the existing
 `basert/computearena` platform data directory so upgrading does not hide saved
 reports, credentials, or the installation signing key.
 
-Benchmarks can be generated and verified offline. Login is only required to
-associate submissions with a profile. A report signature detects modification
+Benchmarks can be generated and verified offline. Login is required for every
+upload: run `computearena --api-url <server>/api/v1 login` before submitting.
+A report signature detects modification
 after the client finalized the file; it does not prove that a modified client,
 harness, driver, or operating system reported truthful measurements.
 
-For older BaseRT CUDA harnesses reporting a missing or unknown chip, the CLI
+All runtimes pass through shared chip-name normalization before signing.
+Known aliases (such as M5Pro / Apple M5 Pro and GB10 / NVIDIA GB10) receive one
+name; signed `chip_identity` metadata retains the runtime's original value and
+the resolution source. Unknown hardware is not guessed or merged by family.
+For CUDA harnesses reporting a missing or unknown chip, the CLI
 uses a best-effort NVIDIA device-name fallback after measurement and before
 signing. It only resolves a single physical GPU with unambiguous visibility;
 multi-GPU systems and unsupported visibility masks remain unresolved. The

@@ -496,7 +496,9 @@ pub(crate) fn run_benchmark(
     if file_sha256(&harness)? != binary_sha256 {
         bail!("The runtime executable changed during the benchmark. Run it again with a stable installation.");
     }
-    let benchmark = result.benchmark;
+    let mut benchmark = result.benchmark;
+    // Shared identity resolution for every runtime, before signing.
+    crate::adapters::chip::finalize(&mut benchmark);
     finish_activity(ui, benchmark_started, "Benchmark measurements complete");
 
     let finalizing_started = start_activity(ui, "Reading model metadata and signing the report…");

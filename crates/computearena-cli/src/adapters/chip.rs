@@ -83,6 +83,60 @@ pub(super) fn resolve(report: &mut Value) {
     }
 }
 
+/// Canonical spelling only: do not collapse distinct GPU SKUs or configurations.
+fn canonical_name(raw: &str) -> String {
+    let name = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if name.eq_ignore_ascii_case("GB10") || name.eq_ignore_ascii_case("NVIDIA GB10") {
+        return "NVIDIA GB10".into();
+    }
+    let compact = name.to_ascii_lowercase().replace(' ', "");
+    let apple = compact.strip_prefix("apple").unwrap_or(&compact);
+    if let Some(model) = apple.strip_prefix('m') {
+        let digits: String = model.chars().take_while(char::is_ascii_digit).collect();
+        let suffix = &model[digits.len()..];
+        if !digits.is_empty() {
+            let tier = match suffix {
+                "" => Some(""),
+                "pro" => Some(" Pro"),
+                "max" => Some(" Max"),
+                "ultra" => Some(" Ultra"),
+                _ => None,
+            };
+            if let Some(tier) = tier {
+                return format!("Apple M{digits}{tier}");
+            }
+        }
+    }
+    name
+}
+
+/// Runs for every runtime before signing. Retain the raw runtime observation,
+/// and distinguish host fallback from alias normalization.
+pub(crate) fn finalize(report: &mut Value) {
+    let original = report.get("chip").cloned().unwrap_or(Value::Null);
+    resolve(report);
+    let Some(raw) = report["chip"].as_str() else {
+        return;
+    };
+    let name = canonical_name(raw);
+    if name.is_empty() || name.eq_ignore_ascii_case("unknown") {
+        return;
+    }
+    let source = if report.get("chip_detection").is_some() {
+        "nvidia-smi"
+    } else {
+        "runtime"
+    };
+    report["chip_identity"] = json!({
+        "schema": "computearena-chip-identity/1",
+        "name": name,
+        "reported_chip": original,
+        "source": source,
+        "normalization": "known_aliases_v1"
+    });
+    report["chip"] = json!(name);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,5 +201,32 @@ mod tests {
         crate::reports::verify_report(&report).unwrap();
         report["benchmark"]["chip_detection"]["reported_chip"] = json!("tampered");
         assert!(crate::reports::verify_report(&report).is_err());
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    #[test]
+    fn runtime_aliases_have_the_same_identity_without_erasing_evidence() {
+        for (raw, canonical) in [
+            ("M5Pro", "Apple M5 Pro"),
+            ("Apple M5 Pro", "Apple M5 Pro"),
+            ("GB10", "NVIDIA GB10"),
+            ("nvidia gb10", "NVIDIA GB10"),
+            ("AMD Radeon 890M", "AMD Radeon 890M"),
+        ] {
+            let mut report = json!({"chip":raw,"backend":"metal"});
+            finalize(&mut report);
+            assert_eq!(report["chip"], canonical);
+            assert_eq!(report["chip_identity"]["name"], canonical);
+            assert_eq!(report["chip_identity"]["reported_chip"], raw);
+            assert_eq!(report["chip_identity"]["source"], "runtime");
+        }
+        assert_eq!(canonical_name("NVIDIA RTX 4090"), "NVIDIA RTX 4090");
+        assert_eq!(
+            canonical_name("NVIDIA RTX 4090 Laptop GPU"),
+            "NVIDIA RTX 4090 Laptop GPU"
+        );
     }
 }
