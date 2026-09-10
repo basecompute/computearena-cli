@@ -7,11 +7,13 @@ name: Release
 #
 # Gates run before anything is built: the tag equals the Cargo workspace
 # version, is newer than the previous release, and points at a commit on main.
-# The bundles come from build.yml — the same build that staged this rc — and
-# are Sigstore-signed in this job (BaseRT's separate release-sign.yml never
-# fires, because releases created with the workflow token emit no `release`
-# event). The release is created as a draft, given every bundle, and only then
-# published and marked latest, so a half-uploaded release never goes live.
+# The bundles come from build.yml — the same build that staged this rc. The
+# macOS binary must be Developer ID signed and notarized (the build fails
+# without the Apple secrets), and every bundle is Sigstore-signed in this job
+# (BaseRT's separate release-sign.yml never fires, because releases created
+# with the workflow token emit no `release` event). The release is created as
+# a draft, given every bundle, and only then published and marked latest, so a
+# half-uploaded release never goes live.
 #
 # There is no public mirror repository and no mirror token (unlike BaseRT).
 # Public distribution through downloads.basecompute.co is a separate step that
@@ -74,6 +76,8 @@ jobs:
       ref: ${{ needs.meta.outputs.sha }}
       version: ${{ needs.meta.outputs.version }}
       suffix: ""
+      require_signing: true   # a release never ships an unsigned macOS binary
+    secrets: inherit
 
   publish:
     name: Publish release
