@@ -133,6 +133,21 @@ the `resolved_chip`, and detection source. Valid harness names are preserved.
 The probe times out after two seconds and failures do not prevent saving a
 report. Existing signed reports are never rewritten.
 
+## Hardware resolution (macOS and Linux)
+
+- Runtime-reported names remain the primary evidence for every backend.
+- Missing ROCm/HIP names use `rocminfo` only when exactly one GPU is present
+  and no GPU visibility masks are set. Marketing names are used, not ISA IDs.
+- Missing CPU-only names use Linux CPU model data or macOS `sysctl`.
+- Missing Metal names use `sysctl` only on Apple Silicon, never Intel Macs.
+- Radeon 8060S ROCm and known RADV spellings normalize to `AMD Radeon 8060S`.
+- Vulkan/OpenCL device lists are not guessed from host inventories. Unknown
+  vendors and multi-device strings remain intact; distinct SKUs stay distinct.
+
+Detection failures remain unavailable rather than preventing report creation.
+Windows hardware discovery and end-to-end support are planned for a future
+release; this implementation does not claim Windows compatibility.
+
 ## Protocol compatibility
 
 - Report envelope: `computearena-benchmark/1`

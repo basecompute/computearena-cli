@@ -1,7 +1,8 @@
-//! Best-effort metadata repair for older CUDA harness releases.
+//! Runtime-neutral chip normalization with conservative platform fallbacks.
 //! This is a host observation, not hardware attestation.
 use serde_json::{json, Value};
 use std::time::Duration;
+mod host;
 
 fn needs_fallback(report: &Value) -> bool {
     report["backend"]
@@ -86,6 +87,18 @@ pub(super) fn resolve(report: &mut Value) {
 /// Canonical spelling only: do not collapse distinct GPU SKUs or configurations.
 fn canonical_name(raw: &str) -> String {
     let name = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lower = name.to_ascii_lowercase();
+    for model in ["8060s", "890m", "880m", "780m", "760m", "680m", "660m"] {
+        for prefix in ["amd radeon ", "radeon "] {
+            let base = format!("{prefix}{model}");
+            if lower == base
+                || lower == format!("{base} graphics")
+                || (model == "8060s" && lower == format!("{base} graphics (radv strix_halo)"))
+            {
+                return format!("AMD Radeon {}", model.to_ascii_uppercase());
+            }
+        }
+    }
     if name.eq_ignore_ascii_case("GB10") || name.eq_ignore_ascii_case("NVIDIA GB10") {
         return "NVIDIA GB10".into();
     }
@@ -115,6 +128,7 @@ fn canonical_name(raw: &str) -> String {
 pub(crate) fn finalize(report: &mut Value) {
     let original = report.get("chip").cloned().unwrap_or(Value::Null);
     resolve(report);
+    host::resolve(report);
     let Some(raw) = report["chip"].as_str() else {
         return;
     };
@@ -122,11 +136,11 @@ pub(crate) fn finalize(report: &mut Value) {
     if name.is_empty() || name.eq_ignore_ascii_case("unknown") {
         return;
     }
-    let source = if report.get("chip_detection").is_some() {
-        "nvidia-smi"
-    } else {
-        "runtime"
-    };
+    let source = report
+        .pointer("/chip_detection/source")
+        .and_then(Value::as_str)
+        .unwrap_or("runtime")
+        .to_string();
     report["chip_identity"] = json!({
         "schema": "computearena-chip-identity/1",
         "name": name,
@@ -213,6 +227,15 @@ mod identity_tests {
             ("M5Pro", "Apple M5 Pro"),
             ("Apple M5 Pro", "Apple M5 Pro"),
             ("GB10", "NVIDIA GB10"),
+            ("AMD Radeon 8060S Graphics", "AMD Radeon 8060S"),
+            (
+                "Radeon 8060S Graphics (RADV STRIX_HALO)",
+                "AMD Radeon 8060S",
+            ),
+            ("Radeon 890M Graphics", "AMD Radeon 890M"),
+            ("Intel Arc B580", "Intel Arc B580"),
+            ("GPU A, GPU B", "GPU A, GPU B"),
+            ("Future vendor GPU", "Future vendor GPU"),
             ("nvidia gb10", "NVIDIA GB10"),
             ("AMD Radeon 890M", "AMD Radeon 890M"),
         ] {
@@ -228,5 +251,19 @@ mod identity_tests {
             canonical_name("NVIDIA RTX 4090 Laptop GPU"),
             "NVIDIA RTX 4090 Laptop GPU"
         );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod live_tests {
+    #[test]
+    #[ignore = "Requires a single unmasked ROCm device and rocminfo; no inference is run"]
+    fn live_rocm_identity() {
+        let mut report = serde_json::json!({"backend":"rocm","chip":"unknown"});
+        super::finalize(&mut report);
+        assert_eq!(report["chip_identity"]["source"], "rocminfo");
+        assert_eq!(report["chip_identity"]["reported_chip"], "unknown");
+        assert_ne!(report["chip"], "unknown");
+        println!("Resolved chip: {}", report["chip"]);
     }
 }
