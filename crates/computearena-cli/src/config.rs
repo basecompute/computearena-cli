@@ -34,6 +34,6 @@ pub(crate) const MODEL_QUANT_COLUMN_WIDTH: usize = 12;
 pub(crate) const PRIVATE_FILE_MODE: u32 = 0o600;
 
 pub(crate) const COMPUTEARENA_WEBSITE: &str = "https://computearena.ai";
-pub(crate) const COMPUTEARENA_DISCORD: &str = "https://discord.gg/vENxergRG6";
+pub(crate) const COMPUTEARENA_DISCORD: &str = "https://discord.gg/CCT24GWhPG";
 
 pub(crate) const BASERT_HARNESS_NAME: &str = "basert-benchmark-harness";

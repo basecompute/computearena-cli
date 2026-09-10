@@ -191,7 +191,7 @@ release; this implementation does not claim Windows compatibility.
 - Telemetry: `basert-telemetry/3`
 - Signing: Ed25519 over `computearena-json-v1` canonical JSON
 
-Community and support: [ComputeArena Discord](https://discord.gg/vENxergRG6).
+Community and support: [ComputeArena Discord](https://discord.gg/CCT24GWhPG).
 
 ## Upstream model identity
 
