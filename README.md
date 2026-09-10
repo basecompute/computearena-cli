@@ -167,6 +167,21 @@ the `resolved_chip`, and detection source. Valid harness names are preserved.
 The probe times out after two seconds and failures do not prevent saving a
 report. Existing signed reports are never rewritten.
 
+## Hardware resolution (macOS and Linux)
+
+- Runtime-reported names remain the primary evidence for every backend.
+- Missing ROCm/HIP names use `rocminfo` only when exactly one GPU is present
+  and no GPU visibility masks are set. Marketing names are used, not ISA IDs.
+- Missing CPU-only names use Linux CPU model data or macOS `sysctl`.
+- Missing Metal names use `sysctl` only on Apple Silicon, never Intel Macs.
+- Radeon 8060S ROCm and known RADV spellings normalize to `AMD Radeon 8060S`.
+- Vulkan/OpenCL device lists are not guessed from host inventories. Unknown
+  vendors and multi-device strings remain intact; distinct SKUs stay distinct.
+
+Detection failures remain unavailable rather than preventing report creation.
+Windows hardware discovery and end-to-end support are planned for a future
+release; this implementation does not claim Windows compatibility.
+
 ## Protocol compatibility
 
 - Report envelope: `computearena-benchmark/1`
@@ -177,3 +192,17 @@ report. Existing signed reports are never rewritten.
 - Signing: Ed25519 over `computearena-json-v1` canonical JSON
 
 Community and support: [ComputeArena Discord](https://discord.gg/vENxergRG6).
+
+## Upstream model identity
+
+Reports retain the original model/package name and quantization. Upstream identity
+is unresolved: no filename catalogue or `--model-id` override is used. Embedded
+names remain unverified display metadata, not proof of origin. Instruct, MoE,
+revisions and fine-tunes must not be inferred to be equivalent.
+
+Reports mark identity verification as `unverified`. The CLI hashes the complete
+model file before and after measurement and records `model.artifact_sha256`
+inside the signed report. Hashing is outside benchmark timing (but adds disk I/O
+and may warm the filesystem cache). A changed file aborts signing. This detects
+persistent file changes, not malicious runtimes, forged metadata, or A/B/A swaps.
+A hash identifies an artifact; it does not establish its upstream origin.

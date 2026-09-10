@@ -479,6 +479,10 @@ pub(crate) fn run_benchmark(
     let binary_sha256 = file_sha256(&harness)?;
     let descriptor = adapter.probe(&harness)?;
     finish_activity(ui, checking_started, "Benchmark harness is compatible");
+    let hashing_started =
+        start_activity(ui, "Hashing the model artifact (outside benchmark timing)…");
+    let model_sha256 = file_sha256(model)?;
+    finish_activity(ui, hashing_started, "Model artifact fingerprint ready");
     let benchmark_started = start_activity(
         ui,
         format!("Running the benchmark with {}…", harness.display()),
@@ -502,13 +506,20 @@ pub(crate) fn run_benchmark(
     crate::adapters::chip::finalize(&mut benchmark);
     finish_activity(ui, benchmark_started, "Benchmark measurements complete");
 
-    let finalizing_started = start_activity(ui, "Reading model metadata and signing the report…");
+    let finalizing_started = start_activity(ui, "Verifying model artifact and signing the report…");
+    if file_sha256(model)? != model_sha256 {
+        bail!("The model file changed during the benchmark. No report was signed; run again with a stable model file.");
+    }
     let key = load_or_create_installation_key(paths)?;
     let public = key.verifying_key();
     let public_bytes = public.to_bytes();
     let key_id = sha256_hex(&public_bytes);
     let run_id = random_id();
-    let model_metadata = result.model;
+    let mut model_metadata = result.model;
+    model_metadata["upstream_id"] = Value::Null;
+    model_metadata["upstream_id_source"] = json!("unresolved");
+    model_metadata["identity_verification"] = json!("unverified");
+    model_metadata["artifact_sha256"] = json!(model_sha256);
 
     // Intentionally omit the user's account and local model path: a benchmark
     // can be created offline and attached to an authenticated account later.

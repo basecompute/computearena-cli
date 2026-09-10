@@ -1000,3 +1000,26 @@ fn offline_report_cannot_be_uploaded_without_login() {
     );
     success(&f.verify());
 }
+
+#[test]
+fn model_identity_cannot_be_overridden_in_either_runtime() {
+    for runtime in RUNTIMES {
+        let f = Fixture::new(runtime);
+        failure(
+            &f.run(&["--model-id", "example/Distinct-Instruct-MoE"]),
+            "unexpected argument",
+        );
+        assert!(!f.report.exists());
+        success(&f.run(&[]));
+        let mut report: Value = serde_json::from_slice(&fs::read(&f.report).unwrap()).unwrap();
+        assert!(report["model"]["upstream_id"].is_null());
+        assert_eq!(report["model"]["upstream_id_source"], "unresolved");
+        assert_eq!(report["model"]["identity_verification"], "unverified");
+        let digest = report["model"]["artifact_sha256"].as_str().unwrap();
+        assert!(digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()));
+        success(&f.verify());
+        report["model"]["upstream_id"] = json!("example/Other");
+        fs::write(&f.report, serde_json::to_vec(&report).unwrap()).unwrap();
+        failure(&f.verify(), "signature verification failed");
+    }
+}
