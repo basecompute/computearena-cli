@@ -200,11 +200,14 @@ fn systemic_submission_failure_stops_the_queue_but_report_rejection_does_not() {
         let first_path = f.dir.path().join("first.json");
         fs::rename(&f.report, &first_path).unwrap();
         let second = f.signed();
-        let (url, received) = server(if status == 422 {
-            vec![status, 201]
-        } else {
-            vec![status]
-        });
+        let (url, received) = server(
+            &f,
+            if status == 422 {
+                vec![status, 201]
+            } else {
+                vec![status]
+            },
+        );
         let output = f
             .command()
             .args(["--api-url", &url, "submit", "--yes"])
@@ -716,10 +719,21 @@ fn runtime_menus_can_exit_and_saved_reports_share_list_and_inspect_commands() {
 }
 
 /// Minimal bounded HTTP server: checks actual upload bytes, not a mocked client function.
-fn server(statuses: Vec<u16>) -> (String, thread::JoinHandle<Vec<Value>>) {
+fn server(f: &Fixture, statuses: Vec<u16>) -> (String, thread::JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let url = format!("http://{}/api/v1", listener.local_addr().unwrap());
+    fs::write(
+        f.dir.path().join("data/auth.json"),
+        serde_json::to_vec(&json!({
+            "version":1, "origins": { (url.clone()): {
+                "access_token":"ca_cli_test_authenticated_token",
+                "username":"tester", "expires_at":"2099-01-01T00:00:00Z"
+            }}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     let handle = thread::spawn(move || {
         let mut received = Vec::new();
         for status in statuses {
@@ -749,7 +763,9 @@ fn server(statuses: Vec<u16>) -> (String, thread::JoinHandle<Vec<Value>>) {
                 if let Some(end) = data.windows(4).position(|s| s == b"\r\n\r\n") {
                     let headers = String::from_utf8_lossy(&data[..end]).to_lowercase();
                     assert!(headers.starts_with("post /api/v1/submissions http/1.1"));
-                    assert!(!headers.contains("authorization:"));
+                    assert!(
+                        headers.contains("authorization: bearer ca_cli_test_authenticated_token")
+                    );
                     let len = headers
                         .lines()
                         .find_map(|line| line.strip_prefix("content-length:"))
@@ -783,7 +799,7 @@ fn checksum_mismatch_is_informational_and_duplicate_submission_is_not_an_error()
     for runtime in RUNTIMES {
         let f = Fixture::new(runtime);
         let report = f.signed();
-        let (url, received) = server(vec![201, 200]);
+        let (url, received) = server(&f, vec![201, 200]);
         for message in ["Benchmark submitted", "Already submitted"] {
             let output = f
                 .command()
@@ -820,7 +836,7 @@ fn mixed_batch_requires_explicit_skip_and_uploads_only_the_valid_report() {
         .unwrap();
     failure(&output, "refusing a partial non-interactive submission");
     assert!(!text(&output).contains("Submitting report"));
-    let (url, received) = server(vec![201]);
+    let (url, received) = server(&f, vec![201]);
     let output = f
         .command()
         .args(["--api-url", &url, "submit", "--yes", "--skip-invalid"])
@@ -964,4 +980,23 @@ fn failed_benchmarks_and_basert_runs_do_not_create_gguf_history() {
     let f = Fixture::new("basert");
     f.signed();
     assert!(!f.dir.path().join("data/recent-gguf.json").exists());
+}
+
+#[test]
+fn offline_report_cannot_be_uploaded_without_login() {
+    let f = Fixture::new("basert");
+    let original = f.signed();
+    let output = f
+        .command()
+        .args(["submit", "--yes"])
+        .arg(&f.report)
+        .output()
+        .unwrap();
+    failure(&output, "Login is required");
+    assert!(text(&output).contains("http://127.0.0.1:1/api/v1 login"));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(&f.report).unwrap()).unwrap(),
+        original
+    );
+    success(&f.verify());
 }

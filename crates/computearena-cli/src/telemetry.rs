@@ -1,5 +1,5 @@
 //! External, runtime-neutral telemetry. Never claim replay/per-phase attribution.
-mod snapshots;
+pub(crate) mod snapshots;
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
