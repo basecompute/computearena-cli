@@ -15,6 +15,7 @@ use crate::submission::submit_reports;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, PoisonError};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModelSource {
@@ -178,6 +179,12 @@ pub(crate) struct App {
     downloaded: Option<PathBuf>,
     pub(crate) status: String,
     pub(crate) should_quit: bool,
+    /// Where the benchmark job leaves the path of the report it saved, so
+    /// leaving that job can offer to submit it.
+    completed_report: Arc<Mutex<Option<PathBuf>>>,
+    /// A freshly saved report waiting for the person to sign in before it is
+    /// offered for submission.
+    pub(crate) pending_submission: Option<PathBuf>,
 }
 
 impl App {
@@ -201,6 +208,8 @@ impl App {
             downloaded: None,
             status: String::new(),
             should_quit: false,
+            completed_report: Arc::new(Mutex::new(None)),
+            pending_submission: None,
         };
         app.refresh_account();
         // The same rule as the printed session: only ask which runtime to use
@@ -311,8 +320,20 @@ impl App {
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
-        if let Some(job) = self.job.as_mut() {
-            changed |= job.poll();
+        // The moment a job finishes, the status line says so and names the key
+        // that moves on: the log pane alone did not make it obvious that the
+        // interface was waiting for Enter.
+        let finished_now = match self.job.as_mut() {
+            Some(job) => {
+                let was_finished = job.finished();
+                changed |= job.poll();
+                (!was_finished && job.finished())
+                    .then_some((job.kind, matches!(job.outcome, Some(Ok(_)))))
+            }
+            None => None,
+        };
+        if let Some((kind, succeeded)) = finished_now {
+            self.status = finished_status(kind, succeeded);
         }
         changed
     }
@@ -374,6 +395,8 @@ impl App {
         let paths = self.paths.clone();
         let runtime = self.runtime;
         let harness = self.executable.clone();
+        let completed = self.completed_report.clone();
+        *completed.lock().unwrap_or_else(PoisonError::into_inner) = None;
         self.job = Some(Job::spawn(
             JobKind::Benchmark,
             format!("Benchmarking {}", crate::models::display_name(&model)),
@@ -390,6 +413,7 @@ impl App {
                     cooldown,
                     None,
                 )?;
+                *completed.lock().unwrap_or_else(PoisonError::into_inner) = Some(path.clone());
                 // The full path is in the log; the heading stays one line.
                 Ok(format!(
                     "Saved {}",
@@ -621,16 +645,37 @@ impl App {
                 self.screens.clear();
                 self.enter_runtime()?;
             }
-            JobKind::Login | JobKind::Logout => self.refresh_account(),
+            JobKind::Login | JobKind::Logout => {
+                self.refresh_account();
+                // Signing in from the offer made after a benchmark continues
+                // straight to that benchmark's preview.
+                if self.account.is_some() {
+                    if let Some(report) = self.pending_submission.take() {
+                        if matches!(self.screen(), Screen::Account { .. }) {
+                            self.back();
+                        }
+                        self.offer_submission(report)?;
+                    }
+                }
+            }
             // Finishing a benchmark or a submission is the end of that
             // errand, so both unwind to the menu rather than to the picker
-            // that started them.
+            // that started them. A saved benchmark is then offered for
+            // submission right away.
             JobKind::Benchmark => {
                 while matches!(
                     self.screen(),
                     Screen::Models { .. } | Screen::PathEntry { .. }
                 ) {
                     self.back();
+                }
+                let report = self
+                    .completed_report
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take();
+                if let (Some(Ok(_)), Some(report)) = (&saved, report) {
+                    self.offer_submission(report)?;
                 }
             }
             JobKind::Submit => {
@@ -657,6 +702,39 @@ impl App {
             JobKind::Verify | JobKind::List => {}
         }
         Ok(())
+    }
+
+    /// A benchmark was just saved: signed in, its preview opens with Enter
+    /// ready to submit; signed out, the account screen opens first and the
+    /// report waits until the sign-in completes.
+    fn offer_submission(&mut self, report: PathBuf) -> Result<()> {
+        if self.account.is_some() {
+            self.status =
+                "Benchmark saved · Enter submits it after the preview, Esc keeps it local"
+                    .to_string();
+            self.open_preview(vec![report])
+        } else {
+            self.pending_submission = Some(report);
+            self.status =
+                "Benchmark saved · sign in to submit it now, or Esc to keep it local".to_string();
+            self.screens.push(Screen::Account { cursor: 0 });
+            Ok(())
+        }
+    }
+
+    /// Declining the offer: the report stays where every other saved report
+    /// lives, and the status says how to submit it later.
+    fn keep_local(&mut self) {
+        self.pending_submission = None;
+        self.status =
+            "Kept locally · submit it any time from Submit previous benchmarks".to_string();
+    }
+
+    /// Whether the screen on top was opened by the offer made after a
+    /// benchmark, rather than from the menu's own submission flow.
+    fn offered_preview(&self) -> bool {
+        matches!(self.screen(), Screen::Preview { .. })
+            && matches!(self.screens.iter().rev().nth(1), Some(Screen::Menu { .. }))
     }
 
     // ---- key handling ----------------------------------------------------
@@ -750,6 +828,11 @@ impl App {
                 *details = None;
                 return Ok(());
             }
+        }
+        if (matches!(self.screen(), Screen::Account { .. }) && self.pending_submission.is_some())
+            || self.offered_preview()
+        {
+            self.keep_local();
         }
         self.back();
         Ok(())
@@ -896,6 +979,9 @@ impl App {
                 if *cursor == 0 {
                     self.start_account();
                 } else {
+                    if self.pending_submission.is_some() {
+                        self.keep_local();
+                    }
                     self.back();
                 }
             }
@@ -1063,6 +1149,26 @@ const LAST_RUNTIME_FILE: &str = "last-runtime";
 
 /// Which runtime this installation used last. Repeat visits skip the chooser
 /// and land on the menu; the header names the runtime, and the menu can switch.
+/// The status line shown from the moment a job finishes until the person
+/// leaves it: what ended, and the key that moves on.
+fn finished_status(kind: JobKind, succeeded: bool) -> String {
+    let what = match kind {
+        JobKind::Benchmark => "Benchmark",
+        JobKind::Submit => "Submission",
+        JobKind::Download => "Download",
+        JobKind::Install => "Install",
+        JobKind::Login => "Sign-in",
+        JobKind::Logout => "Sign-out",
+        JobKind::Verify => "Verification",
+        JobKind::List => "Listing",
+    };
+    if succeeded {
+        format!("{what} complete · press Enter to continue")
+    } else {
+        format!("{what} failed · press Enter to go back")
+    }
+}
+
 pub(crate) fn last_runtime(paths: &Paths) -> Option<Runtime> {
     match std::fs::read_to_string(paths.root.join(LAST_RUNTIME_FILE))
         .ok()?
@@ -1158,4 +1264,159 @@ fn report_rows(paths: &Paths) -> Result<Vec<ReportRow>> {
             valid: report["status"].as_str() == Some("valid"),
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::{save_api_session, ApiSession};
+    use std::fs;
+
+    fn app(dir: &std::path::Path, account: Option<&str>) -> App {
+        let paths = Paths::resolve(Some(dir.join("data"))).unwrap();
+        paths.prepare().unwrap();
+        App {
+            paths,
+            api_url: "http://127.0.0.1:1/api/v1".to_string(),
+            harness_override: None,
+            runtime: Runtime::LlamaCpp,
+            executable: None,
+            account: account.map(str::to_string),
+            screens: vec![Screen::Menu { cursor: 0 }],
+            job: None,
+            pending: None,
+            downloaded: None,
+            status: String::new(),
+            should_quit: false,
+            completed_report: Arc::new(Mutex::new(None)),
+            pending_submission: None,
+        }
+    }
+
+    fn saved_report(app: &App) -> PathBuf {
+        let path = app.paths.reports.join("run.json");
+        fs::write(&path, br#"{"run_id":"abc123"}"#).unwrap();
+        *app.completed_report.lock().unwrap() = Some(path.clone());
+        path
+    }
+
+    fn finished(kind: JobKind) -> Job {
+        let mut job = Job::detached(Vec::new(), 4);
+        job.kind = kind;
+        job.outcome = Some(Ok("done".to_string()));
+        job
+    }
+
+    #[test]
+    fn a_saved_benchmark_opens_its_preview_when_signed_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path(), Some("isu"));
+        let report = saved_report(&app);
+        app.screens.push(Screen::Models {
+            rows: Vec::new(),
+            filter: String::new(),
+            cursor: 0,
+        });
+        app.screens.push(Screen::Running);
+        app.job = Some(finished(JobKind::Benchmark));
+
+        // Enter on the finished job.
+        app.activate().unwrap();
+        assert!(matches!(
+            app.screen(),
+            Screen::Preview { reports, .. } if *reports == vec![report.clone()]
+        ));
+        // The picker that started the run is gone: Esc lands on the menu.
+        assert!(matches!(
+            app.screens.iter().rev().nth(1),
+            Some(Screen::Menu { .. })
+        ));
+        assert!(app.status.contains("Enter submits"), "{}", app.status);
+
+        app.escape().unwrap();
+        assert!(matches!(app.screen(), Screen::Menu { .. }));
+        assert!(app.status.starts_with("Kept locally"), "{}", app.status);
+        assert!(report.exists());
+    }
+
+    #[test]
+    fn a_saved_benchmark_asks_to_sign_in_first_and_continues_after_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path(), None);
+        let report = saved_report(&app);
+        app.screens.push(Screen::Running);
+        app.job = Some(finished(JobKind::Benchmark));
+
+        app.activate().unwrap();
+        assert!(matches!(app.screen(), Screen::Account { .. }));
+        assert_eq!(app.pending_submission.as_ref(), Some(&report));
+        assert!(app.status.contains("sign in"), "{}", app.status);
+
+        // "Log in" spawns a job that ends with a saved session; simulate both.
+        save_api_session(
+            &app.paths,
+            &app.api_url,
+            &ApiSession {
+                access_token: "token".to_string(),
+                username: "isu".to_string(),
+                expires_at: "2999-01-01T00:00:00Z".to_string(),
+            },
+        )
+        .unwrap();
+        app.screens.push(Screen::Running);
+        app.job = Some(finished(JobKind::Login));
+        app.activate().unwrap();
+
+        assert_eq!(app.account.as_deref(), Some("isu"));
+        assert!(app.pending_submission.is_none());
+        assert!(matches!(
+            app.screen(),
+            Screen::Preview { reports, .. } if *reports == vec![report.clone()]
+        ));
+        assert!(matches!(
+            app.screens.iter().rev().nth(1),
+            Some(Screen::Menu { .. })
+        ));
+    }
+
+    #[test]
+    fn declining_to_sign_in_keeps_the_report_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path(), None);
+        let report = saved_report(&app);
+        app.screens.push(Screen::Running);
+        app.job = Some(finished(JobKind::Benchmark));
+        app.activate().unwrap();
+
+        app.escape().unwrap();
+        assert!(matches!(app.screen(), Screen::Menu { .. }));
+        assert!(app.pending_submission.is_none());
+        assert!(app.status.starts_with("Kept locally"), "{}", app.status);
+        assert!(report.exists());
+    }
+
+    #[test]
+    fn a_failed_benchmark_offers_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path(), Some("isu"));
+        app.screens.push(Screen::Running);
+        let mut job = finished(JobKind::Benchmark);
+        job.outcome = Some(Err("harness exited with status 1".to_string()));
+        app.job = Some(job);
+        app.activate().unwrap();
+        assert!(matches!(app.screen(), Screen::Menu { .. }));
+        assert!(app.status.starts_with("Failed:"), "{}", app.status);
+    }
+
+    #[test]
+    fn a_finished_job_names_the_key_that_moves_on() {
+        assert_eq!(
+            finished_status(JobKind::Benchmark, true),
+            "Benchmark complete · press Enter to continue"
+        );
+        assert_eq!(
+            finished_status(JobKind::Submit, false),
+            "Submission failed · press Enter to go back"
+        );
+    }
 }

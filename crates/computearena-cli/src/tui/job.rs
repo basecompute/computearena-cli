@@ -77,7 +77,7 @@ impl Job {
     /// spawning one redirects this process's output, which would take the
     /// output of any test running beside it.
     #[cfg(test)]
-    fn detached(log: Vec<String>, visible: usize) -> Self {
+    pub(crate) fn detached(log: Vec<String>, visible: usize) -> Self {
         let (_, receiver) = mpsc::channel();
         Self {
             kind: JobKind::List,
