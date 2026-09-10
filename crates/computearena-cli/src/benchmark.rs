@@ -5,7 +5,6 @@ use crate::config::{
     CONDITIONING_MINIMUM_WARMUP_SECONDS, CONDITIONING_STABLE_WINDOW_SECONDS,
     PORTABLE_CONDITIONED_PHASES_PER_WORKLOAD, TELEMETRY_WINDOW_SECONDS,
 };
-use crate::models::compact_home_path;
 use crate::protocol::{HARNESS_SCHEMA, REPORT_SCHEMA, RUNTIME_NAME, TELEMETRY_SCHEMA};
 use crate::reports::b64_encode;
 use crate::reports::{
@@ -117,7 +116,9 @@ pub(crate) fn plan_rows(
         .join(", ");
     Ok(vec![
         ("Runtime", runtime.adapter().display_name().to_string()),
-        ("Model", compact_home_path(r.model)),
+        // The resolved, absolute path: the plan's job is to say exactly which
+        // file will be read, so this is never shortened.
+        ("Model", r.model.display().to_string()),
         ("Workloads", format!("{prefill} + TG{}", r.tg)),
         ("Sampling", sampling_summary(runtime, r)),
         ("Estimated", estimate_summary(runtime, prefill_tokens.len())),
