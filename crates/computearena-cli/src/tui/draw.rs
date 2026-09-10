@@ -6,8 +6,9 @@ use super::app::{
 };
 use super::job::Job;
 use crate::benchmark::LOAD_WARNING;
+use crate::config::{COMPUTEARENA_DISCORD, COMPUTEARENA_WEBSITE};
 use crate::theme::BASECOMPUTE_THEME;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
@@ -110,19 +111,45 @@ fn header(frame: &mut Frame, area: Rect, app: &App) {
         height: 1,
         ..area
     };
-    let padding = if bar_rows > 1 { 1 } else { 0 };
-    let mut lines = vec![Line::from(""); padding as usize];
-    lines.push(Line::from(Span::styled(
-        format!("  {}", wordmark("ComputeArena")),
-        Style::default()
-            .fg(brand())
-            .bg(deep_ocean())
-            .add_modifier(Modifier::BOLD),
-    )));
+
+    // The masthead is Lime on Deep Ocean — the signature pairing — with the
+    // links kept beside the wordmark, where they were in the printed banner.
     frame.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(deep_ocean())),
+        Block::default().style(Style::default().bg(deep_ocean())),
         bar,
     );
+    let wordmark_row = Rect {
+        y: bar.y + bar_rows / 2,
+        height: 1,
+        ..bar
+    };
+    let name = wordmark("ComputeArena");
+    let links = format!(
+        "{} · {}  ",
+        COMPUTEARENA_WEBSITE.trim_start_matches("https://"),
+        COMPUTEARENA_DISCORD.trim_start_matches("https://")
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("  {name}"),
+            Style::default()
+                .fg(brand())
+                .bg(deep_ocean())
+                .add_modifier(Modifier::BOLD),
+        ))),
+        wordmark_row,
+    );
+    // Only when there is room for them beside the wordmark.
+    if usize::from(wordmark_row.width) > name.chars().count() + links.chars().count() + 6 {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                links,
+                Style::default().fg(neutral()).bg(deep_ocean()),
+            )))
+            .alignment(Alignment::Right),
+            wordmark_row,
+        );
+    }
 
     // The runtime is not settled until it has been chosen, so the context row
     // says so rather than naming the default.
@@ -135,15 +162,35 @@ fn header(frame: &mut Frame, area: Rect, app: &App) {
         Some(user) => Span::styled(format!("@{user}"), Style::default().fg(brand())),
         None => Span::styled("not signed in", muted()),
     };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::raw("  "),
-            runtime,
-            Span::raw("  ·  "),
-            account,
-        ])),
-        context,
-    );
+    // The runtime's name always survives; only the executable's path is
+    // shortened, from the front, so its file name stays visible.
+    let (name, path) = match runtime.content.split_once(" · ") {
+        Some((name, path)) => (name.to_string(), Some(path.to_string())),
+        None => (runtime.content.to_string(), None),
+    };
+    let room = usize::from(context.width)
+        .saturating_sub(name.chars().count() + account.content.chars().count() + 12);
+    let mut spans = vec![Span::raw("  "), Span::styled(name, runtime.style)];
+    if let Some(path) = path {
+        spans.push(Span::styled(
+            format!(" · {}", elide_start(&path, room)),
+            muted(),
+        ));
+    }
+    spans.push(Span::raw("  ·  "));
+    spans.push(account);
+    frame.render_widget(Paragraph::new(Line::from(spans)), context);
+}
+
+fn elide_start(text: &str, room: usize) -> String {
+    let length = text.chars().count();
+    if length <= room || room < 2 {
+        return text.to_string();
+    }
+    format!(
+        "…{}",
+        text.chars().skip(length - room + 1).collect::<String>()
+    )
 }
 
 fn footer(frame: &mut Frame, area: Rect, app: &App) {
