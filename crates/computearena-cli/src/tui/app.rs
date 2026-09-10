@@ -661,6 +661,11 @@ impl App {
 
     // ---- key handling ----------------------------------------------------
 
+    /// A wheel notch, or any other coarse scroll.
+    pub(crate) fn scroll(&mut self, delta: isize) {
+        self.move_cursor(delta);
+    }
+
     pub(crate) fn on_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> Result<()> {
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
@@ -786,14 +791,7 @@ impl App {
         if length == 0 {
             if matches!(self.screen(), Screen::Running) {
                 if let Some(job) = self.job.as_mut() {
-                    let current = job
-                        .scroll
-                        .unwrap_or_else(|| job.log.len().saturating_sub(1));
-                    job.scroll = Some(
-                        current
-                            .saturating_add_signed(delta)
-                            .min(job.log.len().saturating_sub(1)),
-                    );
+                    job.scroll_by(delta);
                 }
             }
             return;

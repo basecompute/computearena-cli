@@ -36,7 +36,11 @@ pub(crate) struct Job {
     pub(crate) log: Vec<String>,
     pub(crate) started: Instant,
     pub(crate) outcome: Option<Result<String, String>>,
+    /// Index of the top visible log line; `None` follows the newest output.
     pub(crate) scroll: Option<usize>,
+    /// How many log lines the pane last had room for, recorded while drawing
+    /// so scrolling can stop at the top instead of emptying the pane.
+    pub(crate) visible: usize,
     receiver: Receiver<JobEvent>,
 }
 
@@ -60,12 +64,44 @@ impl Job {
             started: Instant::now(),
             outcome: None,
             scroll: None,
+            visible: 1,
             receiver,
         }
     }
 
     pub(crate) fn finished(&self) -> bool {
         self.outcome.is_some()
+    }
+
+    /// A job with no worker behind it, for tests about presentation only:
+    /// spawning one redirects this process's output, which would take the
+    /// output of any test running beside it.
+    #[cfg(test)]
+    fn detached(log: Vec<String>, visible: usize) -> Self {
+        let (_, receiver) = mpsc::channel();
+        Self {
+            kind: JobKind::List,
+            title: String::new(),
+            log,
+            started: Instant::now(),
+            outcome: None,
+            scroll: None,
+            visible,
+            receiver,
+        }
+    }
+
+    /// The top line when following the newest output.
+    pub(crate) fn tail_top(&self) -> usize {
+        self.log.len().saturating_sub(self.visible.max(1))
+    }
+
+    /// Move the window by `delta` lines, stopping at the first line and
+    /// resuming following once it reaches the newest.
+    pub(crate) fn scroll_by(&mut self, delta: isize) {
+        let tail_top = self.tail_top();
+        let top = self.scroll.unwrap_or(tail_top).saturating_add_signed(delta);
+        self.scroll = if top >= tail_top { None } else { Some(top) };
     }
 
     /// Drain whatever the worker produced since the last frame. Returns true
@@ -184,6 +220,26 @@ fn _assert_traits(file: std::fs::File) -> RawFd {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn scrolling_stops_at_the_first_line_and_resumes_following_at_the_newest() {
+        let mut job = Job::detached((0..10).map(|line| line.to_string()).collect(), 4);
+        assert_eq!(job.tail_top(), 6);
+
+        job.scroll_by(-2);
+        assert_eq!(job.scroll, Some(4));
+        // Far past the top stops at the first line, keeping a full window.
+        job.scroll_by(-100);
+        assert_eq!(job.scroll, Some(0));
+        // Reaching the newest line resumes following, so new output shows.
+        job.scroll_by(100);
+        assert_eq!(job.scroll, None);
+
+        // A log shorter than the window has nothing to scroll.
+        job.log.truncate(2);
+        job.scroll_by(-5);
+        assert_eq!(job.scroll, None);
+    }
 
     #[test]
     fn a_job_streams_what_the_work_prints_and_then_its_summary() {

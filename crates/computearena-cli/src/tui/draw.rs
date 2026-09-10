@@ -203,8 +203,8 @@ fn footer(frame: &mut Frame, area: Rect, app: &App) {
             "↑/↓ move · Space tick · a all · Enter preview · Esc back"
         }
         Screen::Reports { .. } => "↑/↓ move · Enter verify · Esc back",
-        Screen::Preview { .. } => "↑/↓ scroll · Enter submit · Esc back",
-        Screen::Running => "↑/↓ scroll · Enter/Esc back when finished · Ctrl+C quit",
+        Screen::Preview { .. } => "↑/↓ or wheel scroll · Enter submit · Esc back",
+        Screen::Running => "↑/↓ or wheel scroll · PgUp/PgDn page · Enter/Esc back · Ctrl+C quit",
         Screen::Loading { .. } => "working…",
         Screen::HubSearch { .. } => "type a search · Enter search · Esc back",
         Screen::HubModels { .. } => "↑/↓ move · Enter list files · Esc back",
@@ -226,6 +226,12 @@ fn footer(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn body(frame: &mut Frame, area: Rect, app: &mut App) {
+    // Drawn first and separately: the output pane records how many lines it
+    // has room for, which scrolling needs.
+    if matches!(app.screen(), Screen::Running) {
+        job_screen(frame, area, app.job.as_mut());
+        return;
+    }
     match app.screen() {
         Screen::Runtime { cursor } => runtime_screen(frame, area, *cursor),
         Screen::Setup {
@@ -252,7 +258,6 @@ fn body(frame: &mut Frame, area: Rect, app: &mut App) {
                 details_overlay(frame, area, details);
             }
         }
-        Screen::Running => job_screen(frame, area, app.job.as_ref()),
         Screen::Reports {
             rows,
             marks,
@@ -262,6 +267,8 @@ fn body(frame: &mut Frame, area: Rect, app: &mut App) {
         Screen::Preview { lines, scroll, .. } => preview_screen(frame, area, lines, *scroll),
         Screen::Info { title, lines } => info_screen(frame, area, title, lines),
         Screen::Loading { message } => loading_screen(frame, area, message),
+        // Drawn above, before this borrow.
+        Screen::Running => {}
         Screen::HubSearch { input } => search_screen(frame, area, input),
         Screen::HubModels { rows, cursor } => hub_models_screen(frame, area, rows, *cursor),
         Screen::HubFiles {
@@ -673,7 +680,7 @@ fn account_screen(frame: &mut Frame, area: Rect, account: Option<&str>, cursor: 
 
 const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
 
-fn job_screen(frame: &mut Frame, area: Rect, job: Option<&Job>) {
+fn job_screen(frame: &mut Frame, area: Rect, job: Option<&mut Job>) {
     let Some(job) = job else {
         return;
     };
@@ -715,13 +722,16 @@ fn job_screen(frame: &mut Frame, area: Rect, job: Option<&Job>) {
     frame.render_widget(Paragraph::new(heading), areas[0]);
 
     // The log pane holds whatever the underlying command printed, following the
-    // newest line unless the reader has scrolled back.
-    let visible = areas[1].height.saturating_sub(2) as usize;
-    let bottom = job
+    // newest line unless the reader has scrolled back. The window keeps its
+    // full height at the top of the log, so scrolling up runs out of lines
+    // rather than emptying the pane.
+    job.visible = usize::from(areas[1].height.saturating_sub(2)).max(1);
+    let top = job
         .scroll
-        .map_or(job.log.len(), |scroll| (scroll + 1).min(job.log.len()));
-    let start = bottom.saturating_sub(visible);
-    let lines: Vec<Line> = job.log[start..bottom]
+        .unwrap_or_else(|| job.tail_top())
+        .min(job.tail_top());
+    let bottom = (top + job.visible).min(job.log.len());
+    let lines: Vec<Line> = job.log[top..bottom]
         .iter()
         .map(|line| {
             let style = if line.starts_with('✓') {
@@ -736,5 +746,9 @@ fn job_screen(frame: &mut Frame, area: Rect, job: Option<&Job>) {
             Line::from(Span::styled(line.clone(), style))
         })
         .collect();
-    frame.render_widget(Paragraph::new(lines).block(panel("Output")), areas[1]);
+    let title = match job.log.len().checked_sub(bottom) {
+        Some(0) | None => "Output".to_string(),
+        Some(below) => format!("Output · {below} more below"),
+    };
+    frame.render_widget(Paragraph::new(lines).block(panel(&title)), areas[1]);
 }
