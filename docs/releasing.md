@@ -144,18 +144,13 @@ Two things this is not:
   artifact digest and the signing certificate, which names this internal
   repository, the workflow file, and the tag or branch. BaseRT's workflow
   accepted the same exposure.
-- **Apple code signing.** The macOS binary carries only the ad-hoc signature
-  the Apple linker applies to every arm64 executable; it has no Developer ID
-  and is not notarized, same as the BaseRT engine binaries. Installing with
-  `gh release download` or `curl` piped into `tar` sets no quarantine
-  attribute, so Gatekeeper does not intervene. A bundle downloaded in a
-  browser and extracted in Finder is quarantined, and macOS refuses to run
-  the binary until `xattr -d com.apple.quarantine computearena`. Developer ID
-  signing and notarization need an Apple Developer Program membership for the
-  organisation, a "Developer ID Application" certificate and an App Store
-  Connect API key stored as repository secrets, and a signing step gated on
-  those secrets; a bare command-line binary can be notarized but not stapled,
-  so Gatekeeper checks the ticket online.
+- **Apple code signing.** By decision, the macOS binary is not Developer ID
+  signed or notarized, the same as the BaseRT engine binaries; it carries the
+  ad-hoc signature the Apple linker applies to every arm64 executable. The
+  public installer and `curl` piped into `tar` set no quarantine attribute,
+  so Gatekeeper does not intervene. A bundle downloaded in a browser and
+  extracted in Finder is quarantined until
+  `xattr -d com.apple.quarantine computearena`.
 
 ## Troubleshooting
 
