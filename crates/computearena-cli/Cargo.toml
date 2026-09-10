@@ -17,11 +17,18 @@ clap.workspace = true
 dialoguer.workspace = true
 dirs.workspace = true
 ed25519-dalek.workspace = true
+flate2.workspace = true
 rand_core.workspace = true
+ratatui.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tar.workspace = true
 tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+sysinfo.workspace = true
 
 [lints]
 workspace = true

@@ -24,10 +24,11 @@ impl Paths {
     pub(crate) fn resolve(override_root: Option<PathBuf>) -> Result<Self> {
         let root = match override_root {
             Some(path) => path,
-            None => dirs::data_local_dir()
-                .context("could not determine the local data directory")?
-                .join("basert")
-                .join("computearena"),
+            None => {
+                let base = dirs::data_local_dir()
+                    .context("could not determine the local data directory")?;
+                default_root(&base)
+            }
         };
         Ok(Self {
             reports: root.join("reports"),
@@ -49,6 +50,61 @@ impl Paths {
         Ok(())
     }
 }
+/// The data directory under the platform's local data directory:
+/// `computearena`, which replaced the `basert/computearena` location used
+/// while the client shipped inside BaseRT. The first run after upgrading moves
+/// the old directory whole, so reports, the signing key, saved sessions, and
+/// installed runtimes come along, and says so once. Both directories existing
+/// means the move was done by hand or an older client has run since; the
+/// current one wins and the other is mentioned so nothing is silently ignored.
+/// Messages go to stderr so `list --json` stays machine-readable.
+pub(crate) fn default_root(base: &Path) -> PathBuf {
+    let current = base.join("computearena");
+    let legacy = base.join("basert").join("computearena");
+    if current.exists() {
+        if legacy.is_dir() && !is_empty_dir(&legacy) {
+            eprintln!(
+                "Note: data from an older ComputeArena remains at {} and is not used; the data directory is {}.",
+                legacy.display(),
+                current.display()
+            );
+        }
+        return current;
+    }
+    if !legacy.is_dir() {
+        return current;
+    }
+    match fs::rename(&legacy, &current) {
+        Ok(()) => {
+            // The old parent held only this; removing it fails harmlessly
+            // when BaseRT or anything else still keeps files there.
+            if let Some(parent) = legacy.parent() {
+                let _ = fs::remove_dir(parent);
+            }
+            eprintln!(
+                "Moved ComputeArena data from {} to {}.",
+                legacy.display(),
+                current.display()
+            );
+            current
+        }
+        Err(error) => {
+            eprintln!(
+                "Warning: could not move ComputeArena data from {} to {} ({error}); using the old location.",
+                legacy.display(),
+                current.display()
+            );
+            legacy
+        }
+    }
+}
+
+fn is_empty_dir(path: &Path) -> bool {
+    fs::read_dir(path)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(true)
+}
+
 pub(crate) fn load_or_create_installation_key(paths: &Paths) -> Result<SigningKey> {
     if paths.secret_key.is_file() {
         return load_installation_key(&paths.secret_key);
@@ -273,7 +329,10 @@ pub(crate) fn list_reports(paths: &Paths, as_json: bool) -> Result<()> {
         "{}",
         ui.brand_bold(format!("Local benchmarks ({})", reports.len()))
     );
-    for (index, report) in reports.iter().enumerate() {
+    // Oldest first, so the newest benchmark is the one left in front of you
+    // when the listing ends — at the prompt, or at the bottom of a log pane.
+    // `--json` keeps the newest-first order machines and the pickers use.
+    for (index, report) in reports.iter().rev().enumerate() {
         let status = report["status"].as_str().unwrap_or("invalid");
         let status_label = if status == "valid" {
             ui.success("VALID")
@@ -296,7 +355,8 @@ pub(crate) fn list_reports(paths: &Paths, as_json: bool) -> Result<()> {
             report["backend"].as_str().unwrap_or("unknown backend")
         );
         println!(
-            "     Runtime: BaseRT {} | {} | {}",
+            "     Runtime: {} {} | {} | {}",
+            report["runtime"].as_str().unwrap_or("basert"),
             report["runtime_version"].as_str().unwrap_or("unknown"),
             report["architecture"]
                 .as_str()
@@ -399,6 +459,7 @@ pub(crate) fn report_summaries(paths: &Paths) -> Result<Vec<Value>> {
                     "created_at": format_unix_ms(created_at_unix_ms),
                     "device": value.pointer("/benchmark/chip").and_then(Value::as_str),
                     "backend": value.pointer("/benchmark/backend").and_then(Value::as_str),
+                    "runtime": value.pointer("/runtime/name").and_then(Value::as_str),
                     "runtime_version": value.pointer("/benchmark/runtime_version").and_then(Value::as_str)
                         .or_else(|| value.pointer("/runtime/computearena_version").and_then(Value::as_str)),
                     "prefill": prefill,
@@ -619,4 +680,61 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
         let _ = write!(output, "{byte:02x}");
     }
     output
+}
+
+#[cfg(test)]
+mod data_directory_tests {
+    use super::*;
+
+    #[test]
+    fn a_fresh_install_uses_the_computearena_directory_without_creating_it() {
+        let base = tempfile::tempdir().unwrap();
+        assert_eq!(default_root(base.path()), base.path().join("computearena"));
+        assert!(!base.path().join("computearena").exists());
+    }
+
+    #[test]
+    fn an_older_install_is_moved_whole_and_its_empty_parent_removed() {
+        let base = tempfile::tempdir().unwrap();
+        let legacy = base.path().join("basert").join("computearena");
+        fs::create_dir_all(legacy.join("reports")).unwrap();
+        fs::write(legacy.join("reports").join("run.json"), b"{}").unwrap();
+        fs::create_dir_all(legacy.join("keys")).unwrap();
+        fs::write(legacy.join("keys").join("installation.ed25519"), b"key").unwrap();
+        fs::create_dir_all(legacy.join("runtimes").join("llama-cpp").join("b1")).unwrap();
+
+        let root = default_root(base.path());
+        assert_eq!(root, base.path().join("computearena"));
+        assert!(root.join("reports").join("run.json").is_file());
+        assert!(root.join("keys").join("installation.ed25519").is_file());
+        assert!(root.join("runtimes").join("llama-cpp").join("b1").is_dir());
+        assert!(!legacy.exists());
+        assert!(!base.path().join("basert").exists());
+    }
+
+    #[test]
+    fn a_basert_parent_with_other_files_is_left_in_place() {
+        let base = tempfile::tempdir().unwrap();
+        let legacy = base.path().join("basert").join("computearena");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(base.path().join("basert").join("other.txt"), b"x").unwrap();
+
+        let root = default_root(base.path());
+        assert_eq!(root, base.path().join("computearena"));
+        assert!(!legacy.exists());
+        assert!(base.path().join("basert").join("other.txt").is_file());
+    }
+
+    #[test]
+    fn the_current_directory_wins_when_both_exist() {
+        let base = tempfile::tempdir().unwrap();
+        let legacy = base.path().join("basert").join("computearena");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("auth.json"), b"{}").unwrap();
+        fs::create_dir_all(base.path().join("computearena")).unwrap();
+
+        let root = default_root(base.path());
+        assert_eq!(root, base.path().join("computearena"));
+        assert!(legacy.join("auth.json").is_file());
+    }
 }

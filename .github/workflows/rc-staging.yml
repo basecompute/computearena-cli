@@ -1,0 +1,238 @@
+name: RC staging
+
+# Publishes a staging pre-release whenever a release-candidate branch
+# (`rc-X.Y.Z`) changes. Every feature merge into the rc branch rebuilds and
+# replaces the `staging-X.Y.Z` pre-release on this repository — the same event
+# that redeploys the web app's staging environment, so testers always get a
+# matched pair — and posts a fresh comment on the open rc pull request, so the
+# newest build is always announced right after the commits that produced it.
+#
+# The tag is deliberately not a `v*` tag, so release.yml can never fire from it.
+# Tag and pre-release are recreated in place on every push and removed by
+# rc-cleanup.yml when the rc pull request closes. The repository is public, so
+# the pre-release is visible to everyone; the installer at computearena.ai only
+# picks it while no stable release exists. There is no mirror export (unlike
+# BaseRT).
+#
+# The build is build.yml, shared with release.yml, so what gets staged is what
+# would ship, and the bundles are Sigstore-signed the same way. The rc branch
+# must already carry the version it names (see .github/scripts/check_version.sh);
+# a mismatch fails here before any build.
+
+on:
+  push:
+    branches:
+      - "rc-*"
+  # Re-stage an rc branch by hand: choose it under "Use workflow from". GitHub
+  # only lists the workflow once main carries this file, i.e. after the first
+  # rc that includes it has merged.
+  workflow_dispatch:
+
+# One staging build per rc branch; a newer push cancels the superseded one.
+concurrency:
+  group: rc-staging-${{ github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  meta:
+    name: Gate + version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+      sha: ${{ steps.v.outputs.sha }}
+      branch: ${{ steps.v.outputs.branch }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - id: v
+        # Branch names come in through env, never inlined into the script.
+        env:
+          BRANCH: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          case "$BRANCH" in
+            rc-*) ;;
+            *) echo "::error::'$BRANCH' is not an rc-* branch; staging builds come from release-candidate branches only"; exit 1 ;;
+          esac
+          VERSION="${BRANCH#rc-}"
+          .github/scripts/check_version.sh "$VERSION"
+          {
+            echo "version=$VERSION"
+            echo "tag=staging-${VERSION}"
+            echo "sha=$SHA"
+            echo "branch=$BRANCH"
+          } >> "$GITHUB_OUTPUT"
+          echo "Staging $BRANCH at $SHA as staging-${VERSION}"
+
+  build:
+    name: Build
+    needs: meta
+    uses: ./.github/workflows/build.yml
+    with:
+      expected_sha: ${{ needs.meta.outputs.sha }}
+      version: ${{ needs.meta.outputs.version }}
+      suffix: "-staging"
+
+  publish:
+    name: Publish staging pre-release
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    # The build jobs run with a read-only token; only this job, which executes
+    # no repository code, can write.
+    permissions:
+      contents: write        # recreate the staging tag and pre-release
+      pull-requests: write   # keep the link on the rc pull request current
+      id-token: write        # Sigstore keyless signing of the bundles
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      TAG: ${{ needs.meta.outputs.tag }}
+      VERSION: ${{ needs.meta.outputs.version }}
+      SHA: ${{ needs.meta.outputs.sha }}
+      BRANCH: ${{ needs.meta.outputs.branch }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bundle-*
+          merge-multiple: true
+          path: dist
+
+      - name: Verify bundle checksums
+        run: |
+          cd dist
+          ls -l
+          sha256sum -c -- *.sha256
+
+      - uses: sigstore/cosign-installer@v4.1.2
+        with:
+          cosign-release: v2.6.5   # 2.x keeps the .sig/.pem outputs BaseRT's verify recipe expects
+
+      - name: Sign bundles (Sigstore keyless)
+        # Keyless: the job's OIDC token buys a short-lived Fulcio certificate
+        # naming this repository, workflow file, and ref, and the signature is
+        # logged to Rekor (a public log). BaseRT's release-sign.yml intends the
+        # same but has never run: the `release` event it listens for is not
+        # emitted for releases created with the workflow token. So the signing
+        # happens here, before the assets are uploaded, and is verified on the
+        # spot so a broken signature cannot publish.
+        run: |
+          for f in dist/*.tar.gz; do
+            cosign sign-blob --yes --output-signature "$f.sig" --output-certificate "$f.pem" "$f"
+            cosign verify-blob --certificate "$f.pem" --signature "$f.sig" \
+              --certificate-identity-regexp "^https://github.com/${REPO}/" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com "$f" >/dev/null
+            echo "signed and verified $(basename "$f")"
+          done
+          ls -l dist
+
+      - name: Write the install snippet
+        # Shared by the release notes and the pull-request comment. Pinned to
+        # this tag and version rather than "latest staging", so the command
+        # still installs the build under discussion after a newer rc exists.
+        # Plain curl, since the repository is public, into the same directory
+        # the public installer at computearena.ai uses.
+        run: |
+          cat > "$RUNNER_TEMP/install.sh" <<'EOF'
+          case "$(uname -s)-$(uname -m)" in
+            Darwin-arm64)  P=macos-arm64 ;;
+            Linux-x86_64)  P=linux-x86_64 ;;
+            Linux-aarch64) P=linux-arm64 ;;
+            *) echo "no ComputeArena bundle for $(uname -s)/$(uname -m)" >&2; P= ;;
+          esac
+          D="${COMPUTEARENA_INSTALL_DIR:-$HOME/.local/bin}"; mkdir -p "$D"
+          curl -fsSL "https://github.com/@REPO@/releases/download/@TAG@/computearena-${P:?}-@VERSION@-staging.tar.gz" \
+            | tar -xzf - -C "$D" computearena && "$D/computearena" --version
+          EOF
+          sed -i "s|@TAG@|$TAG|g; s|@REPO@|$REPO|g; s|@VERSION@|$VERSION|g" "$RUNNER_TEMP/install.sh"
+          cat "$RUNNER_TEMP/install.sh"
+
+      - name: Recreate the staging pre-release
+        id: release
+        run: |
+          # Replace in place so each push refreshes the same tag. Delete the tag
+          # ref explicitly too: `gh release create --target` reuses an existing
+          # tag at its old commit, which would attach fresh bundles to a stale
+          # revision.
+          gh release delete "$TAG" --repo "$REPO" --yes --cleanup-tag 2>/dev/null || true
+          gh api -X DELETE "repos/$REPO/git/refs/tags/$TAG" >/dev/null 2>&1 || true
+          SHORT="$(printf '%s' "$SHA" | cut -c1-7)"
+          NOTES="$(cat <<EOF
+          Staging build of the ComputeArena CLI **${VERSION}** from \`${BRANCH}\` at ${SHA} ([workflow run](${RUN_URL})).
+
+          ⚠️ Pre-release for testing the release candidate, not a stable release. Recreated on every push to \`${BRANCH}\` and removed when the release candidate merges. The installer at computearena.ai only uses it while no stable release exists.
+
+          Each \`.tar.gz\` holds the \`computearena\` binary, \`LICENSE\`, and \`README.md\`; the \`.sha256\` beside it verifies the archive, and the \`.sig\` + \`.pem\` pair is a Sigstore keyless signature from this workflow (verify command in \`docs/releasing.md\`). Bundles: macOS arm64, Linux x86_64, Linux arm64 (glibc 2.31 or newer). Every bundle passed the offline smoke test (version, list, a stub benchmark run, verify, inspect, tamper rejection) before upload.
+
+          **Install this exact build.** Installs to \`~/.local/bin\`, the same place as the public installer; override with \`COMPUTEARENA_INSTALL_DIR\`.
+
+          \`\`\`sh
+          $(cat "$RUNNER_TEMP/install.sh")
+          \`\`\`
+
+          Then point it at the staging environment, for example \`computearena --api-url https://staging.computearena.ai/api/v1 basert\`.
+          EOF
+          )"
+          gh release create "$TAG" \
+            --repo "$REPO" \
+            --title "Staging ${VERSION} (rc) · ${SHORT}" \
+            --notes "$NOTES" \
+            --prerelease \
+            --target "$SHA" \
+            dist/*
+          URL="$(gh release view "$TAG" --repo "$REPO" --json url --jq .url)"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Published $URL"
+
+      - name: Announce the build on the rc pull request
+        env:
+          URL: ${{ steps.release.outputs.url }}
+        run: |
+          PR="$(gh pr list --repo "$REPO" --head "$BRANCH" --base main --state open --json number --jq '.[0].number // empty')"
+          if [ -z "$PR" ]; then
+            echo "No open $BRANCH -> main pull request; nothing to announce."
+            exit 0
+          fi
+          # A fresh comment for every build, so the announcement always follows
+          # the commits it was built from. Earlier announcements for the same
+          # tag are collapsed as outdated rather than deleted: they stay in the
+          # history, but only the current one is expanded.
+          MARKER="<!-- rc-staging:${TAG} -->"
+          SHORT="$(printf '%s' "$SHA" | cut -c1-12)"
+          BODY="$(cat <<EOF
+          ${MARKER}
+          🧪 **Staging build ready**: ${URL}
+
+          Built from ${SHORT} and smoke-tested on macOS arm64, Linux x86_64, and Linux arm64. The \`${TAG}\` pre-release is replaced on every push to \`${BRANCH}\`; this comment supersedes the earlier ones.
+
+          <details><summary>Install this build</summary>
+
+          Installs to \`~/.local/bin\` (override with \`COMPUTEARENA_INSTALL_DIR\`), the same place as the public installer.
+
+          \`\`\`sh
+          $(cat "$RUNNER_TEMP/install.sh")
+          \`\`\`
+
+          </details>
+          EOF
+          )"
+          gh api --paginate "repos/$REPO/issues/$PR/comments" \
+            | jq -r --arg m "$MARKER" '.[] | select(.body | startswith($m)) | .node_id' \
+            | while read -r node; do
+                [ -n "$node" ] || continue
+                if gh api graphql -f id="$node" \
+                     -f query='mutation($id: ID!) { minimizeComment(input: {subjectId: $id, classifier: OUTDATED}) { minimizedComment { isMinimized } } }' \
+                     </dev/null >/dev/null; then
+                  echo "Collapsed earlier announcement $node as outdated"
+                else
+                  echo "::warning::could not collapse earlier announcement $node"
+                fi
+              done
+          gh pr comment "$PR" --repo "$REPO" --body "$BODY"
+          echo "Announced on PR #$PR"

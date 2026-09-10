@@ -1,0 +1,38 @@
+name: RC staging cleanup
+
+# Removes the `staging-X.Y.Z` pre-release and its tag once the release-candidate
+# pull request closes, merged or abandoned. Staging bundles are rehearsal
+# artifacts: after the rc merges, the `v*` release is the only build of that
+# version anyone should find. (BaseRT does this step by hand.)
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    name: Delete staging pre-release
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.head_ref, 'rc-')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          TAG="staging-${HEAD_REF#rc-}"
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release delete "$TAG" --repo "$REPO" --yes --cleanup-tag
+            echo "Deleted pre-release $TAG"
+          else
+            echo "No staging pre-release $TAG to delete."
+          fi
+          gh api -X DELETE "repos/$REPO/git/refs/tags/$TAG" >/dev/null 2>&1 && echo "Deleted tag $TAG" || true

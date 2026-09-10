@@ -4,7 +4,10 @@ use crate::config::SUBMISSION_HTTP_TIMEOUT;
 use crate::reports::{
     model_identity_for_report, report_summaries, resolve_report, short_id, verify_report, Paths,
 };
-use crate::ui::{finish_activity, prompt, prompt_yes_no, start_activity, TerminalUi};
+use crate::ui::{
+    choose_many, finish_activity, print_menu, prompt, prompt_yes_no, rule_with_title,
+    start_activity, MenuItem, TerminalUi,
+};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -75,49 +78,68 @@ pub(crate) fn select_reports_for_submission(
         return Ok(Vec::new());
     }
 
-    println!("Choose one or more saved benchmarks:\n");
-    for (index, report) in reports.iter().enumerate() {
-        let status = if report["status"].as_str() == Some("valid") {
-            ui.success("VALID")
-        } else {
-            ui.error("INVALID")
-        };
-        println!(
-            "  {} {}  [{}]",
-            ui.brand_bold(format!("{}.", index + 1)),
-            report["model"].as_str().unwrap_or("Unknown model"),
-            status
-        );
-        println!(
-            "     {}  •  report {}",
-            report["created_at"].as_str().unwrap_or("Unknown time"),
-            report["short_id"].as_str().unwrap_or("unknown")
-        );
-    }
-    println!("\nEnter numbers separated by commas, `all`, or `0` to go back.");
+    let items: Vec<MenuItem> = reports
+        .iter()
+        .map(|report| {
+            let status = if report["status"].as_str() == Some("valid") {
+                ui.success("VALID")
+            } else {
+                ui.error("INVALID")
+            };
+            MenuItem::new(format!(
+                "{}  [{}]",
+                report["model"].as_str().unwrap_or("Unknown model"),
+                status
+            ))
+            .detail(format!(
+                "{}  •  report {}",
+                report["created_at"].as_str().unwrap_or("Unknown time"),
+                report["short_id"].as_str().unwrap_or("unknown")
+            ))
+        })
+        .collect();
+    // Valid benchmarks start ticked: submitting everything submittable is the
+    // usual intent, so most people only press Enter.
+    let preselected: Vec<bool> = reports
+        .iter()
+        .map(|report| report["status"].as_str() == Some("valid"))
+        .collect();
 
+    let indexes = match choose_many(ui, "Benchmarks to submit: ", &items, &preselected)? {
+        Some(indexes) => indexes,
+        None => prompt_report_numbers(ui, &items)?,
+    };
+    if indexes.is_empty() {
+        println!("No benchmarks selected. Nothing was submitted.");
+        return Ok(Vec::new());
+    }
+    indexes
+        .into_iter()
+        .map(|index| {
+            reports[index]["path"]
+                .as_str()
+                .map(PathBuf::from)
+                .context("saved benchmark has no file path")
+        })
+        .collect()
+}
+
+/// Non-terminal fallback: the numbered list and a comma-separated answer.
+fn prompt_report_numbers(ui: TerminalUi, items: &[MenuItem]) -> Result<Vec<usize>> {
+    let count = items.len();
+    println!("Choose one or more saved benchmarks:\n");
+    print_menu(ui, items, None);
+    println!("\nEnter numbers separated by commas, `all`, or `0` to go back.");
     loop {
         let input = prompt("Benchmarks to submit: ")?;
         let input = input.trim();
         if matches!(input, "0" | "q" | "quit" | "back") {
             return Ok(Vec::new());
         }
-        let indexes = match parse_report_selection(input, reports.len()) {
-            Ok(indexes) => indexes,
-            Err(error) => {
-                println!("{} {error}", ui.warning("!"));
-                continue;
-            }
-        };
-        return indexes
-            .into_iter()
-            .map(|index| {
-                reports[index]["path"]
-                    .as_str()
-                    .map(PathBuf::from)
-                    .context("saved benchmark has no file path")
-            })
-            .collect();
+        match parse_report_selection(input, count) {
+            Ok(indexes) => return Ok(indexes),
+            Err(error) => println!("{} {error}", ui.warning("!")),
+        }
     }
 }
 
@@ -178,20 +200,16 @@ pub(crate) fn submit_reports(
         bail!("no valid benchmarks were selected; nothing was uploaded");
     }
 
-    let session = load_api_session(paths, api_url)?;
+    let session = load_api_session(paths, api_url)?.with_context(|| format!(
+        "Login is required to upload benchmarks. Run `computearena --api-url {api_url} login`, then retry. Offline benchmarks and saved reports are unchanged."
+    ))?;
 
     println!();
-    match &session {
-        Some(session) => println!(
-            "Ready to submit {} benchmark(s) to {api_url} as @{}.",
-            preflight.ready.len(),
-            session.username
-        ),
-        None => println!(
-            "Ready to submit {} benchmark(s) to {api_url} anonymously.",
-            preflight.ready.len()
-        ),
-    }
+    println!(
+        "Ready to submit {} benchmark(s) to {api_url} as @{}.",
+        preflight.ready.len(),
+        session.username
+    );
     println!(
         "{}",
         ui.neutral(
@@ -243,14 +261,12 @@ pub(crate) fn submit_reports(
                 short_id(&run_id)
             ),
         );
-        let mut request = client
+        let request = client
             .post(&endpoint)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header(reqwest::header::ACCEPT, "application/json")
+            .bearer_auth(&session.access_token)
             .body(report.bytes);
-        if let Some(session) = &session {
-            request = request.bearer_auth(&session.access_token);
-        }
         match request.send() {
             Ok(response) => {
                 let status = response.status();
@@ -270,6 +286,19 @@ pub(crate) fn submit_reports(
                             "Benchmark submitted".to_string()
                         },
                     );
+                    if let Ok(response) = serde_json::from_str::<Value>(&body) {
+                        if let Some(provenance) = response.get("runtime_provenance") {
+                            if let Some(message) = provenance.get("message").and_then(Value::as_str)
+                            {
+                                println!("{}", ui.neutral(message));
+                            }
+                            if let Some(url) =
+                                provenance.get("download_url").and_then(Value::as_str)
+                            {
+                                println!("{}", ui.neutral(format!("Official downloads: {url}")));
+                            }
+                        }
+                    }
                     outcomes.push(SubmissionOutcome {
                         label,
                         kind: if duplicate {
@@ -476,7 +505,10 @@ fn print_submission_preview(ui: TerminalUi, reports: &[PreparedSubmission]) -> R
     println!();
     println!(
         "{}",
-        ui.neutral("──────────────── SUBMISSION PREVIEW · NOT YET UPLOADED ────────────────")
+        ui.neutral(rule_with_title(
+            "SUBMISSION PREVIEW · NOT YET UPLOADED",
+            '─'
+        ))
     );
     for (index, report) in reports.iter().enumerate() {
         println!();
@@ -494,10 +526,7 @@ fn print_submission_preview(ui: TerminalUi, reports: &[PreparedSubmission]) -> R
             ui.neutral(serde_json::to_string_pretty(&report.value)?)
         );
     }
-    println!(
-        "{}",
-        ui.neutral("──────────────────────── END PREVIEW ────────────────────────")
-    );
+    println!("{}", ui.neutral(rule_with_title("END PREVIEW", '─')));
     println!(
         "\n{}",
         ui.neutral(
