@@ -162,11 +162,12 @@ Community and support: [ComputeArena Discord](https://discord.gg/vENxergRG6).
 ## Upstream model identity
 
 Reports retain the original model/package name and quantization and add signed
-`model.upstream_id` and `model.upstream_id_source` fields. Exact known aliases
-are resolved through `crates/computearena-cli/src/model-identities.json`; unknown
-models have a null upstream ID, not a guessed identity.
+ `model.upstream_id` and `model.upstream_id_source` fields. There is no filename
+or alias catalogue lookup. Without an explicit declaration the upstream ID is
+unresolved. Package names and embedded model names are display metadata, not
+verified provenance.
 
-For models outside that catalogue, declare the actual upstream repository:
+To declare the actual upstream repository:
 ```sh
 computearena llama-cpp run /path/to/model.gguf --model-id owner/Model-Instruct
 computearena basert run /path/to/model.base --model-id Qwen/Qwen3-0.6B
@@ -174,4 +175,9 @@ computearena basert run /path/to/model.base --model-id Qwen/Qwen3-0.6B
 Use the full identity of the actual model, including Instruct, MoE, revisions
 and fine-tunes. A declaration is user-provided metadata, not proof of origin.
 Quantization formats remain separate; Q4 formats are not assumed equivalent.
-The web carries the matching legacy alias catalogue for historical reports.
+Reports mark identity verification as `unverified`. The CLI hashes the complete
+model file before and after measurement and records `model.artifact_sha256`
+inside the signed report. Hashing is outside benchmark timing (but adds disk I/O
+and may warm the filesystem cache). A changed file aborts signing. This detects
+persistent file changes, not malicious runtimes, forged metadata, or A/B/A swaps.
+A hash identifies an artifact; it does not establish its upstream origin.

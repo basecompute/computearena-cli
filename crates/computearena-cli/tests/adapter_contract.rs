@@ -1012,6 +1012,9 @@ fn explicit_upstream_model_id_is_signed_in_both_runtimes() {
             "example/Distinct-Instruct-MoE"
         );
         assert_eq!(report["model"]["upstream_id_source"], "user_declared");
+        assert_eq!(report["model"]["identity_verification"], "unverified");
+        let digest = report["model"]["artifact_sha256"].as_str().unwrap();
+        assert!(digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()));
         success(&f.verify());
         report["model"]["upstream_id"] = json!("example/Other");
         fs::write(&f.report, serde_json::to_vec(&report).unwrap()).unwrap();
