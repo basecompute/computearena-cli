@@ -118,7 +118,7 @@ fn accelerators() -> Value {
         ("nvidia-smi", vec!["--query-gpu=index,name,temperature.gpu,power.draw,memory.used,memory.total,utilization.gpu","--format=csv,noheader,nounits"]),
         ("rocm-smi", vec!["--showtemp","--showpower","--showuse","--showmeminfo","vram","--json"]),
     ] {
-        if let Some(path) = crate::benchmark::executable_on_path(program) {
+        if let Some(path) = crate::runtimes::executable_on_path(program) {
             let devices = query(&path, &args, PROBE_TIMEOUT).map(|text|
                 if program == "nvidia-smi" { nvidia(&text) } else { rocm(&text) }).unwrap_or_default();
             providers.push(json!({"provider":program,"available":!devices.is_empty(),"devices":devices,

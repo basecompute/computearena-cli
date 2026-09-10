@@ -8,9 +8,14 @@ Both retain the computearena-benchmark/1 signed envelope, so old reports remain 
 
 ## Commands
 
-- computearena: choose BaseRT or llama.cpp, then open the shared interactive session.
-- computearena basert [run|list|inspect|verify|login|logout|submit]
-- computearena llama-cpp [run|list|inspect|verify|login|logout|submit]
+- computearena: choose BaseRT or llama.cpp from a numbered list, see which executable
+  will run (or how to obtain one), then open the shared interactive session.
+- computearena basert [run|list|inspect|verify|login|logout|submit|install]
+- computearena llama-cpp [run|list|inspect|verify|login|logout|submit|install]
+- install downloads the runtime's prebuilt release after showing the plan; --archive
+  unpacks a local bundle instead. Discovery prefers --runtime-path, then environment
+  variables, then a ComputeArena-installed copy, then PATH, then the runtime's default
+  install location.
 - Global report/authentication commands continue to work without a runtime selector.
 - Legacy computearena run remains a BaseRT action.
 - Runtime selectors cannot nest: basert computearena llama-cpp is rejected.

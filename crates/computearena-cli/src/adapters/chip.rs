@@ -68,7 +68,7 @@ pub(super) fn resolve(report: &mut Value) {
         Some(Some(s)) => Some(s),
         None => None,
     };
-    let Some(path) = crate::benchmark::executable_on_path("nvidia-smi") else {
+    let Some(path) = crate::runtimes::executable_on_path("nvidia-smi") else {
         return;
     };
     if let Some(text) = crate::telemetry::snapshots::query(

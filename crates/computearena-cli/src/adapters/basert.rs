@@ -11,8 +11,20 @@ impl RuntimeAdapter for BaseRtAdapter {
         "basert"
     }
 
-    fn discover(&self, path: Option<PathBuf>) -> Result<PathBuf> {
-        crate::benchmark::resolve_harness(path)
+    fn display_name(&self) -> &'static str {
+        "BaseRT"
+    }
+
+    fn binary_name(&self) -> &'static str {
+        crate::config::BASERT_HARNESS_NAME
+    }
+
+    fn environment_overrides(&self) -> &'static [&'static str] {
+        &["COMPUTEARENA_BASERT_HARNESS", "BASERT_COMPUTEARENA_HARNESS"]
+    }
+
+    fn known_locations(&self) -> Vec<PathBuf> {
+        crate::runtimes::basert_install_dir().into_iter().collect()
     }
 
     fn probe(&self, executable: &Path) -> Result<Value> {
