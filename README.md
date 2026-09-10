@@ -215,9 +215,12 @@ they are never presented as BaseRT numbers. The measurement contract is in
 
 ## Reports and signatures
 
-Reports live in the data directory: `~/Library/Application Support/basert/computearena`
-on macOS, `~/.local/share/basert/computearena` on Linux, or wherever
-`--data-dir` or `COMPUTEARENA_HOME` points. Inside it, `reports/` holds one
+Reports live in the data directory: `~/Library/Application Support/computearena`
+on macOS, `~/.local/share/computearena` on Linux, or wherever `--data-dir`
+or `COMPUTEARENA_HOME` points. Installations from before 0.1.0 kept this
+under a `basert/computearena` directory instead; the first run moves that
+directory whole, reports, key, sessions, and installed runtimes included,
+and says so. Inside it, `reports/` holds one
 JSON file per run, `keys/installation.ed25519` is the private signing key
 created on first use, `auth.json` holds login sessions, and
 `runtimes/` holds llama.cpp builds the client installed. `--output` writes a
@@ -291,9 +294,9 @@ development server; sessions are kept per URL.
 | `NO_COLOR` | Plain output |
 
 The older `BASERT_COMPUTEARENA_HOME`, `BASERT_COMPUTEARENA_API_URL`, and
-`BASERT_COMPUTEARENA_HARNESS` names are still accepted. The data directory is
-the same as in earlier versions, so upgrading keeps saved reports, sessions,
-and the signing key.
+`BASERT_COMPUTEARENA_HARNESS` names are still accepted, and an older
+installation's data directory is moved automatically, so upgrading keeps saved
+reports, sessions, and the signing key.
 
 ## Protocols
 
