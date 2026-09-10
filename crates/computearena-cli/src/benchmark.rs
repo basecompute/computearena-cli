@@ -458,7 +458,6 @@ pub(crate) fn run_benchmark(
     warmup: u32,
     cooldown_enabled: bool,
     output: Option<PathBuf>,
-    model_id: Option<&str>,
 ) -> Result<PathBuf> {
     if !model.is_file() {
         bail!("model does not exist or is not a file: {}", model.display());
@@ -516,7 +515,9 @@ pub(crate) fn run_benchmark(
     let key_id = sha256_hex(&public_bytes);
     let run_id = random_id();
     let mut model_metadata = result.model;
-    crate::model_identity::record(&mut model_metadata, model_id)?;
+    model_metadata["upstream_id"] = Value::Null;
+    model_metadata["upstream_id_source"] = json!("unresolved");
+    model_metadata["identity_verification"] = json!("unverified");
     model_metadata["artifact_sha256"] = json!(model_sha256);
 
     // Intentionally omit the user's account and local model path: a benchmark

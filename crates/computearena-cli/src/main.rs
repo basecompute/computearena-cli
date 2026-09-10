@@ -5,7 +5,6 @@ mod auth;
 mod benchmark;
 mod conditioning;
 mod config;
-mod model_identity;
 mod models;
 mod protocol;
 mod recent_gguf;
@@ -106,9 +105,6 @@ enum Action {
     Run {
         /// Local model file (.base for BaseRT, .gguf for llama.cpp).
         model: Option<PathBuf>,
-        /// Upstream model repository ID; keep Instruct, MoE and fine-tunes distinct.
-        #[arg(long)]
-        model_id: Option<String>,
         /// Comma-separated prefill token counts.
         #[arg(long, default_value = DEFAULT_PREFILL_TOKENS)]
         pp: String,
@@ -222,7 +218,6 @@ fn execute(
     match command {
         Action::Run {
             model,
-            model_id,
             pp,
             tg,
             reps,
@@ -231,9 +226,6 @@ fn execute(
             yes,
             output,
         } => {
-            if let Some(id) = &model_id {
-                model_identity::validate(id)?;
-            }
             let model = match model {
                 Some(path) => path,
                 None => match runtime.adapter().select_model(paths)? {
@@ -268,7 +260,6 @@ fn execute(
                 warmup,
                 cooldown_enabled,
                 output,
-                model_id.as_deref(),
             )?;
             Ok(())
         }
@@ -410,7 +401,6 @@ fn interactive(
                     DEFAULT_REPETITIONS,
                     DEFAULT_WARMUP_REPETITIONS,
                     cooldown_enabled,
-                    None,
                     None,
                 ) {
                     eprintln!("{} {error:#}", ui.error("Benchmark failed:"));

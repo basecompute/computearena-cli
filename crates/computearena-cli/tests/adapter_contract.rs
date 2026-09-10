@@ -1002,16 +1002,18 @@ fn offline_report_cannot_be_uploaded_without_login() {
 }
 
 #[test]
-fn explicit_upstream_model_id_is_signed_in_both_runtimes() {
+fn model_identity_cannot_be_overridden_in_either_runtime() {
     for runtime in RUNTIMES {
         let f = Fixture::new(runtime);
-        success(&f.run(&["--model-id", "example/Distinct-Instruct-MoE"]));
-        let mut report: Value = serde_json::from_slice(&fs::read(&f.report).unwrap()).unwrap();
-        assert_eq!(
-            report["model"]["upstream_id"],
-            "example/Distinct-Instruct-MoE"
+        failure(
+            &f.run(&["--model-id", "example/Distinct-Instruct-MoE"]),
+            "unexpected argument",
         );
-        assert_eq!(report["model"]["upstream_id_source"], "user_declared");
+        assert!(!f.report.exists());
+        success(&f.run(&[]));
+        let mut report: Value = serde_json::from_slice(&fs::read(&f.report).unwrap()).unwrap();
+        assert!(report["model"]["upstream_id"].is_null());
+        assert_eq!(report["model"]["upstream_id_source"], "unresolved");
         assert_eq!(report["model"]["identity_verification"], "unverified");
         let digest = report["model"]["artifact_sha256"].as_str().unwrap();
         assert!(digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()));

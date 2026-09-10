@@ -161,20 +161,11 @@ Community and support: [ComputeArena Discord](https://discord.gg/vENxergRG6).
 
 ## Upstream model identity
 
-Reports retain the original model/package name and quantization and add signed
- `model.upstream_id` and `model.upstream_id_source` fields. There is no filename
-or alias catalogue lookup. Without an explicit declaration the upstream ID is
-unresolved. Package names and embedded model names are display metadata, not
-verified provenance.
+Reports retain the original model/package name and quantization. Upstream identity
+is unresolved: no filename catalogue or `--model-id` override is used. Embedded
+names remain unverified display metadata, not proof of origin. Instruct, MoE,
+revisions and fine-tunes must not be inferred to be equivalent.
 
-To declare the actual upstream repository:
-```sh
-computearena llama-cpp run /path/to/model.gguf --model-id owner/Model-Instruct
-computearena basert run /path/to/model.base --model-id Qwen/Qwen3-0.6B
-```
-Use the full identity of the actual model, including Instruct, MoE, revisions
-and fine-tunes. A declaration is user-provided metadata, not proof of origin.
-Quantization formats remain separate; Q4 formats are not assumed equivalent.
 Reports mark identity verification as `unverified`. The CLI hashes the complete
 model file before and after measurement and records `model.artifact_sha256`
 inside the signed report. Hashing is outside benchmark timing (but adds disk I/O
