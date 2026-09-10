@@ -43,7 +43,7 @@ use runtimes::{ensure_runtime, RuntimeSetup};
 use submission::{parse_report_selection, preflight_submissions, should_stop_submission};
 use submission::{select_reports_for_submission, submit_reports};
 use ui::{
-    choose, choose_default, finish_activity, start_activity, MenuChoice, MenuItem, TerminalUi,
+    choose, choose_default, finish_activity, rule, start_activity, MenuChoice, MenuItem, TerminalUi,
 };
 
 use anyhow::{bail, Context, Result};
@@ -206,10 +206,7 @@ fn run() -> Result<()> {
 
 fn print_banner(ui: TerminalUi) {
     println!();
-    println!(
-        "{}",
-        ui.brand("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    );
+    println!("{}", ui.brand(rule('━')));
     println!(
         "  {}  {}",
         ui.brand_bold("ComputeArena"),
@@ -218,10 +215,7 @@ fn print_banner(ui: TerminalUi) {
             COMPUTEARENA_WEBSITE, COMPUTEARENA_DISCORD
         ))
     );
-    println!(
-        "{}",
-        ui.brand("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    );
+    println!("{}", ui.brand(rule('━')));
 }
 
 /// Runtimes whose executable is already resolvable, without probing them.

@@ -26,8 +26,9 @@ pub(crate) const MIN_DEVICE_AUTH_POLL_INTERVAL_SECS: u64 = 1;
 pub(crate) const SUBMISSION_HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) const DEFAULT_DEVICE_AUTH_EXPIRES_SECS: u64 = 600;
 
-pub(crate) const MODEL_SELECTOR_VISIBLE_ROWS: usize = 10;
-pub(crate) const MENU_VISIBLE_ROWS: usize = 12;
+/// Rows a selector leaves for the prompt, hint line, and surrounding output.
+pub(crate) const MENU_RESERVED_ROWS: usize = 8;
+pub(crate) const MENU_MINIMUM_ROWS: usize = 5;
 pub(crate) const MODEL_ID_COLUMN_WIDTH: usize = 42;
 pub(crate) const MODEL_VARIANT_COLUMN_WIDTH: usize = 20;
 pub(crate) const MODEL_QUANT_COLUMN_WIDTH: usize = 12;

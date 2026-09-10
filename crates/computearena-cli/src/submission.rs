@@ -5,8 +5,8 @@ use crate::reports::{
     model_identity_for_report, report_summaries, resolve_report, short_id, verify_report, Paths,
 };
 use crate::ui::{
-    choose_many, finish_activity, print_menu, prompt, prompt_yes_no, start_activity, MenuItem,
-    TerminalUi,
+    choose_many, finish_activity, print_menu, prompt, prompt_yes_no, rule_with_title,
+    start_activity, MenuItem, TerminalUi,
 };
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -505,7 +505,10 @@ fn print_submission_preview(ui: TerminalUi, reports: &[PreparedSubmission]) -> R
     println!();
     println!(
         "{}",
-        ui.neutral("──────────────── SUBMISSION PREVIEW · NOT YET UPLOADED ────────────────")
+        ui.neutral(rule_with_title(
+            "SUBMISSION PREVIEW · NOT YET UPLOADED",
+            '─'
+        ))
     );
     for (index, report) in reports.iter().enumerate() {
         println!();
@@ -523,10 +526,7 @@ fn print_submission_preview(ui: TerminalUi, reports: &[PreparedSubmission]) -> R
             ui.neutral(serde_json::to_string_pretty(&report.value)?)
         );
     }
-    println!(
-        "{}",
-        ui.neutral("──────────────────────── END PREVIEW ────────────────────────")
-    );
+    println!("{}", ui.neutral(rule_with_title("END PREVIEW", '─')));
     println!(
         "\n{}",
         ui.neutral(

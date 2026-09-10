@@ -1,13 +1,44 @@
-use crate::config::MENU_VISIBLE_ROWS;
+use crate::config::{MENU_MINIMUM_ROWS, MENU_RESERVED_ROWS};
 use crate::theme::{selector_theme, BASECOMPUTE_THEME};
 use anyhow::{Context, Result};
-use dialoguer::console::Style;
+use dialoguer::console::{Style, Term};
 use dialoguer::{MultiSelect, Select};
 use std::fmt::Display;
 use std::io::{self, IsTerminal, Write};
 use std::time::Instant;
 
-const RULE: &str = "────────────────────────────────────────────────────────────";
+/// Rules and lists follow the window instead of a fixed 60 columns, so they
+/// still span the terminal when it is wider or taller.
+pub(crate) fn terminal_columns() -> usize {
+    usize::from(Term::stdout().size().1).max(20)
+}
+
+pub(crate) fn rule(character: char) -> String {
+    character.to_string().repeat(terminal_columns())
+}
+
+/// A heading centred in its own rule: `──── TITLE ────` across the window.
+pub(crate) fn rule_with_title(title: &str, character: char) -> String {
+    let columns = terminal_columns();
+    let width = title.chars().count() + 2;
+    if columns <= width {
+        return format!(" {title} ");
+    }
+    let left = (columns - width) / 2;
+    let right = columns - width - left;
+    format!(
+        "{} {title} {}",
+        character.to_string().repeat(left),
+        character.to_string().repeat(right)
+    )
+}
+
+/// How many options a selector shows at once: as many as the window has room
+/// for, so long lists use the whole screen instead of a fixed ten rows.
+pub(crate) fn visible_rows(items: usize) -> usize {
+    let available = usize::from(Term::stdout().size().0).saturating_sub(MENU_RESERVED_ROWS);
+    available.clamp(MENU_MINIMUM_ROWS, items.max(MENU_MINIMUM_ROWS))
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct TerminalUi {
@@ -64,9 +95,9 @@ impl TerminalUi {
     }
 
     pub(crate) fn section(self, title: &str) {
-        println!("\n{}", self.muted(RULE));
+        println!("\n{}", self.muted(rule('─')));
         println!("{}", self.brand_bold(title));
-        println!("{}", self.muted(RULE));
+        println!("{}", self.muted(rule('─')));
     }
 }
 
@@ -218,7 +249,7 @@ fn select_interactive(
         .with_prompt(menu_prompt(label))
         .items(&choices)
         .default(default.min(choices.len().saturating_sub(1)))
-        .max_length(MENU_VISIBLE_ROWS)
+        .max_length(visible_rows(choices.len()))
         .report(false)
         .interact_opt()
         .context("reading a menu selection")?;
@@ -303,7 +334,7 @@ pub(crate) fn choose_many(
         .with_prompt(menu_prompt(label))
         .items(&choices)
         .defaults(preselected)
-        .max_length(MENU_VISIBLE_ROWS)
+        .max_length(visible_rows(choices.len()))
         .report(false)
         .interact_opt()
         .context("reading a menu selection")?;
