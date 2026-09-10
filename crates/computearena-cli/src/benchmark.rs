@@ -1,7 +1,7 @@
 use crate::adapters::{file_sha256, BenchmarkRequest, Runtime};
 use crate::config::{
     APPLE_CONDITIONED_PHASES_PER_WORKLOAD, APPLE_TELEMETRY_IDLE_BASELINE_SECONDS,
-    BASERT_HARNESS_NAME, CONDITIONING_FALLBACK_WAIT_SECONDS, CONDITIONING_MAXIMUM_WAIT_SECONDS,
+    CONDITIONING_FALLBACK_WAIT_SECONDS, CONDITIONING_MAXIMUM_WAIT_SECONDS,
     CONDITIONING_MINIMUM_WARMUP_SECONDS, CONDITIONING_STABLE_WINDOW_SECONDS,
     PORTABLE_CONDITIONED_PHASES_PER_WORKLOAD, TELEMETRY_WINDOW_SECONDS,
 };
@@ -181,6 +181,7 @@ pub(crate) fn identify_benchmark_paths(
     runtime: Runtime,
     override_path: Option<PathBuf>,
     model: &Path,
+    paths: &Paths,
 ) -> Result<(PathBuf, PathBuf)> {
     let expand = |path: &Path| -> Result<PathBuf> {
         if let Some(rest) = path.to_str().and_then(|p| p.strip_prefix("~/")) {
@@ -193,7 +194,7 @@ pub(crate) fn identify_benchmark_paths(
     };
     let model = fs::canonicalize(expand(model)?).context("resolving model path")?;
     let override_path = override_path.map(|p| expand(&p)).transpose()?;
-    let executable = fs::canonicalize(runtime.adapter().discover(override_path)?)
+    let executable = fs::canonicalize(crate::runtimes::locate(runtime, override_path, paths)?.path)
         .context("resolving runtime executable path")?;
     let ui = TerminalUi::detect();
     ui.section("Selected binaries");
@@ -281,8 +282,8 @@ pub(crate) fn confirm_llama_profile(r: &BenchmarkRequest<'_>, yes: bool) -> Resu
     println!();
     println!("{}", ui.brand_bold("Run profile"));
     println!(
-        "  {}  {} {}",
-        ui.strong("1"),
+        "  {} {} {}",
+        ui.brand_bold("1."),
         ui.strong(standard),
         ui.neutral("(default)")
     );
@@ -292,8 +293,8 @@ pub(crate) fn confirm_llama_profile(r: &BenchmarkRequest<'_>, yes: bool) -> Resu
     );
     println!();
     println!(
-        "  {}  {}",
-        ui.strong("2"),
+        "  {} {}",
+        ui.brand_bold("2."),
         ui.strong("Thermally controlled")
     );
     println!(
@@ -354,8 +355,8 @@ fn print_run_profiles(ui: TerminalUi, timing: BenchmarkTiming) {
     println!("{}", ui.brand_bold("Run profile"));
     println!();
     println!(
-        "  {}  {} {}",
-        ui.strong("1"),
+        "  {} {} {}",
+        ui.brand_bold("1."),
         ui.strong(BenchmarkProfile::Standard.name()),
         ui.neutral("(default)")
     );
@@ -369,8 +370,8 @@ fn print_run_profiles(ui: TerminalUi, timing: BenchmarkTiming) {
     );
     println!();
     println!(
-        "  {}  {}",
-        ui.strong("2"),
+        "  {} {}",
+        ui.brand_bold("2."),
         ui.strong(BenchmarkProfile::ThermallyControlled.name())
     );
     println!(
@@ -469,7 +470,7 @@ pub(crate) fn run_benchmark(
 
     paths.prepare()?;
     let adapter = runtime.adapter();
-    let harness = adapter.discover(harness_override)?;
+    let harness = crate::runtimes::locate(runtime, harness_override, paths)?.path;
     let ui = TerminalUi::detect();
     let checking_started = start_activity(
         ui,
@@ -647,48 +648,6 @@ pub(crate) fn validate_harness_descriptor(path: &Path) -> Result<()> {
         );
     }
     Ok(())
-}
-
-pub(crate) fn resolve_harness(override_path: Option<PathBuf>) -> Result<PathBuf> {
-    if let Some(path) = override_path {
-        return executable_path(path);
-    }
-    for variable in ["COMPUTEARENA_BASERT_HARNESS", "BASERT_COMPUTEARENA_HARNESS"] {
-        if let Some(path) = std::env::var_os(variable) {
-            if path.is_empty() {
-                bail!("{variable} is set but empty");
-            }
-            return executable_path(PathBuf::from(path));
-        }
-    }
-    executable_on_path(BASERT_HARNESS_NAME).with_context(|| {
-        format!(
-            "{BASERT_HARNESS_NAME} was not found on PATH; add it to PATH or pass --harness /path/to/{BASERT_HARNESS_NAME}"
-        )
-    })
-}
-
-pub(crate) fn executable_on_path(name: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|path| {
-        std::env::split_paths(&path)
-            .map(|directory| directory.join(name))
-            .find(|candidate| candidate.is_file())
-    })
-}
-
-pub(crate) fn executable_path(path: PathBuf) -> Result<PathBuf> {
-    if path.components().count() == 1 {
-        return executable_on_path(path.to_string_lossy().as_ref()).with_context(|| {
-            format!(
-                "benchmark harness was not found on PATH: {}",
-                path.display()
-            )
-        });
-    }
-    if !path.is_file() {
-        bail!("benchmark harness not found: {}", path.display());
-    }
-    Ok(path)
 }
 
 fn unix_ms() -> u128 {
