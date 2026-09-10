@@ -58,8 +58,10 @@ which in practice means every feature merge. It
 2. builds and smoke-tests all three bundles with a `-staging` name suffix,
 3. deletes and recreates the pre-release tagged `staging-<version>` at the
    pushed commit, with the bundles attached, and
-4. updates a single sticky comment on the open `rc-* -> main` pull request
-   with the link and an install snippet.
+4. posts a fresh comment on the open `rc-* -> main` pull request with the
+   link and an install snippet, and collapses the previous announcement as
+   outdated, so the newest build is always announced after the commits that
+   produced it.
 
 The tag is never a `v*` tag, so the release workflow cannot fire from it. A
 newer push cancels a staging build still in progress for the same branch.
@@ -72,15 +74,16 @@ case "$(uname -s)-$(uname -m)" in
   Linux-x86_64)  P=linux-x86_64 ;;
   Linux-aarch64) P=linux-arm64 ;;
 esac
-D="${COMPUTEARENA_INSTALL_DIR:-$HOME/.basert}"; mkdir -p "$D"
-gh release download staging-0.1.0 --repo basecompute/computearena-cli \
-  --pattern "computearena-${P:?}-*.tar.gz" -O - | tar -xzf - -C "$D" computearena
+D="${COMPUTEARENA_INSTALL_DIR:-$HOME/.local/bin}"; mkdir -p "$D"
+curl -fsSL "https://github.com/basecompute/computearena-cli/releases/download/staging-0.1.0/computearena-${P:?}-0.1.0-staging.tar.gz" \
+  | tar -xzf - -C "$D" computearena
 "$D/computearena" --version
 ```
 
-This repository is internal, so the asset URLs need authentication; `gh`
-supplies it. Point the binary at the staging environment with `--api-url`
-or `COMPUTEARENA_API_URL`.
+The public installer at computearena.ai only picks a staging pre-release
+while no stable release exists, so this snippet is the way to test a
+candidate once a stable release is out. Point the binary at the staging
+environment with `--api-url` or `COMPUTEARENA_API_URL`.
 
 When the rc pull request closes, merged or not,
 `.github/workflows/rc-cleanup.yml` deletes the staging pre-release and tag.
@@ -141,8 +144,8 @@ Any cosign 2.x verifies these; the workflows pin cosign 2.6.5.
 Two things this is not:
 
 - **Private.** Rekor is a public transparency log. Each entry records the
-  artifact digest and the signing certificate, which names this internal
-  repository, the workflow file, and the tag or branch. BaseRT's workflow
+  artifact digest and the signing certificate, which names this repository,
+  the workflow file, and the tag or branch. BaseRT's workflow
   accepted the same exposure.
 - **Apple code signing.** By decision, the macOS binary is not Developer ID
   signed or notarized, the same as the BaseRT engine binaries; it carries the
