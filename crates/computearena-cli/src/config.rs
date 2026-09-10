@@ -35,6 +35,9 @@ pub(crate) const MODEL_QUANT_COLUMN_WIDTH: usize = 12;
 
 pub(crate) const PRIVATE_FILE_MODE: u32 = 0o600;
 
+pub(crate) const HUGGINGFACE_HOST: &str = "https://huggingface.co";
+pub(crate) const HUGGINGFACE_API: &str = "https://huggingface.co/api";
+
 pub(crate) const COMPUTEARENA_WEBSITE: &str = "https://computearena.ai";
 pub(crate) const COMPUTEARENA_DISCORD: &str = "https://discord.gg/CCT24GWhPG";
 

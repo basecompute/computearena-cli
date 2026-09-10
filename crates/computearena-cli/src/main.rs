@@ -5,6 +5,7 @@ mod auth;
 mod benchmark;
 mod conditioning;
 mod config;
+mod huggingface;
 mod models;
 mod protocol;
 mod recent_gguf;

@@ -21,6 +21,7 @@ pub(crate) enum JobEvent {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum JobKind {
     Benchmark,
+    Download,
     Install,
     Login,
     Logout,

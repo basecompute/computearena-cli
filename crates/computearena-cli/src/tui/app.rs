@@ -16,10 +16,28 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::PathBuf;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModelSource {
+    Local,
+    Hub,
+}
+
 pub(crate) struct ModelRow {
     pub(crate) label: String,
     pub(crate) detail: String,
     pub(crate) path: Option<PathBuf>,
+    pub(crate) source: ModelSource,
+}
+
+pub(crate) struct HubModelRow {
+    pub(crate) id: String,
+    pub(crate) detail: String,
+}
+
+pub(crate) struct HubFileRow {
+    pub(crate) label: String,
+    pub(crate) detail: String,
+    pub(crate) file: crate::huggingface::HubFile,
 }
 
 pub(crate) struct ReportRow {
@@ -59,6 +77,22 @@ pub(crate) enum Screen {
         input: String,
         error: Option<String>,
     },
+    /// Text entry for a Hugging Face search.
+    HubSearch {
+        input: String,
+    },
+    HubModels {
+        rows: Vec<HubModelRow>,
+        cursor: usize,
+    },
+    HubFiles {
+        repository: String,
+        rows: Vec<HubFileRow>,
+        cursor: usize,
+    },
+    Account {
+        cursor: usize,
+    },
     Plan {
         model: PathBuf,
         rows: Vec<(&'static str, String)>,
@@ -84,12 +118,13 @@ pub(crate) enum Screen {
     },
 }
 
-pub(crate) const MENU_ITEMS: [(&str, &str); 6] = [
+pub(crate) const MENU_ITEMS: [(&str, &str); 7] = [
     ("Run benchmarks", "Pick a model, pick a profile, start"),
     ("Submit previous benchmarks", "Upload signed reports"),
     ("List local benchmarks", "Everything saved on this machine"),
     ("Verify a local benchmark", "Check one report's signature"),
-    ("Account", "Log in or out of ComputeArena"),
+    ("Account", "See who is signed in"),
+    ("Switch runtime", "Benchmark with the other runtime"),
     ("Exit", "Leave ComputeArena"),
 ];
 
@@ -107,6 +142,8 @@ pub(crate) const SETUP_ACTIONS: [(&str, &str); 3] = [
 enum Loaded {
     Models(Vec<ModelRow>),
     Reports(Vec<ReportRow>, ReportMode),
+    HubModels(Vec<HubModelRow>),
+    HubFiles(String, Vec<HubFileRow>),
 }
 
 struct Pending {
@@ -136,6 +173,9 @@ pub(crate) struct App {
     pub(crate) screens: Vec<Screen>,
     pub(crate) job: Option<Job>,
     pending: Option<Pending>,
+    /// Where the running download will land, so its plan can open when it
+    /// finishes.
+    downloaded: Option<PathBuf>,
     pub(crate) status: String,
     pub(crate) should_quit: bool,
 }
@@ -158,6 +198,7 @@ impl App {
             screens: Vec::new(),
             job: None,
             pending: None,
+            downloaded: None,
             status: String::new(),
             should_quit: false,
         };
@@ -166,12 +207,19 @@ impl App {
         // when the answer is not already obvious.
         let installed = app.installed_runtimes();
         if choose_runtime {
-            match installed[..] {
-                [only] => {
-                    app.runtime = only;
+            // Ask only when the answer is not already obvious: one runtime
+            // installed, or the one this installation used last. The header
+            // names it and the menu can switch.
+            let settled = match installed[..] {
+                [only] => Some(only),
+                _ => last_runtime(&app.paths).filter(|runtime| installed.contains(runtime)),
+            };
+            match settled {
+                Some(runtime) => {
+                    app.runtime = runtime;
                     app.enter_runtime()?;
                 }
-                _ => app.screens.push(Screen::Runtime { cursor: 0 }),
+                None => app.screens.push(Screen::Runtime { cursor: 0 }),
             }
         } else {
             app.enter_runtime()?;
@@ -374,6 +422,20 @@ impl App {
                 filter: String::new(),
                 cursor: 0,
             }),
+            Ok(Loaded::HubModels(rows)) => {
+                if rows.is_empty() {
+                    self.status = "No GGUF models matched that search".to_string();
+                    return;
+                }
+                self.screens.push(Screen::HubModels { rows, cursor: 0 });
+            }
+            Ok(Loaded::HubFiles(repository, rows)) => {
+                self.screens.push(Screen::HubFiles {
+                    repository,
+                    rows,
+                    cursor: 0,
+                });
+            }
             Ok(Loaded::Reports(rows, mode)) => {
                 if rows.is_empty() {
                     self.screens.push(Screen::Info {
@@ -439,6 +501,34 @@ impl App {
             move || {
                 submit_reports(&paths, &reports, &api_url, true, false)?;
                 Ok(format!("Submitted {count} benchmark(s)"))
+            },
+        ));
+        self.screens.push(Screen::Running);
+    }
+
+    /// Fetch a model from the Hub, then go straight to its plan: downloading
+    /// one is only ever a step towards benchmarking it.
+    fn start_download(&mut self, repository: String, file: crate::huggingface::HubFile) {
+        let root = self.paths.root.clone();
+        let paths = self.paths.clone();
+        let name = file
+            .path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&file.path)
+            .to_string();
+        self.downloaded = Some(crate::huggingface::download_path(
+            &root,
+            &repository,
+            &file.path,
+        ));
+        self.job = Some(Job::spawn(
+            JobKind::Download,
+            format!("Downloading {name} from {repository}"),
+            move || {
+                let path = crate::huggingface::download(&root, &repository, &file)?;
+                crate::recent_gguf::remember(&paths, &path)?;
+                Ok(format!("Downloaded {name}"))
             },
         ));
         self.screens.push(Screen::Running);
@@ -519,10 +609,10 @@ impl App {
             return Ok(());
         };
         let kind = job.kind;
-        let outcome = job.outcome;
+        let saved = job.outcome.clone();
         self.back();
-        match outcome {
-            Some(Ok(summary)) => self.status = summary,
+        match &saved {
+            Some(Ok(summary)) => self.status = summary.clone(),
             Some(Err(error)) => self.status = format!("Failed: {error}"),
             None => {}
         }
@@ -549,6 +639,19 @@ impl App {
                     Screen::Preview { .. } | Screen::Reports { .. }
                 ) {
                     self.back();
+                }
+            }
+            // A downloaded model is only ever a step towards benchmarking it,
+            // so its plan opens straight away.
+            JobKind::Download => {
+                while matches!(
+                    self.screen(),
+                    Screen::HubFiles { .. } | Screen::HubModels { .. }
+                ) {
+                    self.back();
+                }
+                if let (Some(Ok(_)), Some(path)) = (&saved, self.downloaded.take()) {
+                    self.open_plan(path)?;
                 }
             }
             JobKind::Verify | JobKind::List => {}
@@ -594,6 +697,10 @@ impl App {
                 *error = None;
                 return Ok(());
             }
+            Screen::HubSearch { input } => {
+                input.push(character);
+                return Ok(());
+            }
             _ => {}
         }
         match character {
@@ -616,6 +723,9 @@ impl App {
             Screen::PathEntry { input, error } => {
                 input.pop();
                 *error = None;
+            }
+            Screen::HubSearch { input } => {
+                input.pop();
             }
             _ => {}
         }
@@ -662,9 +772,12 @@ impl App {
             Screen::Models { rows, filter, .. } => Self::visible_models(rows, filter).len(),
             Screen::Plan { options, .. } => options.len() + 1,
             Screen::Reports { rows, .. } => rows.len(),
+            Screen::HubModels { rows, .. } => rows.len(),
+            Screen::HubFiles { rows, .. } => rows.len(),
+            Screen::Account { .. } => 2,
             Screen::Preview { lines, .. } => lines.len(),
             Screen::PathEntry { .. } | Screen::Running | Screen::Info { .. } => 0,
-            Screen::Loading { .. } => 0,
+            Screen::HubSearch { .. } | Screen::Loading { .. } => 0,
         }
     }
 
@@ -691,7 +804,10 @@ impl App {
             | Screen::Menu { cursor }
             | Screen::Models { cursor, .. }
             | Screen::Plan { cursor, .. }
-            | Screen::Reports { cursor, .. } => cursor,
+            | Screen::Reports { cursor, .. }
+            | Screen::HubModels { cursor, .. }
+            | Screen::HubFiles { cursor, .. }
+            | Screen::Account { cursor } => cursor,
             Screen::Preview { scroll, .. } => scroll,
             _ => return,
         };
@@ -708,7 +824,10 @@ impl App {
             | Screen::Menu { cursor }
             | Screen::Models { cursor, .. }
             | Screen::Plan { cursor, .. }
-            | Screen::Reports { cursor, .. } => *cursor = position.min(length.saturating_sub(1)),
+            | Screen::Reports { cursor, .. }
+            | Screen::HubModels { cursor, .. }
+            | Screen::HubFiles { cursor, .. }
+            | Screen::Account { cursor } => *cursor = position.min(length.saturating_sub(1)),
             Screen::Preview { scroll, .. } => *scroll = position.min(length.saturating_sub(1)),
             _ => {}
         }
@@ -750,6 +869,10 @@ impl App {
                 } else {
                     Runtime::LlamaCpp
                 };
+                remember_runtime(&self.paths, self.runtime);
+                // Switching mid-session replaces the whole stack: the menu
+                // below belonged to the previous runtime.
+                self.screens.clear();
                 self.enter_runtime()?;
             }
             Screen::Setup { cursor, .. } => match cursor {
@@ -765,9 +888,73 @@ impl App {
                 1 => self.open_reports(ReportMode::Submit)?,
                 2 => self.start_list(),
                 3 => self.open_reports(ReportMode::Verify)?,
-                4 => self.start_account(),
+                // Signing out is a decision, not a side effect of opening the
+                // account screen.
+                4 => self.screens.push(Screen::Account { cursor: 0 }),
+                5 => self.screens.push(Screen::Runtime { cursor: 0 }),
                 _ => self.should_quit = true,
             },
+            Screen::Account { cursor } => {
+                if *cursor == 0 {
+                    self.start_account();
+                } else {
+                    self.back();
+                }
+            }
+            Screen::HubSearch { input } => {
+                let query = input.trim().to_string();
+                if query.is_empty() {
+                    self.status = "Type something to search for".to_string();
+                    return Ok(());
+                }
+                self.screens.pop();
+                self.screens.push(Screen::Loading {
+                    message: format!("Searching Hugging Face for \"{query}\"…"),
+                });
+                self.pending = Some(Pending::spawn(move || {
+                    Ok(Loaded::HubModels(
+                        crate::huggingface::search(&query)?
+                            .into_iter()
+                            .map(|model| HubModelRow {
+                                detail: format!(
+                                    "{} downloads · {} likes",
+                                    model.downloads, model.likes
+                                ),
+                                id: model.id,
+                            })
+                            .collect(),
+                    ))
+                }));
+            }
+            Screen::HubModels { rows, cursor } => {
+                let repository = rows[*cursor].id.clone();
+                self.screens.push(Screen::Loading {
+                    message: format!("Listing GGUF files in {repository}…"),
+                });
+                self.pending = Some(Pending::spawn(move || {
+                    let files = crate::huggingface::gguf_files(&repository)?
+                        .into_iter()
+                        .map(|file| HubFileRow {
+                            label: file.path.clone(),
+                            detail: crate::huggingface::format_size(file.size),
+                            file,
+                        })
+                        .collect();
+                    Ok(Loaded::HubFiles(repository, files))
+                }));
+            }
+            Screen::HubFiles {
+                repository,
+                rows,
+                cursor,
+            } => {
+                let repository = repository.clone();
+                let file = crate::huggingface::HubFile {
+                    path: rows[*cursor].file.path.clone(),
+                    size: rows[*cursor].file.size,
+                };
+                self.start_download(repository, file);
+            }
             Screen::Models {
                 rows,
                 filter,
@@ -777,9 +964,12 @@ impl App {
                 let Some(index) = visible.get(*cursor) else {
                     return Ok(());
                 };
-                match rows[*index].path.clone() {
-                    Some(path) => self.open_plan(path)?,
-                    None => self.screens.push(Screen::PathEntry {
+                match (rows[*index].path.clone(), rows[*index].source) {
+                    (Some(path), _) => self.open_plan(path)?,
+                    (None, ModelSource::Hub) => self.screens.push(Screen::HubSearch {
+                        input: String::new(),
+                    }),
+                    (None, ModelSource::Local) => self.screens.push(Screen::PathEntry {
                         input: String::new(),
                         error: None,
                     }),
@@ -871,6 +1061,26 @@ impl App {
     }
 }
 
+const LAST_RUNTIME_FILE: &str = "last-runtime";
+
+/// Which runtime this installation used last. Repeat visits skip the chooser
+/// and land on the menu; the header names the runtime, and the menu can switch.
+pub(crate) fn last_runtime(paths: &Paths) -> Option<Runtime> {
+    match std::fs::read_to_string(paths.root.join(LAST_RUNTIME_FILE))
+        .ok()?
+        .trim()
+    {
+        "basert" => Some(Runtime::Basert),
+        "llama-cpp" => Some(Runtime::LlamaCpp),
+        _ => None,
+    }
+}
+
+fn remember_runtime(paths: &Paths, runtime: Runtime) {
+    let _ = std::fs::create_dir_all(&paths.root);
+    let _ = std::fs::write(paths.root.join(LAST_RUNTIME_FILE), runtime.adapter().name());
+}
+
 fn expand_path(input: &str) -> PathBuf {
     let trimmed = input.trim();
     match trimmed.strip_prefix("~/") {
@@ -895,6 +1105,7 @@ fn model_rows(runtime: Runtime, paths: &Paths) -> Result<Vec<ModelRow>> {
                     label,
                     detail: crate::models::compact_home_path(&model.path),
                     path: Some(model.path.clone()),
+                    source: ModelSource::Local,
                 })
                 .collect()
         }
@@ -904,9 +1115,20 @@ fn model_rows(runtime: Runtime, paths: &Paths) -> Result<Vec<ModelRow>> {
                 label: crate::models::display_name(&path),
                 detail: crate::models::compact_home_path(&path),
                 path: Some(path),
+                source: ModelSource::Local,
             })
             .collect(),
     };
+    if runtime == Runtime::LlamaCpp {
+        // Most people have no GGUF on disk yet, so the Hub is offered before
+        // the path prompt rather than after it.
+        rows.push(ModelRow {
+            label: "Search Hugging Face for a GGUF…".to_string(),
+            detail: "Download a model to benchmark".to_string(),
+            path: None,
+            source: ModelSource::Hub,
+        });
+    }
     rows.push(ModelRow {
         label: match runtime {
             Runtime::Basert => "Enter another model path…".to_string(),
@@ -914,6 +1136,7 @@ fn model_rows(runtime: Runtime, paths: &Paths) -> Result<Vec<ModelRow>> {
         },
         detail: "Type an absolute or ~/ path".to_string(),
         path: None,
+        source: ModelSource::Local,
     });
     Ok(rows)
 }

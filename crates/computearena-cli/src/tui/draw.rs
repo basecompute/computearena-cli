@@ -1,9 +1,11 @@
 //! Rendering. Every screen shares the same frame: a header naming the session,
 //! a body, and a key bar, so nothing moves between screens except the body.
-use super::app::{App, ModelRow, ReportMode, ReportRow, Screen, MENU_ITEMS, SETUP_ACTIONS};
+use super::app::{
+    App, HubFileRow, HubModelRow, ModelRow, ReportMode, ReportRow, Screen, MENU_ITEMS,
+    SETUP_ACTIONS,
+};
 use super::job::Job;
 use crate::benchmark::LOAD_WARNING;
-use crate::config::{COMPUTEARENA_DISCORD, COMPUTEARENA_WEBSITE};
 use crate::theme::BASECOMPUTE_THEME;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -60,9 +62,19 @@ fn focus_panel(title: &str, focused: bool) -> Block<'_> {
         ))
 }
 
+/// The masthead is three rows of Deep Ocean carrying a letter-spaced Lime
+/// wordmark — the design system's signature pairing — with the session's
+/// context on the row beneath it. Short terminals get the one-row version.
+const MASTHEAD_ROWS: u16 = 3;
+
 pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
+    let masthead = if frame.area().height >= 24 {
+        MASTHEAD_ROWS
+    } else {
+        1
+    };
     let areas = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(masthead + 1),
         Constraint::Min(3),
         Constraint::Length(2),
     ])
@@ -72,39 +84,65 @@ pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
     footer(frame, areas[2], app);
 }
 
+/// Letters spaced apart, words spaced further, the way the brand's tracking
+/// reads at display size: `C O M P U T E   A R E N A`.
+fn wordmark(text: &str) -> String {
+    let mut spaced = String::new();
+    for character in text.chars() {
+        if character.is_uppercase() && !spaced.is_empty() {
+            spaced.push_str("  ");
+        } else if !spaced.is_empty() {
+            spaced.push(' ');
+        }
+        spaced.extend(character.to_uppercase());
+    }
+    spaced
+}
+
 fn header(frame: &mut Frame, area: Rect, app: &App) {
-    let account = match &app.account {
-        Some(user) => Span::styled(format!("@{user}"), Style::default().fg(brand())),
-        None => Span::styled("not signed in", muted()),
+    let bar_rows = area.height.saturating_sub(1);
+    let bar = Rect {
+        height: bar_rows,
+        ..area
     };
-    // The runtime is not settled until it has been chosen, so the header says
-    // so rather than naming the default.
+    let context = Rect {
+        y: area.y + bar_rows,
+        height: 1,
+        ..area
+    };
+    let padding = if bar_rows > 1 { 1 } else { 0 };
+    let mut lines = vec![Line::from(""); padding as usize];
+    lines.push(Line::from(Span::styled(
+        format!("  {}", wordmark("ComputeArena")),
+        Style::default()
+            .fg(brand())
+            .bg(deep_ocean())
+            .add_modifier(Modifier::BOLD),
+    )));
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(deep_ocean())),
+        bar,
+    );
+
+    // The runtime is not settled until it has been chosen, so the context row
+    // says so rather than naming the default.
     let runtime = if matches!(app.screen(), Screen::Runtime { .. }) {
         Span::styled("choosing a runtime", muted())
     } else {
         Span::styled(app.runtime_label(), Style::default().fg(neutral()))
     };
-    let line = Line::from(vec![
-        Span::styled(
-            "ComputeArena",
-            Style::default().fg(brand()).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        runtime,
-        Span::raw("  ·  "),
-        account,
-    ]);
-    let links = Line::from(Span::styled(
-        format!("{COMPUTEARENA_WEBSITE} · {COMPUTEARENA_DISCORD}"),
-        muted(),
-    ));
+    let account = match &app.account {
+        Some(user) => Span::styled(format!("@{user}"), Style::default().fg(brand())),
+        None => Span::styled("not signed in", muted()),
+    };
     frame.render_widget(
-        Paragraph::new(vec![line, links]).block(
-            Block::default()
-                .borders(Borders::BOTTOM)
-                .border_style(Style::default().fg(neutral())),
-        ),
-        area,
+        Paragraph::new(Line::from(vec![
+            Span::raw("  "),
+            runtime,
+            Span::raw("  ·  "),
+            account,
+        ])),
+        context,
     );
 }
 
@@ -120,7 +158,10 @@ fn footer(frame: &mut Frame, area: Rect, app: &App) {
         Screen::Reports { .. } => "↑/↓ move · Enter verify · Esc back",
         Screen::Preview { .. } => "↑/↓ scroll · Enter submit · Esc back",
         Screen::Running => "↑/↓ scroll · Enter/Esc back when finished · Ctrl+C quit",
-        Screen::Loading { .. } => "Esc cancel",
+        Screen::Loading { .. } => "working…",
+        Screen::HubSearch { .. } => "type a search · Enter search · Esc back",
+        Screen::HubModels { .. } => "↑/↓ move · Enter list files · Esc back",
+        Screen::HubFiles { .. } => "↑/↓ move · Enter download · Esc back",
         _ => "↑/↓ move · Enter select · Esc back · Ctrl+C quit",
     };
     let status = if app.status.is_empty() {
@@ -174,6 +215,14 @@ fn body(frame: &mut Frame, area: Rect, app: &mut App) {
         Screen::Preview { lines, scroll, .. } => preview_screen(frame, area, lines, *scroll),
         Screen::Info { title, lines } => info_screen(frame, area, title, lines),
         Screen::Loading { message } => loading_screen(frame, area, message),
+        Screen::HubSearch { input } => search_screen(frame, area, input),
+        Screen::HubModels { rows, cursor } => hub_models_screen(frame, area, rows, *cursor),
+        Screen::HubFiles {
+            repository,
+            rows,
+            cursor,
+        } => hub_files_screen(frame, area, repository, rows, *cursor),
+        Screen::Account { cursor } => account_screen(frame, area, app.account.as_deref(), *cursor),
     }
 }
 
@@ -475,6 +524,106 @@ fn loading_screen(frame: &mut Frame, area: Rect, message: &str) {
     );
 }
 
+fn search_screen(frame: &mut Frame, area: Rect, input: &str) {
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                "Search the Hugging Face Hub for models published with GGUF files.",
+                Style::default().fg(neutral()),
+            )),
+            Line::from(Span::styled(
+                "Gated repositories need HF_TOKEN set in your environment.",
+                muted(),
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("› ", Style::default().fg(brand())),
+                Span::styled(input.to_string(), Style::default().fg(brand())),
+                Span::styled("▏", Style::default().fg(brand())),
+            ]),
+        ])
+        .wrap(Wrap { trim: false })
+        .block(panel("Find a model")),
+        area,
+    );
+}
+
+fn hub_models_screen(frame: &mut Frame, area: Rect, rows: &[HubModelRow], cursor: usize) {
+    let items = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| item(row.id.clone(), row.detail.clone(), index == cursor))
+        .collect();
+    render_list(frame, area, "Hugging Face · GGUF models", items, cursor);
+}
+
+fn hub_files_screen(
+    frame: &mut Frame,
+    area: Rect,
+    repository: &str,
+    rows: &[HubFileRow],
+    cursor: usize,
+) {
+    let items = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| item(row.label.clone(), row.detail.clone(), index == cursor))
+        .collect();
+    render_list(
+        frame,
+        area,
+        &format!("{repository} · choose a quantization"),
+        items,
+        cursor,
+    );
+}
+
+fn account_screen(frame: &mut Frame, area: Rect, account: Option<&str>, cursor: usize) {
+    let areas = Layout::vertical([Constraint::Length(4), Constraint::Min(3)]).split(area);
+    let lines = match account {
+        Some(user) => vec![
+            Line::from(vec![
+                Span::styled("Signed in as ", Style::default().fg(neutral())),
+                Span::styled(
+                    format!("@{user}"),
+                    Style::default().fg(brand()).add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(Span::styled(
+                "Submitted benchmarks are published under this account.",
+                muted(),
+            )),
+        ],
+        None => vec![
+            Line::from(Span::styled(
+                "Not signed in.",
+                Style::default().fg(neutral()),
+            )),
+            Line::from(Span::styled(
+                "Benchmarks still run and are saved locally; signing in is only needed to submit.",
+                muted(),
+            )),
+        ],
+    };
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(focus_panel("Account", false)),
+        areas[0],
+    );
+    let action = match account {
+        Some(_) => item("Log out", "Revoke this installation's session", cursor == 0),
+        None => item("Log in", "Opens your browser to connect", cursor == 0),
+    };
+    render_list(
+        frame,
+        areas[1],
+        "What next",
+        vec![action, item("Back", "", cursor == 1)],
+        cursor,
+    );
+}
+
 const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
 
 fn job_screen(frame: &mut Frame, area: Rect, job: Option<&Job>) {
@@ -514,7 +663,9 @@ fn job_screen(frame: &mut Frame, area: Rect, job: Option<&Job>) {
         ]),
     };
     let areas = Layout::vertical([Constraint::Length(1), Constraint::Min(3)]).split(area);
-    frame.render_widget(Paragraph::new(heading).wrap(Wrap { trim: false }), areas[0]);
+    // Deliberately unwrapped: a heading longer than the window should be cut
+    // off, not pushed onto a line this row has no room for.
+    frame.render_widget(Paragraph::new(heading), areas[0]);
 
     // The log pane holds whatever the underlying command printed, following the
     // newest line unless the reader has scrolled back.

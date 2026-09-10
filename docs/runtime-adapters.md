@@ -9,9 +9,14 @@ Both retain the computearena-benchmark/1 signed envelope, so old reports remain 
 ## Commands
 
 - computearena: opens the full-screen interface (ratatui) on a terminal — pick BaseRT or
-  llama.cpp, skipped when only one of them is installed, see which executable will run (or
-  how to obtain one), then the shared session. Piped or redirected input, and platforms
-  other than unix, fall back to the printed session with numbered menus.
+  llama.cpp, asked only when neither one runtime is installed nor a previous choice is
+  remembered, see which executable will run (or how to obtain one), then the shared
+  session. Piped or redirected input, and platforms other than unix, fall back to the
+  printed session with numbered menus.
+- Model selection for llama.cpp offers the Hugging Face Hub alongside recent files: search
+  models filtered to GGUF, list a repository's .gguf files smallest first, download into
+  the ComputeArena data directory, and go straight to that model's plan. `HF_TOKEN` is
+  forwarded when set, for gated repositories.
 - computearena basert [run|list|inspect|verify|login|logout|submit|install]
 - computearena llama-cpp [run|list|inspect|verify|login|logout|submit|install]
 - install downloads the runtime's prebuilt release after showing the plan; --archive
