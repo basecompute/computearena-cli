@@ -212,7 +212,29 @@ impl InstallRecord {
         };
         let value: Value = serde_json::from_slice(&contents)
             .with_context(|| format!("{} is not valid JSON", file.display()))?;
-        Ok(Self::from_value(&value))
+        Ok(Self::from_value(&value).map(|record| record.rebased(&paths.root)))
+    }
+
+    /// A record written before the data directory moved names the executable
+    /// under the old root. The installed copy moved with everything else, so
+    /// the path is rebuilt from its `runtimes/…` tail under the current root.
+    fn rebased(mut self, root: &Path) -> Self {
+        if self.executable.is_file() {
+            return self;
+        }
+        let components: Vec<_> = self.executable.components().collect();
+        if let Some(index) = components
+            .iter()
+            .position(|component| component.as_os_str() == "runtimes")
+        {
+            let candidate = components[index..]
+                .iter()
+                .fold(root.to_path_buf(), |path, component| path.join(component));
+            if candidate.is_file() {
+                self.executable = candidate;
+            }
+        }
+        self
     }
 
     fn from_value(value: &Value) -> Option<Self> {
@@ -1183,5 +1205,64 @@ mod tests {
         let llama = manual_instructions(Runtime::LlamaCpp).join("\n");
         assert!(llama.contains("brew install llama.cpp"));
         assert!(llama.contains(LLAMA_CPP_RELEASES));
+    }
+}
+
+#[cfg(test)]
+mod install_record_tests {
+    use super::*;
+
+    #[test]
+    fn a_record_from_the_old_data_directory_still_finds_the_moved_executable() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::resolve(Some(dir.path().join("computearena"))).unwrap();
+        let executable = paths
+            .root
+            .join("runtimes")
+            .join("llama-cpp")
+            .join("b1")
+            .join("llama-bench");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, b"#!/bin/sh\n").unwrap();
+        let stale = dir
+            .path()
+            .join("basert")
+            .join("computearena")
+            .join("runtimes")
+            .join("llama-cpp")
+            .join("b1")
+            .join("llama-bench");
+        InstallRecord {
+            executable: stale,
+            version: "b1".to_string(),
+            asset: String::new(),
+            installed_at_unix_ms: 0,
+        }
+        .save(&paths, Runtime::LlamaCpp)
+        .unwrap();
+
+        let loaded = InstallRecord::load(&paths, Runtime::LlamaCpp)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.executable, executable);
+    }
+
+    #[test]
+    fn a_record_whose_executable_is_gone_is_returned_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::resolve(Some(dir.path().join("computearena"))).unwrap();
+        let missing = dir.path().join("elsewhere").join("llama-bench");
+        InstallRecord {
+            executable: missing.clone(),
+            version: "b1".to_string(),
+            asset: String::new(),
+            installed_at_unix_ms: 0,
+        }
+        .save(&paths, Runtime::LlamaCpp)
+        .unwrap();
+        let loaded = InstallRecord::load(&paths, Runtime::LlamaCpp)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.executable, missing);
     }
 }
