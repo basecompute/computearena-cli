@@ -77,7 +77,12 @@ impl RuntimeAdapter for LlamaCppAdapter {
         crate::benchmark::confirm_llama_profile(r, yes)
     }
 
-    fn execute(&self, executable: &Path, r: &BenchmarkRequest<'_>) -> Result<RuntimeOutput> {
+    fn execute(
+        &self,
+        executable: &Path,
+        r: &BenchmarkRequest<'_>,
+        _descriptor: &Value,
+    ) -> Result<RuntimeOutput> {
         validate_model(r.model)?;
         let ui = TerminalUi::detect();
         println!("{}", ui.neutral("Telemetry: observing process memory and available device sensors (whole run, 1-second sampling)."));
@@ -108,18 +113,12 @@ impl RuntimeAdapter for LlamaCppAdapter {
             json!(telemetry.get("observer").is_some() || telemetry.get("workloads").is_some());
         result.benchmark["protocol"]["measurement_observer"] =
             json!("external_whole_process_sampler");
-        if let Some(peak) = telemetry
-            .pointer("/process_memory/statistics/peak")
-            .and_then(Value::as_f64)
+        if let Some(peak) = crate::telemetry::attach_whole_process(&mut result.benchmark, telemetry)
         {
-            result.benchmark["memory"] = json!({"process_peak_rss_mb":peak,
-                "measurement_relation":"concurrent_observer","scope":"whole_runtime_process",
-                "unit":"MiB","note":"Observed sampled peak, including loading and warmup; not a kernel high-water mark"});
             println!("{}", ui.neutral(format!("Telemetry: observed peak process memory {peak:.0} MiB (includes loading and warmup).")));
         } else {
             println!("{}", ui.neutral("Telemetry: process memory unavailable; see sensor coverage in the saved report."));
         }
-        result.benchmark["telemetry"] = telemetry;
         if r.cooldown {
             result.benchmark["protocol"]["id"] = json!("llama-bench-conditioned-pp-tg/1");
             result.benchmark["protocol"]["cooldown_enabled"] = json!(true);

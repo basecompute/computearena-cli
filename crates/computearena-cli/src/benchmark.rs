@@ -1,11 +1,9 @@
 use crate::adapters::{file_sha256, BenchmarkRequest, Runtime};
 use crate::config::{
-    APPLE_CONDITIONED_PHASES_PER_WORKLOAD, APPLE_TELEMETRY_IDLE_BASELINE_SECONDS,
     CONDITIONING_FALLBACK_WAIT_SECONDS, CONDITIONING_MAXIMUM_WAIT_SECONDS,
-    CONDITIONING_MINIMUM_WARMUP_SECONDS, CONDITIONING_STABLE_WINDOW_SECONDS,
-    PORTABLE_CONDITIONED_PHASES_PER_WORKLOAD, TELEMETRY_WINDOW_SECONDS,
+    CONDITIONING_STABLE_WINDOW_SECONDS,
 };
-use crate::protocol::{HARNESS_SCHEMA, REPORT_SCHEMA, RUNTIME_NAME, TELEMETRY_SCHEMA};
+use crate::protocol::{HARNESS_SCHEMA, REPORT_SCHEMA, RUNTIME_NAME};
 use crate::reports::b64_encode;
 use crate::reports::{
     atomic_write_json, hex, load_or_create_installation_key, sha256_hex, sign_report, Paths,
@@ -21,12 +19,6 @@ use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-#[derive(Clone, Copy, Debug)]
-struct BenchmarkTiming {
-    scheduled_seconds: f64,
-    cooldown_phases: f64,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BenchmarkProfile {
@@ -54,50 +46,14 @@ impl BenchmarkProfile {
         }
     }
 
-    fn duration(self, timing: BenchmarkTiming) -> String {
+    fn external_duration(self, cooldown_boundaries: f64) -> String {
         match self {
-            Self::Standard => format!("at least {}", format_duration(timing.scheduled_seconds)),
+            Self::Standard => "no cooldown waits".to_string(),
             Self::ThermallyControlled => format!(
-                "{}–{}",
-                format_duration(timing.cooldown_minimum_seconds()),
-                format_duration(timing.cooldown_maximum_seconds())
+                "adds {}–{} of waits",
+                format_duration(cooldown_boundaries * CONDITIONING_STABLE_WINDOW_SECONDS),
+                format_duration(cooldown_boundaries * CONDITIONING_MAXIMUM_WAIT_SECONDS)
             ),
-        }
-    }
-}
-
-impl BenchmarkTiming {
-    fn cooldown_minimum_seconds(self) -> f64 {
-        self.scheduled_seconds + self.cooldown_phases * CONDITIONING_STABLE_WINDOW_SECONDS
-    }
-
-    fn cooldown_fallback_seconds(self) -> f64 {
-        self.scheduled_seconds + self.cooldown_phases * CONDITIONING_FALLBACK_WAIT_SECONDS
-    }
-
-    fn cooldown_maximum_seconds(self) -> f64 {
-        self.scheduled_seconds + self.cooldown_phases * CONDITIONING_MAXIMUM_WAIT_SECONDS
-    }
-}
-
-fn benchmark_timing(prefill_count: usize, apple: bool) -> BenchmarkTiming {
-    let workload_count = (prefill_count + 1) as f64;
-    if apple {
-        BenchmarkTiming {
-            scheduled_seconds: APPLE_TELEMETRY_IDLE_BASELINE_SECONDS
-                + workload_count
-                    * (2.0 * TELEMETRY_WINDOW_SECONDS
-                        + APPLE_CONDITIONED_PHASES_PER_WORKLOAD
-                            * CONDITIONING_MINIMUM_WARMUP_SECONDS),
-            cooldown_phases: workload_count * APPLE_CONDITIONED_PHASES_PER_WORKLOAD + 1.0,
-        }
-    } else {
-        BenchmarkTiming {
-            scheduled_seconds: workload_count
-                * (TELEMETRY_WINDOW_SECONDS
-                    + PORTABLE_CONDITIONED_PHASES_PER_WORKLOAD
-                        * CONDITIONING_MINIMUM_WARMUP_SECONDS),
-            cooldown_phases: workload_count * PORTABLE_CONDITIONED_PHASES_PER_WORKLOAD,
         }
     }
 }
@@ -173,15 +129,12 @@ fn sampling_summary(runtime: Runtime, r: &BenchmarkRequest<'_>) -> String {
 /// not only inside the start menu.
 fn estimate_summary(runtime: Runtime, prefill_count: usize) -> String {
     match runtime {
-        Runtime::Basert => {
-            let timing = benchmark_timing(prefill_count, cfg!(target_os = "macos"));
-            format!(
-                "Standard {} · thermally controlled {} (about {} without sensors)\nExcludes model loading and recorded repetitions",
-                BenchmarkProfile::Standard.duration(timing),
-                BenchmarkProfile::ThermallyControlled.duration(timing),
-                format_duration(timing.cooldown_fallback_seconds())
-            )
-        }
+        Runtime::Basert => format!(
+            "One harness run; no telemetry replays\nCurrent external cooldown adds {}–{} before the suite (about {} without sensors); native harness timing may vary",
+            format_duration(CONDITIONING_STABLE_WINDOW_SECONDS),
+            format_duration(CONDITIONING_MAXIMUM_WAIT_SECONDS),
+            format_duration(CONDITIONING_FALLBACK_WAIT_SECONDS)
+        ),
         Runtime::LlamaCpp => {
             let count = (prefill_count + 1) as f64;
             format!(
@@ -208,13 +161,14 @@ pub(crate) fn benchmark_details(
             rows.push((
                 "Warmup",
                 format!(
-                    "Runs for at least {} before each measured phase",
-                    format_duration(CONDITIONING_MINIMUM_WARMUP_SECONDS)
+                    "The harness runs {} warmup {} before each workload",
+                    r.warmup,
+                    repetition_label(r.warmup)
                 ),
             ));
             rows.push((
                 "Telemetry",
-                "Collected by the BaseRT benchmark harness".to_string(),
+                "Current harnesses: external whole-process sampling every second\nA native same-run collector is used only when advertised; no diagnostic replays".to_string(),
             ));
         }
         Runtime::LlamaCpp => {
@@ -296,7 +250,7 @@ pub(crate) fn confirm_benchmark_run(
     if !model.is_file() {
         bail!("model does not exist or is not a file: {}", model.display());
     }
-    let prefill_tokens = parse_pp(pp)?;
+    parse_pp(pp)?;
     if tg == 0 || reps == 0 {
         bail!("--tg and --reps must be greater than zero");
     }
@@ -316,10 +270,9 @@ pub(crate) fn confirm_benchmark_run(
         bail!("benchmark confirmation requires a terminal; pass --yes to run non-interactively");
     }
 
-    let timing = benchmark_timing(prefill_tokens.len(), cfg!(target_os = "macos"));
     if skip_confirmation {
         let profile = BenchmarkProfile::from_cooldown(cooldown_requested);
-        announce_profile(ui, profile.name(), &profile.duration(timing));
+        announce_profile(ui, profile.name(), &profile.external_duration(1.0));
         return Ok(Some(profile.cooldown_enabled()));
     }
 
@@ -403,19 +356,21 @@ pub(crate) fn profile_options(
     let prefill_count = parse_pp(r.pp)?.len();
     Ok(match runtime {
         Runtime::Basert => {
-            let timing = benchmark_timing(prefill_count, cfg!(target_os = "macos"));
             vec![
                 RunProfileOption {
                     profile: BenchmarkProfile::Standard,
                     label: "Standard".to_string(),
-                    duration: BenchmarkProfile::Standard.duration(timing),
+                    duration: BenchmarkProfile::Standard.external_duration(1.0),
                     detail: "Fastest; thermal state may affect comparability".to_string(),
                 },
                 RunProfileOption {
                     profile: BenchmarkProfile::ThermallyControlled,
                     label: "Thermally controlled".to_string(),
-                    duration: BenchmarkProfile::ThermallyControlled.duration(timing),
-                    detail: "Waits for thermal recovery between workloads".to_string(),
+                    duration: format!(
+                        "current external mode {}",
+                        BenchmarkProfile::ThermallyControlled.external_duration(1.0)
+                    ),
+                    detail: "Current harnesses wait once before the suite; a native same-run harness controls its own waits".to_string(),
                 },
             ]
         }
@@ -575,6 +530,7 @@ pub(crate) fn run_benchmark(
             warmup,
             cooldown: cooldown_enabled,
         },
+        &descriptor,
     )?;
     if file_sha256(&harness)? != binary_sha256 {
         bail!("The runtime executable changed during the benchmark. Run it again with a stable installation.");
@@ -656,7 +612,10 @@ fn parse_pp(pp: &str) -> Result<Vec<u32>> {
     Ok(values)
 }
 
-pub(crate) fn validate_harness_result(value: &Value) -> Result<()> {
+pub(crate) fn validate_harness_result(
+    value: &Value,
+    expected_telemetry_schema: Option<&str>,
+) -> Result<()> {
     if let Some(reason) = value.get("skip").and_then(Value::as_str) {
         bail!("benchmark skipped: {reason}");
     }
@@ -666,10 +625,12 @@ pub(crate) fn validate_harness_result(value: &Value) -> Result<()> {
     if value.get("mode").and_then(Value::as_str) != Some("text") {
         bail!("harness returned a non-text benchmark");
     }
-    if value.pointer("/telemetry/schema").and_then(Value::as_str) != Some(TELEMETRY_SCHEMA) {
-        bail!(
-            "benchmark harness omitted supported telemetry (expected {TELEMETRY_SCHEMA}); rebuild basert-benchmark-harness"
-        );
+    if let Some(expected) = expected_telemetry_schema {
+        if value.pointer("/telemetry/schema").and_then(Value::as_str) != Some(expected) {
+            bail!(
+                "benchmark harness omitted supported same-run telemetry (expected {expected}); rebuild basert-benchmark-harness"
+            );
+        }
     }
     let raw = value
         .get("raw_samples")
@@ -758,50 +719,23 @@ mod tests {
 
     #[test]
     fn formats_preflight_profile_duration_estimates() {
-        let prefill_count = parse_pp("128,256,512,1024,2048,4096,8192,16384")
-            .unwrap()
-            .len();
-
-        let apple = benchmark_timing(prefill_count, true);
-        assert_eq!(format_duration(apple.scheduled_seconds), "2m 53s");
-        assert_eq!(format_duration(apple.cooldown_minimum_seconds()), "7m 33s");
         assert_eq!(
-            format_duration(apple.cooldown_fallback_seconds()),
-            "16m 53s"
+            BenchmarkProfile::ThermallyControlled.external_duration(1.0),
+            "adds 10s–3m 0s of waits"
         );
-        assert_eq!(
-            format_duration(apple.cooldown_maximum_seconds()),
-            "1h 26m 53s"
-        );
-
-        let portable = benchmark_timing(prefill_count, false);
-        assert_eq!(format_duration(portable.scheduled_seconds), "1m 39s");
-        assert_eq!(
-            format_duration(portable.cooldown_minimum_seconds()),
-            "4m 39s"
-        );
-        assert_eq!(
-            format_duration(portable.cooldown_fallback_seconds()),
-            "10m 39s"
-        );
-        assert_eq!(
-            format_duration(portable.cooldown_maximum_seconds()),
-            "55m 39s"
-        );
+        assert_eq!(format_duration(CONDITIONING_FALLBACK_WAIT_SECONDS), "30s");
     }
 
     #[test]
     fn benchmark_profiles_describe_their_timing_and_cooldown_behavior() {
-        let timing = benchmark_timing(8, true);
-
         assert_eq!(
-            BenchmarkProfile::Standard.duration(timing),
-            "at least 2m 53s"
+            BenchmarkProfile::Standard.external_duration(1.0),
+            "no cooldown waits"
         );
         assert!(!BenchmarkProfile::Standard.cooldown_enabled());
         assert_eq!(
-            BenchmarkProfile::ThermallyControlled.duration(timing),
-            "7m 33s–1h 26m 53s"
+            BenchmarkProfile::ThermallyControlled.external_duration(1.0),
+            "adds 10s–3m 0s of waits"
         );
         assert!(BenchmarkProfile::ThermallyControlled.cooldown_enabled());
     }

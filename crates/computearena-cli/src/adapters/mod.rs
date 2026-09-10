@@ -57,7 +57,14 @@ pub(crate) trait RuntimeAdapter {
     fn probe(&self, executable: &Path) -> Result<Value>;
     fn select_model(&self, paths: &crate::reports::Paths) -> Result<Option<PathBuf>>;
     fn confirm(&self, request: &BenchmarkRequest<'_>, yes: bool) -> Result<Option<bool>>;
-    fn execute(&self, executable: &Path, request: &BenchmarkRequest<'_>) -> Result<RuntimeOutput>;
+    /// Execute using the descriptor returned by `probe`. Passing capabilities
+    /// through avoids release-number checks in runtime-specific adapters.
+    fn execute(
+        &self,
+        executable: &Path,
+        request: &BenchmarkRequest<'_>,
+        descriptor: &Value,
+    ) -> Result<RuntimeOutput>;
 }
 
 pub(crate) fn file_sha256(path: &Path) -> Result<String> {

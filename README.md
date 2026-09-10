@@ -145,20 +145,21 @@ computearena basert run model.base --pp 512,2048 --tg 128 --reps 5
 computearena llama-cpp run model.gguf --yes --output ./report.json
 ```
 
-Two profiles are offered before a run starts. Standard runs the workloads
-back to back. Thermally controlled (`--cooldown`) waits for the device to cool
-before each measured workload, which can add many minutes; the plan shows the
-estimate. `--yes` skips the prompts and picks standard unless `--cooldown` is
-also given, and piped input must use `--yes`. Details, including how the
-llama.cpp cooldown differs from BaseRT's in-runtime conditioning, are in
+Two profiles are offered before a run starts. Standard runs without an external
+cooldown wait. With the currently released BaseRT harness, thermally controlled
+(`--cooldown`) waits once before the complete harness run; llama.cpp waits before
+each isolated workload process. The plan shows the runtime-specific estimate.
+`--yes` skips the prompts and picks standard unless `--cooldown` is also given,
+and piped input must use `--yes`. Details are in
 [docs/benchmark-profiles.md](docs/benchmark-profiles.md).
 
 Telemetry is automatic for both runtimes and needs no flag, credential, or
-sudo. BaseRT's harness records its own diagnostics; for llama.cpp the client
-observes the process it launched: resident memory, the temperature sensors the
-operating system exposes, power state, and NVIDIA or ROCm device snapshots
-where those vendor tools exist. What each runtime can and cannot observe is in
-[docs/telemetry.md](docs/telemetry.md).
+sudo. ComputeArena observes the single process it launches for current BaseRT
+and llama.cpp builds: resident memory, operating-system temperature sensors,
+power state, and NVIDIA or ROCm device snapshots where those vendor tools exist.
+A future BaseRT harness can advertise native same-run telemetry, which the CLI
+will use without a CLI release or version-string rule. Coverage and limitations
+are in [docs/telemetry.md](docs/telemetry.md).
 
 ## Runtimes
 
@@ -302,8 +303,9 @@ and the signing key.
 - llama.cpp measurements: `computearena-measurements/1`, executed as
   `llama-bench-independent-pp-tg/1` or, with cooldown,
   `llama-bench-conditioned-pp-tg/1`
-- Telemetry: `basert-telemetry/3` for BaseRT, `computearena-telemetry/1` for
-  llama.cpp
+- Telemetry: `computearena-telemetry/1` for externally observed BaseRT and
+  llama.cpp runs. A BaseRT harness advertising `features.same_run_telemetry`
+  uses native `basert-telemetry/4` instead.
 - Signing: Ed25519 over `computearena-json-v1` canonical JSON
 
 ## Development

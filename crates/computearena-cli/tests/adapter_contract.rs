@@ -384,7 +384,6 @@ impl Fixture {
         if self.runtime == "basert" {
             json!({"schema":"basert-benchmark-harness/1","mode":"text","runtime_version":"0.2.4",
                 "chip":"Test CPU","backend":"CPU","params":{"pp":"128,512","tg":128,"reps":2},
-                "telemetry":{"schema":"basert-telemetry/3"},
                 "metrics":{"pp128_t_s":960.0,"pp512_t_s":3840.0,"decode_t_s":960.0},
                 "raw_samples":{"prefill":{
                     "128":[{"tokens":128,"elapsed_ns":100000000},{"tokens":128,"elapsed_ns":200000000}],
@@ -403,8 +402,17 @@ impl Fixture {
     }
 
     fn install(&self, result: &Value, before_result: &str) {
+        let native_same_run = result.pointer("/telemetry/schema").and_then(Value::as_str)
+            == Some("basert-telemetry/4");
+        let telemetry_schema = if native_same_run {
+            "basert-telemetry/4"
+        } else {
+            "basert-telemetry/3"
+        };
         let descriptor = json!({"schema":"basert-benchmark-harness-descriptor/1",
-            "runtime":{"name":"basert","version":"0.2.4"},"result_schema":"basert-benchmark-harness/1"});
+            "runtime":{"name":"basert","version":"0.2.4"},"result_schema":"basert-benchmark-harness/1",
+            "telemetry_schema":telemetry_schema,
+            "features":{"telemetry":true,"same_run_telemetry":native_same_run}});
         let script = format!("#!/bin/sh\ncase \"$1\" in\n describe) printf '%s\\n' '{descriptor}';;\n --help) printf '%s\\n' '--n-prompt --n-gen --n-depth --repetitions --no-warmup json';;\n *) printf '%s\\n' \"$@\" > \"$ARENA_TEST_ARGS\"\n{before_result}\n/bin/cat <<'RESULT'\n{result}\nRESULT\n;;\nesac\n");
         fs::write(&self.executable, script).unwrap();
         fs::set_permissions(&self.executable, fs::Permissions::from_mode(0o755)).unwrap();
@@ -498,7 +506,23 @@ fn runtimes_agree_on_samples_units_and_rates_without_faking_protocol_equivalence
         "whole_runtime_process"
     );
     assert!(b["benchmark"]["telemetry"].get("memory_replay").is_none());
-    assert!(a["benchmark"].get("telemetry").is_some());
+    assert_eq!(
+        a["benchmark"]["telemetry"]["schema"],
+        "computearena-telemetry/1"
+    );
+    assert_eq!(
+        a["benchmark"]["telemetry"]["scope"],
+        "whole_runtime_process"
+    );
+    assert_eq!(
+        a["benchmark"]["telemetry"]["adapter"]["mode"],
+        "external_whole_process"
+    );
+    assert_eq!(
+        a["benchmark"]["telemetry"]["conditioning"]["mode"],
+        "warmup_only"
+    );
+    assert!(a["benchmark"]["telemetry"].get("memory_replay").is_none());
     for (fixture, report) in [(&base, a), (&llama, b)] {
         assert_eq!(
             report["runtime"]["binary"]["sha256"],
@@ -517,14 +541,33 @@ fn runtimes_agree_on_samples_units_and_rates_without_faking_protocol_equivalence
         assert!(args.contains("\n128,512\n"));
         assert!(args.contains(fixture.model.to_str().unwrap()));
         assert!(!args.contains("--cooldown"));
+        assert!(!args.contains("--telemetry"));
         if fixture.runtime == "llama-cpp" {
             assert!(args.contains("-d\n0\n"));
             assert!(args.contains("-o\njson\n"));
-            assert!(!args.contains("--telemetry"));
-        } else {
-            assert!(args.contains("--telemetry"));
         }
     }
+}
+
+#[test]
+fn basert_native_same_run_telemetry_is_selected_by_capability_not_version() {
+    let f = Fixture::new("basert");
+    let mut result = f.result();
+    result["telemetry"] = json!({"schema":"basert-telemetry/4","marker":"native-same-run"});
+    f.install(&result, "");
+
+    let report = f.signed();
+    assert_eq!(
+        report["benchmark"]["telemetry"]["schema"],
+        "basert-telemetry/4"
+    );
+    assert_eq!(
+        report["benchmark"]["telemetry"]["marker"],
+        "native-same-run"
+    );
+    assert!(report["benchmark"]["telemetry"].get("adapter").is_none());
+    let args = fs::read_to_string(f.dir.path().join("args")).unwrap();
+    assert!(args.contains("--telemetry"));
 }
 
 #[test]
