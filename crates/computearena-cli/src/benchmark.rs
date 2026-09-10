@@ -223,6 +223,15 @@ pub(crate) fn identify_benchmark_paths(
     let override_path = override_path.map(|p| expand(&p)).transpose()?;
     let executable = fs::canonicalize(crate::runtimes::locate(runtime, override_path, paths)?.path)
         .context("resolving runtime executable path")?;
+    Ok((executable, model))
+}
+
+/// Show which client and which runtime executable a benchmark will use.
+/// Printed by the command-line flows only: the full-screen session names the
+/// runtime executable in its header on every screen, and a stray `println!`
+/// from its own thread would scroll the terminal underneath the interface,
+/// leaving ghost text until every cell happened to be repainted.
+pub(crate) fn print_resolved_paths(runtime: Runtime, executable: &Path) -> Result<()> {
     let ui = TerminalUi::detect();
     println!();
     print_fields(
@@ -235,7 +244,7 @@ pub(crate) fn identify_benchmark_paths(
             (runtime.adapter().name(), executable.display().to_string()),
         ],
     );
-    Ok((executable, model))
+    Ok(())
 }
 
 pub(crate) fn confirm_benchmark_run(
