@@ -73,17 +73,21 @@ or, from a checkout, `cargo build --release`, which writes
    also install either one for you (see [Runtimes](#runtimes)).
 2. Have a model on disk: a `.base` bundle for BaseRT, for example from
    `basert pull Qwen/Qwen3-0.6B`, or a `.gguf` file for llama.cpp.
-3. Run `computearena`. It asks which runtime to use, shows the executable it
-   found (or offers to install one), and opens a menu: log in, run
+3. Run `computearena`. In a terminal this opens the full-screen interface:
+   arrow keys move, Enter selects, Esc goes back, Ctrl+C leaves. It asks which
+   runtime to use — skipping the question when only one is installed — shows
+   the executable it found (or offers to install one), and opens a menu: run
    benchmarks, submit previous benchmarks, list local benchmarks, verify a
-   local benchmark.
+   local benchmark, log in or out. Piped or redirected input gets the same
+   session as printed menus instead, so scripts and CI are unaffected.
 4. A benchmark starts with its plan: the resolved executable and model, the
-   workload sizes, a memory and heat warning, and the choice of profile. The
-   result is saved locally as a signed report.
+   workload sizes, a memory and heat warning, and the choice of profile.
+   Choosing a profile starts the run; its progress and results stream into the
+   interface, and the result is saved locally as a signed report.
 5. Log in and submit when you are ready. Submission previews the JSON that
    will become public and asks for confirmation.
 
-Everything in the menu is also a command:
+Everything in the interface is also a command:
 
 ```sh
 computearena basert                      # BaseRT session

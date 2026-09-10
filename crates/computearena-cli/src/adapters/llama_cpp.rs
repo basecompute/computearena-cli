@@ -264,7 +264,7 @@ fn print_model_download_hint() {
     println!("{}", ui.muted("Choose a model and quantization that fit your device's memory, then enter the downloaded file's local path below."));
 }
 
-fn validate_model(path: &Path) -> Result<()> {
+pub(crate) fn validate_model(path: &Path) -> Result<()> {
     let mut file = File::open(path).with_context(|| format!("opening model {}", path.display()))?;
     let mut magic = [0; 4];
     file.read_exact(&mut magic)

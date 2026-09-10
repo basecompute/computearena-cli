@@ -78,12 +78,15 @@ impl TerminalUi {
         self.render(Style::new().dim(), text)
     }
 
+    /// Positive from the system palette: work that finished.
     pub(crate) fn success(self, text: impl Display) -> String {
-        self.brand_bold(text)
+        self.render(BASECOMPUTE_THEME.positive.style().bold(), text)
     }
 
+    /// The palette has no warning colour, so attention borrows the brand
+    /// accent; failure stays Negative.
     pub(crate) fn warning(self, text: impl Display) -> String {
-        self.render(Style::new().yellow().bold(), text)
+        self.brand_bold(text)
     }
 
     pub(crate) fn error(self, text: impl Display) -> String {

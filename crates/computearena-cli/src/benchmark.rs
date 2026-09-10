@@ -103,39 +103,46 @@ fn benchmark_timing(prefill_count: usize, apple: bool) -> BenchmarkTiming {
     }
 }
 
-/// The plan people read before starting: what will run, on what, and where it
-/// lands. Everything that is background rather than decision-making lives in
-/// `print_benchmark_details`, one keypress away from the start menu.
-pub(crate) fn print_benchmark_plan(runtime: Runtime, r: &BenchmarkRequest<'_>) -> Result<()> {
-    let ui = TerminalUi::detect();
+/// One description of a planned run, shared by the printed plan and the
+/// full-screen interface so the two can never drift apart.
+pub(crate) fn plan_rows(
+    runtime: Runtime,
+    r: &BenchmarkRequest<'_>,
+) -> Result<Vec<(&'static str, String)>> {
     let prefill_tokens = parse_pp(r.pp)?;
-    let prefill_count = prefill_tokens.len();
     let prefill = prefill_tokens
         .iter()
         .map(|n| format!("PP{n}"))
         .collect::<Vec<_>>()
         .join(", ");
+    Ok(vec![
+        ("Runtime", runtime.adapter().display_name().to_string()),
+        ("Model", compact_home_path(r.model)),
+        ("Workloads", format!("{prefill} + TG{}", r.tg)),
+        ("Sampling", sampling_summary(runtime, r)),
+        ("Estimated", estimate_summary(runtime, prefill_tokens.len())),
+        (
+            "Output",
+            "Signed JSON report saved locally\nNothing is uploaded automatically".to_string(),
+        ),
+    ])
+}
+
+pub(crate) const LOAD_WARNING: [&str; 2] = [
+    "This creates sustained CPU/GPU load and the device may get hot. For comparable",
+    "results use external power, turn off power saving, and close demanding apps.",
+];
+
+/// The plan people read before starting: what will run, on what, and where it
+/// lands. Everything that is background rather than decision-making lives in
+/// `benchmark_details`, one keypress away from the start menu.
+pub(crate) fn print_benchmark_plan(runtime: Runtime, r: &BenchmarkRequest<'_>) -> Result<()> {
+    let ui = TerminalUi::detect();
     ui.section("Benchmark plan");
-    print_fields(
-        ui,
-        &[
-            ("Runtime", runtime.adapter().display_name().to_string()),
-            ("Model", compact_home_path(r.model)),
-            ("Workloads", format!("{prefill} + TG{}", r.tg)),
-            ("Sampling", sampling_summary(runtime, r)),
-            ("Estimated", estimate_summary(runtime, prefill_count)),
-            (
-                "Output",
-                "Signed JSON report saved locally\nNothing is uploaded automatically".to_string(),
-            ),
-        ],
-    );
+    print_fields(ui, &plan_rows(runtime, r)?);
     println!();
-    println!(
-        "{} This creates sustained CPU/GPU load and the device may get hot. For comparable",
-        ui.warning("!")
-    );
-    println!("  results use external power, turn off power saving, and close demanding apps.");
+    println!("{} {}", ui.warning("!"), LOAD_WARNING[0]);
+    println!("  {}", LOAD_WARNING[1]);
     Ok(())
 }
 
@@ -186,10 +193,11 @@ fn estimate_summary(runtime: Runtime, prefill_count: usize) -> String {
     }
 }
 
-/// The long-form explanation, printed on request from the start menu.
-fn print_benchmark_details(runtime: Runtime, r: &BenchmarkRequest<'_>) {
-    let ui = TerminalUi::detect();
-    ui.section("What this runs");
+/// The long-form explanation, shown on request from the start menu.
+pub(crate) fn benchmark_details(
+    runtime: Runtime,
+    r: &BenchmarkRequest<'_>,
+) -> Vec<(&'static str, String)> {
     let mut rows = vec![(
         "Input",
         "Synthetic token sequences; this does not test model accuracy".to_string(),
@@ -230,7 +238,13 @@ fn print_benchmark_details(runtime: Runtime, r: &BenchmarkRequest<'_>) {
         "Report",
         "Signed locally; submission is a separate, explicit step".to_string(),
     ));
-    print_fields(ui, &rows);
+    rows
+}
+
+fn print_benchmark_details(runtime: Runtime, r: &BenchmarkRequest<'_>) {
+    let ui = TerminalUi::detect();
+    ui.section("What this runs");
+    print_fields(ui, &benchmark_details(runtime, r));
     println!();
 }
 
@@ -304,24 +318,11 @@ pub(crate) fn confirm_benchmark_run(
     let timing = benchmark_timing(prefill_tokens.len(), cfg!(target_os = "macos"));
     if skip_confirmation {
         let profile = BenchmarkProfile::from_cooldown(cooldown_requested);
-        announce_profile(ui, profile, &profile.duration(timing));
+        announce_profile(ui, profile.name(), &profile.duration(timing));
         return Ok(Some(profile.cooldown_enabled()));
     }
 
-    let options = [
-        RunProfileOption {
-            profile: BenchmarkProfile::Standard,
-            label: "Standard",
-            duration: BenchmarkProfile::Standard.duration(timing),
-            detail: "Fastest; thermal state may affect comparability".to_string(),
-        },
-        RunProfileOption {
-            profile: BenchmarkProfile::ThermallyControlled,
-            label: "Thermally controlled",
-            duration: BenchmarkProfile::ThermallyControlled.duration(timing),
-            detail: "Waits for thermal recovery between workloads".to_string(),
-        },
-    ];
+    let options = profile_options(Runtime::Basert, &request)?;
     let Some(index) = choose_run_profile(
         ui,
         Runtime::Basert,
@@ -332,15 +333,15 @@ pub(crate) fn confirm_benchmark_run(
     else {
         return Ok(None);
     };
-    let profile = options[index].profile;
-    announce_profile(ui, profile, &profile.duration(timing));
-    Ok(Some(profile.cooldown_enabled()))
+    let selected = &options[index];
+    announce_profile(ui, &selected.label, &selected.duration);
+    Ok(Some(selected.cooldown_enabled()))
 }
 
 pub(crate) fn confirm_llama_profile(r: &BenchmarkRequest<'_>, yes: bool) -> Result<Option<bool>> {
     let ui = TerminalUi::detect();
     print_benchmark_plan(Runtime::LlamaCpp, r)?;
-    let count = (parse_pp(r.pp)?.len() + 1) as f64;
+    parse_pp(r.pp)?;
     let standard = if r.warmup == 0 {
         "Standard — no warmup"
     } else {
@@ -351,29 +352,19 @@ pub(crate) fn confirm_llama_profile(r: &BenchmarkRequest<'_>, yes: bool) -> Resu
     }
     if yes {
         let profile = BenchmarkProfile::from_cooldown(r.cooldown);
-        announce_profile(ui, profile, "");
+        announce_profile(
+            ui,
+            if profile.cooldown_enabled() {
+                "Thermally controlled"
+            } else {
+                standard
+            },
+            "",
+        );
         return Ok(Some(profile.cooldown_enabled()));
     }
 
-    let options = [
-        RunProfileOption {
-            profile: BenchmarkProfile::Standard,
-            label: standard,
-            duration: "no cooldown waits".to_string(),
-            detail: "Total runtime depends on your model and device".to_string(),
-        },
-        RunProfileOption {
-            profile: BenchmarkProfile::ThermallyControlled,
-            label: "Thermally controlled",
-            duration: format!(
-                "adds {}–{} of waits",
-                format_duration(count * CONDITIONING_STABLE_WINDOW_SECONDS),
-                format_duration(count * CONDITIONING_MAXIMUM_WAIT_SECONDS)
-            ),
-            detail: "Runs each workload separately, reloading the model after each cooldown"
-                .to_string(),
-        },
-    ];
+    let options = profile_options(Runtime::LlamaCpp, r)?;
     let Some(index) =
         choose_run_profile(ui, Runtime::LlamaCpp, r, &options, usize::from(r.cooldown))?
     else {
@@ -385,14 +376,76 @@ pub(crate) fn confirm_llama_profile(r: &BenchmarkRequest<'_>, yes: bool) -> Resu
         ui.success("✓"),
         ui.strong(format!("Selected: {}", selected.label))
     );
-    Ok(Some(selected.profile.cooldown_enabled()))
+    Ok(Some(selected.cooldown_enabled()))
 }
 
-struct RunProfileOption {
+/// A startable run profile: what to call it, how long it is expected to take,
+/// and what the wait buys. Built once so the printed menu and the full-screen
+/// interface offer exactly the same choices.
+pub(crate) struct RunProfileOption {
     profile: BenchmarkProfile,
-    label: &'static str,
-    duration: String,
-    detail: String,
+    pub(crate) label: String,
+    pub(crate) duration: String,
+    pub(crate) detail: String,
+}
+
+impl RunProfileOption {
+    pub(crate) fn cooldown_enabled(&self) -> bool {
+        self.profile.cooldown_enabled()
+    }
+}
+
+pub(crate) fn profile_options(
+    runtime: Runtime,
+    r: &BenchmarkRequest<'_>,
+) -> Result<Vec<RunProfileOption>> {
+    let prefill_count = parse_pp(r.pp)?.len();
+    Ok(match runtime {
+        Runtime::Basert => {
+            let timing = benchmark_timing(prefill_count, cfg!(target_os = "macos"));
+            vec![
+                RunProfileOption {
+                    profile: BenchmarkProfile::Standard,
+                    label: "Standard".to_string(),
+                    duration: BenchmarkProfile::Standard.duration(timing),
+                    detail: "Fastest; thermal state may affect comparability".to_string(),
+                },
+                RunProfileOption {
+                    profile: BenchmarkProfile::ThermallyControlled,
+                    label: "Thermally controlled".to_string(),
+                    duration: BenchmarkProfile::ThermallyControlled.duration(timing),
+                    detail: "Waits for thermal recovery between workloads".to_string(),
+                },
+            ]
+        }
+        Runtime::LlamaCpp => {
+            let count = (prefill_count + 1) as f64;
+            vec![
+                RunProfileOption {
+                    profile: BenchmarkProfile::Standard,
+                    label: if r.warmup == 0 {
+                        "Standard — no warmup".to_string()
+                    } else {
+                        "Standard — native warmup".to_string()
+                    },
+                    duration: "no cooldown waits".to_string(),
+                    detail: "Total runtime depends on your model and device".to_string(),
+                },
+                RunProfileOption {
+                    profile: BenchmarkProfile::ThermallyControlled,
+                    label: "Thermally controlled".to_string(),
+                    duration: format!(
+                        "adds {}–{} of waits",
+                        format_duration(count * CONDITIONING_STABLE_WINDOW_SECONDS),
+                        format_duration(count * CONDITIONING_MAXIMUM_WAIT_SECONDS)
+                    ),
+                    detail:
+                        "Runs each workload separately, reloading the model after each cooldown"
+                            .to_string(),
+                },
+            ]
+        }
+    })
 }
 
 /// One prompt decides everything: which profile, and whether to start at all.
@@ -425,19 +478,19 @@ fn choose_run_profile(
     }
 }
 
-fn announce_profile(ui: TerminalUi, profile: BenchmarkProfile, duration: &str) {
+fn announce_profile(ui: TerminalUi, label: &str, duration: &str) {
     if duration.is_empty() {
         println!(
             "{} {}",
             ui.success("✓"),
-            ui.strong(format!("Selected: {}", profile.name()))
+            ui.strong(format!("Selected: {label}"))
         );
         return;
     }
     println!(
         "{} {} — {}",
         ui.success("✓"),
-        ui.strong(format!("Selected: {}", profile.name())),
+        ui.strong(format!("Selected: {label}")),
         ui.accent_bold(duration)
     );
 }

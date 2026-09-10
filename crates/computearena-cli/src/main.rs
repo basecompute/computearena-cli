@@ -13,6 +13,8 @@ mod runtimes;
 mod submission;
 mod telemetry;
 mod theme;
+#[cfg(unix)]
+mod tui;
 mod ui;
 
 use auth::{load_api_session, login, logout, resolve_api_url};
@@ -57,6 +59,7 @@ use serde_json::json;
 use serde_json::Value;
 #[cfg(test)]
 use std::fs;
+use std::io::IsTerminal;
 #[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
@@ -240,6 +243,12 @@ fn session(
     harness: Option<PathBuf>,
     api_url: &str,
 ) -> Result<()> {
+    // A terminal on both ends gets the full-screen interface; pipes, redirects
+    // and other platforms keep the printed session unchanged.
+    #[cfg(unix)]
+    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        return tui::session(runtime, choose_runtime, paths, harness, api_url);
+    }
     let ui = TerminalUi::detect();
     print_banner(ui);
     let mut ask_runtime = choose_runtime;
