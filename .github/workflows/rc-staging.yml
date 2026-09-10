@@ -1,0 +1,203 @@
+name: RC staging
+
+# Publishes an internal staging pre-release whenever a release-candidate branch
+# (`rc-X.Y.Z`) changes. Every feature merge into the rc branch rebuilds and
+# replaces the `staging-X.Y.Z` pre-release on THIS repository — the same event
+# that redeploys the web app's staging environment, so testers always get a
+# matched pair.
+#
+# The tag is deliberately not a `v*` tag, so release.yml can never fire from it.
+# Tag and pre-release are recreated in place on every push and removed by
+# rc-cleanup.yml when the rc pull request closes. Nothing here is public: this
+# repository is internal and there is no mirror export (unlike BaseRT).
+#
+# The build is build.yml, shared with release.yml, so what gets staged is what
+# would ship. The rc branch must already carry the version it names (see
+# .github/scripts/check_version.sh); a mismatch fails here before any build.
+
+on:
+  push:
+    branches:
+      - "rc-*"
+  # Re-stage an rc branch by hand: choose it under "Use workflow from". GitHub
+  # only lists the workflow once main carries this file, i.e. after the first
+  # rc that includes it has merged.
+  workflow_dispatch:
+
+# One staging build per rc branch; a newer push cancels the superseded one.
+concurrency:
+  group: rc-staging-${{ github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  meta:
+    name: Gate + version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+      sha: ${{ steps.v.outputs.sha }}
+      branch: ${{ steps.v.outputs.branch }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - id: v
+        # Branch names come in through env, never inlined into the script.
+        env:
+          BRANCH: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          case "$BRANCH" in
+            rc-*) ;;
+            *) echo "::error::'$BRANCH' is not an rc-* branch; staging builds come from release-candidate branches only"; exit 1 ;;
+          esac
+          VERSION="${BRANCH#rc-}"
+          .github/scripts/check_version.sh "$VERSION"
+          {
+            echo "version=$VERSION"
+            echo "tag=staging-${VERSION}"
+            echo "sha=$SHA"
+            echo "branch=$BRANCH"
+          } >> "$GITHUB_OUTPUT"
+          echo "Staging $BRANCH at $SHA as staging-${VERSION}"
+
+  build:
+    name: Build
+    needs: meta
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ needs.meta.outputs.sha }}
+      version: ${{ needs.meta.outputs.version }}
+      suffix: "-staging"
+
+  publish:
+    name: Publish staging pre-release
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    # The build jobs run with a read-only token; only this job, which executes
+    # no repository code, can write.
+    permissions:
+      contents: write        # recreate the staging tag and pre-release
+      pull-requests: write   # keep the link on the rc pull request current
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      TAG: ${{ needs.meta.outputs.tag }}
+      VERSION: ${{ needs.meta.outputs.version }}
+      SHA: ${{ needs.meta.outputs.sha }}
+      BRANCH: ${{ needs.meta.outputs.branch }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bundle-*
+          merge-multiple: true
+          path: dist
+
+      - name: Verify bundle checksums
+        run: |
+          cd dist
+          ls -l
+          sha256sum -c -- *.sha256
+
+      - name: Write the install snippet
+        # Shared by the release notes and the pull-request comment. Pinned to
+        # this tag rather than "latest staging", so the command still installs
+        # the build under discussion after a newer rc exists. `gh` handles the
+        # auth: this repository is internal, so a plain curl of the asset URL
+        # would 404 rather than look unauthorized.
+        run: |
+          cat > "$RUNNER_TEMP/install.sh" <<'EOF'
+          case "$(uname -s)-$(uname -m)" in
+            Darwin-arm64)  P=macos-arm64 ;;
+            Linux-x86_64)  P=linux-x86_64 ;;
+            Linux-aarch64) P=linux-arm64 ;;
+            *) echo "no ComputeArena bundle for $(uname -s)/$(uname -m)" >&2; P= ;;
+          esac
+          D="${COMPUTEARENA_INSTALL_DIR:-$HOME/.basert}"; mkdir -p "$D"
+          gh release download @TAG@ --repo @REPO@ --pattern "computearena-${P:?}-*.tar.gz" -O - \
+            | tar -xzf - -C "$D" computearena && "$D/computearena" --version
+          EOF
+          sed -i "s|@TAG@|$TAG|g; s|@REPO@|$REPO|g" "$RUNNER_TEMP/install.sh"
+          cat "$RUNNER_TEMP/install.sh"
+
+      - name: Recreate the staging pre-release
+        id: release
+        run: |
+          # Replace in place so each push refreshes the same tag. Delete the tag
+          # ref explicitly too: `gh release create --target` reuses an existing
+          # tag at its old commit, which would attach fresh bundles to a stale
+          # revision.
+          gh release delete "$TAG" --repo "$REPO" --yes --cleanup-tag 2>/dev/null || true
+          gh api -X DELETE "repos/$REPO/git/refs/tags/$TAG" >/dev/null 2>&1 || true
+          NOTES="$(cat <<EOF
+          Internal staging build of the ComputeArena CLI **${VERSION}** from \`${BRANCH}\` at ${SHA} ([workflow run](${RUN_URL})).
+
+          ⚠️ Pre-release, staging only. Recreated on every push to \`${BRANCH}\` and removed when the release candidate merges. Not for public distribution.
+
+          Each \`.tar.gz\` holds the \`computearena\` binary, \`LICENSE\`, and \`README.md\`; the \`.sha256\` beside it verifies the archive. Bundles: macOS arm64, Linux x86_64, Linux arm64 (glibc 2.31 or newer). Every bundle passed the offline smoke test (version, list, a stub benchmark run, verify, inspect, tamper rejection) before upload.
+
+          **Install** — needs \`gh auth login\` with access to this repository. Installs to \`~/.basert\`, like the web quickstart; override with \`COMPUTEARENA_INSTALL_DIR\`.
+
+          \`\`\`sh
+          $(cat "$RUNNER_TEMP/install.sh")
+          \`\`\`
+
+          Then point it at the staging environment, for example \`computearena --api-url https://staging.computearena.ai/api/v1 basert\`.
+          EOF
+          )"
+          gh release create "$TAG" \
+            --repo "$REPO" \
+            --title "Staging ${VERSION} (rc)" \
+            --notes "$NOTES" \
+            --prerelease \
+            --target "$SHA" \
+            dist/*
+          URL="$(gh release view "$TAG" --repo "$REPO" --json url --jq .url)"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Published $URL"
+
+      - name: Update the link on the rc pull request
+        env:
+          URL: ${{ steps.release.outputs.url }}
+        run: |
+          PR="$(gh pr list --repo "$REPO" --head "$BRANCH" --base main --state open --json number --jq '.[0].number // empty')"
+          if [ -z "$PR" ]; then
+            echo "No open $BRANCH -> main pull request; nothing to comment on."
+            exit 0
+          fi
+          # One sticky comment per staging tag, edited on each refresh, so a
+          # long-lived rc pull request does not collect a comment per merge.
+          MARKER="<!-- rc-staging:${TAG} -->"
+          SHORT="$(printf '%s' "$SHA" | cut -c1-12)"
+          BODY="$(cat <<EOF
+          ${MARKER}
+          🧪 **Staging build ready** (internal): ${URL}
+
+          Built from ${SHORT} and smoke-tested on macOS arm64, Linux x86_64, and Linux arm64. Refreshed on every push to \`${BRANCH}\`; not published publicly.
+
+          <details><summary>Install this build</summary>
+
+          Needs \`gh auth login\`. Installs to \`~/.basert\` (override with \`COMPUTEARENA_INSTALL_DIR\`).
+
+          \`\`\`sh
+          $(cat "$RUNNER_TEMP/install.sh")
+          \`\`\`
+
+          </details>
+          EOF
+          )"
+          EXISTING="$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
+            | jq -r --arg m "$MARKER" '.[] | select(.body | startswith($m)) | .id' | tail -n 1)"
+          if [ -n "$EXISTING" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" -f body="$BODY" >/dev/null
+            echo "Updated staging comment on PR #$PR"
+          else
+            gh pr comment "$PR" --repo "$REPO" --body "$BODY"
+            echo "Commented on PR #$PR"
+          fi

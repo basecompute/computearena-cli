@@ -52,6 +52,15 @@ instead of contacting GitHub. Prebuilt bundles exist for macOS/arm64 and
 Linux/arm64 with CUDA (BaseRT) and for macOS and Linux CPU or Metal builds
 (llama.cpp); other platforms and GPU builds of llama.cpp are installed by hand.
 
+## Releases
+
+Prebuilt bundles for macOS arm64, Linux x86_64, and Linux arm64 are published
+on this repository: a `staging-<version>` pre-release refreshed on every push
+to the current `rc-*` branch, and a `v<version>` release once that branch
+merges to `main`. Each `.tar.gz` holds the `computearena` binary, `LICENSE`,
+and this file, with a `.sha256` sidecar. See [docs/releasing.md](docs/releasing.md)
+for the install snippet, the version gate, and how to cut a release.
+
 ## BaseRT adapter
 
 ComputeArena looks for `basert-benchmark-harness` on `PATH`. The harness must

@@ -1,0 +1,142 @@
+name: Release
+
+# Publishes a ComputeArena CLI release on THIS repository when a `v*` tag is
+# pushed. Releases are cut from main after the rc pull request merges:
+#
+#   git tag -a v0.1.0 -m "ComputeArena CLI 0.1.0" && git push origin v0.1.0
+#
+# Gates run before anything is built: the tag equals the Cargo workspace
+# version, is newer than the previous release, and points at a commit on main.
+# The bundles come from build.yml — the same build that staged this rc — and
+# the release is created as a draft, given every bundle, and only then
+# published and marked latest, so a half-uploaded release never goes live.
+#
+# There is no public mirror repository and no mirror token (unlike BaseRT).
+# Public distribution through downloads.basecompute.co is a separate step that
+# can consume these assets by their stable names.
+
+on:
+  push:
+    tags:
+      - "v*"
+      # Never let a candidate or staging tag ship a release. rc-staging.yml
+      # already uses non-`v` tags (staging-*); this excludes the near misses.
+      - "!v*-rc*"
+      - "!v*-staging*"
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  meta:
+    name: Gate + version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+      sha: ${{ steps.v.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # every tag and main, for the release gate
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - id: v
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          # Resolve the tag to its commit ourselves: for an annotated tag the
+          # event SHA can be the tag object, and every bundle must be built
+          # from the commit the release will point at.
+          SHA="$(git rev-parse "${TAG}^{commit}")"
+          git checkout -q "$SHA"
+          .github/scripts/check_version.sh "$VERSION" --release
+          {
+            echo "version=$VERSION"
+            echo "tag=$TAG"
+            echo "sha=$SHA"
+          } >> "$GITHUB_OUTPUT"
+          echo "Releasing $TAG ($VERSION) at $SHA"
+
+  build:
+    name: Build
+    needs: meta
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ needs.meta.outputs.sha }}
+      version: ${{ needs.meta.outputs.version }}
+      suffix: ""
+
+  publish:
+    name: Publish release
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      TAG: ${{ needs.meta.outputs.tag }}
+      VERSION: ${{ needs.meta.outputs.version }}
+      SHA: ${{ needs.meta.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.sha }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bundle-*
+          merge-multiple: true
+          path: dist
+
+      - name: Verify bundle checksums
+        run: |
+          cd dist
+          ls -l
+          sha256sum -c -- *.sha256
+
+      - name: Create the release (draft until every bundle is attached)
+        run: |
+          # A published release for this tag is never touched: deleting it
+          # would be the one irreversible step here, so a deliberate re-release
+          # means removing it by hand first. A leftover draft from a failed
+          # attempt is replaced.
+          STATE="$(gh release view "$TAG" --repo "$REPO" --json isDraft --jq .isDraft 2>/dev/null || true)"
+          if [ "$STATE" = "false" ]; then
+            echo "::error::$TAG is already published on $REPO; delete that release first if this is a deliberate re-release"
+            exit 1
+          fi
+          if [ "$STATE" = "true" ]; then
+            gh release delete "$TAG" --repo "$REPO" --yes
+            echo "Replaced a leftover draft for $TAG"
+          fi
+          # A curated note at docs/release-notes/<version>.md wins; otherwise
+          # GitHub's generated notes (merged pull requests since the last tag)
+          # are enough for an internal repository.
+          NOTES_FILE="docs/release-notes/${VERSION}.md"
+          if [ -s "$NOTES_FILE" ]; then
+            NOTES_ARGS=(--notes-file "$NOTES_FILE")
+            echo "Using $NOTES_FILE"
+          else
+            NOTES_ARGS=(--generate-notes)
+            echo "No $NOTES_FILE; generating notes"
+          fi
+          gh release create "$TAG" \
+            --repo "$REPO" \
+            --title "ComputeArena CLI ${VERSION}" \
+            --verify-tag \
+            --draft \
+            "${NOTES_ARGS[@]}" \
+            dist/*
+
+      - name: Publish and mark latest
+        run: |
+          gh release edit "$TAG" --repo "$REPO" --draft=false --latest
+          gh release view "$TAG" --repo "$REPO" --json url,assets --jq '"Published \(.url) with \(.assets | length) assets"'
