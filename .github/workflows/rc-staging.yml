@@ -75,6 +75,8 @@ jobs:
       ref: ${{ needs.meta.outputs.sha }}
       version: ${{ needs.meta.outputs.version }}
       suffix: "-staging"
+      require_signing: false   # sign + notarize when the Apple secrets exist; warn, not fail, before then
+    secrets: inherit
 
   publish:
     name: Publish staging pre-release
@@ -94,6 +96,7 @@ jobs:
       SHA: ${{ needs.meta.outputs.sha }}
       BRANCH: ${{ needs.meta.outputs.branch }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      MACOS_SIGNED: ${{ needs.build.outputs.macos_signed }}
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -159,12 +162,17 @@ jobs:
           # revision.
           gh release delete "$TAG" --repo "$REPO" --yes --cleanup-tag 2>/dev/null || true
           gh api -X DELETE "repos/$REPO/git/refs/tags/$TAG" >/dev/null 2>&1 || true
+          if [ "$MACOS_SIGNED" = "true" ]; then
+            SIGNING_LINE="The macOS binary is Developer ID signed (hardened runtime) and notarized by Apple."
+          else
+            SIGNING_LINE="⚠️ The macOS binary carries only the linker's ad-hoc signature: the Apple signing secrets were not configured for this run."
+          fi
           NOTES="$(cat <<EOF
           Internal staging build of the ComputeArena CLI **${VERSION}** from \`${BRANCH}\` at ${SHA} ([workflow run](${RUN_URL})).
 
           ⚠️ Pre-release, staging only. Recreated on every push to \`${BRANCH}\` and removed when the release candidate merges. Not for public distribution.
 
-          Each \`.tar.gz\` holds the \`computearena\` binary, \`LICENSE\`, and \`README.md\`; the \`.sha256\` beside it verifies the archive, and the \`.sig\` + \`.pem\` pair is a Sigstore keyless signature from this workflow (verify command in \`docs/releasing.md\`). Bundles: macOS arm64, Linux x86_64, Linux arm64 (glibc 2.31 or newer). Every bundle passed the offline smoke test (version, list, a stub benchmark run, verify, inspect, tamper rejection) before upload.
+          Each \`.tar.gz\` holds the \`computearena\` binary, \`LICENSE\`, and \`README.md\`; the \`.sha256\` beside it verifies the archive, and the \`.sig\` + \`.pem\` pair is a Sigstore keyless signature from this workflow (verify command in \`docs/releasing.md\`). Bundles: macOS arm64, Linux x86_64, Linux arm64 (glibc 2.31 or newer). Every bundle passed the offline smoke test (version, list, a stub benchmark run, verify, inspect, tamper rejection) before upload. ${SIGNING_LINE}
 
           **Install** — needs \`gh auth login\` with access to this repository. Installs to \`~/.basert\`, like the web quickstart; override with \`COMPUTEARENA_INSTALL_DIR\`.
 

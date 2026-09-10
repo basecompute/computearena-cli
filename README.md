@@ -58,9 +58,10 @@ Prebuilt bundles for macOS arm64, Linux x86_64, and Linux arm64 are published
 on this repository: a `staging-<version>` pre-release refreshed on every push
 to the current `rc-*` branch, and a `v<version>` release once that branch
 merges to `main`. Each `.tar.gz` holds the `computearena` binary, `LICENSE`,
-and this file, with a `.sha256` sidecar and a Sigstore signature. See
-[docs/releasing.md](docs/releasing.md) for the install snippet, signature
-verification, the version gate, and how to cut a release.
+and this file, with a `.sha256` sidecar and a Sigstore signature; the macOS
+binary is Developer ID signed and notarized. See [docs/releasing.md](docs/releasing.md)
+for the install snippet, signature verification, the version gate, and how
+to cut a release.
 
 ## BaseRT adapter
 
