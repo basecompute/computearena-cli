@@ -28,6 +28,25 @@ Windows is not supported yet.
 
 ## Install
 
+The installer downloads the newest release for your macOS or Linux machine,
+verifies the archive against the SHA-256 digest GitHub publishes for it, and
+installs `computearena` into `~/.local/bin`:
+
+```sh
+curl -LsSf https://computearena.ai/install.sh | sh
+```
+
+It needs `curl`, `tar`, and Python 3, never uses `sudo`, and asks before
+changing anything (`sh -s -- --yes` for unattended use). It adds the install
+directory to your shell profile after backing the profile up, or leaves the
+profile alone with `COMPUTEARENA_NO_MODIFY_PATH=1`; `COMPUTEARENA_INSTALL_DIR`
+picks another directory. A binary already there is kept as
+`computearena.previous`. Reports, login sessions, and installed runtimes are
+not touched. Only when no stable release exists yet does it fall back to the
+newest `staging-` pre-release, and it says so.
+
+### Manual download
+
 Each [release](https://github.com/basecompute/computearena-cli/releases) ships
 one archive per platform, `computearena-<platform>-<version>.tar.gz`, where
 `<platform>` is `macos-arm64`, `linux-x86_64`, or `linux-arm64`. The archive
@@ -46,9 +65,12 @@ tar -xzf "$ASSET" -C ~/.local/bin computearena
 computearena --version
 ```
 
-The Linux binaries run on glibc 2.31 or newer. The macOS binary is signed with
-Base Compute's Developer ID and notarized by Apple, so a copy downloaded in a
-browser runs without Gatekeeper objections. Every archive also carries a
+The Linux binaries run on glibc 2.31 or newer. The macOS binary is not
+signed with an Apple Developer ID, the same as BaseRT's binaries. Installed
+by the installer or by `curl` piped into `tar`, it carries no quarantine
+attribute and runs without Gatekeeper getting involved; a copy downloaded in
+a browser and extracted in Finder is quarantined until
+`xattr -d com.apple.quarantine computearena`. Every archive carries a
 Sigstore signature (`.sig` and `.pem`); [docs/releasing.md](docs/releasing.md)
 has the `cosign` command that proves an archive was built by this repository's
 release workflow.
