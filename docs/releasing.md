@@ -138,24 +138,70 @@ cosign verify-blob \
 For a staging bundle, match `rc-staging\.yml@refs/heads/rc-` instead.
 Any cosign 2.x verifies these; the workflows pin cosign 2.6.5.
 
-Two things this is not:
+One thing this is not: private. Rekor is a public transparency log. Each
+entry records the artifact digest and the signing certificate, which names
+this internal repository, the workflow file, and the tag or branch. BaseRT's
+workflow accepted the same exposure.
 
-- **Private.** Rekor is a public transparency log. Each entry records the
-  artifact digest and the signing certificate, which names this internal
-  repository, the workflow file, and the tag or branch. BaseRT's workflow
-  accepted the same exposure.
-- **Apple code signing.** The macOS binary carries only the ad-hoc signature
-  the Apple linker applies to every arm64 executable; it has no Developer ID
-  and is not notarized, same as the BaseRT engine binaries. Installing with
-  `gh release download` or `curl` piped into `tar` sets no quarantine
-  attribute, so Gatekeeper does not intervene. A bundle downloaded in a
-  browser and extracted in Finder is quarantined, and macOS refuses to run
-  the binary until `xattr -d com.apple.quarantine computearena`. Developer ID
-  signing and notarization need an Apple Developer Program membership for the
-  organisation, a "Developer ID Application" certificate and an App Store
-  Connect API key stored as repository secrets, and a signing step gated on
-  those secrets; a bare command-line binary can be notarized but not stapled,
-  so Gatekeeper checks the ticket online.
+## Apple signing and notarization
+
+The macOS binary is signed with the organisation's Developer ID Application
+certificate, with the hardened runtime and a trusted timestamp, and then
+notarized by Apple, inside the macOS build job before packaging. This is the
+part BaseRT does not do: its engine binaries carry only the ad-hoc signature
+the linker applies. A `v*` release fails without it; a staging build signs
+when the secrets exist and otherwise publishes with a warning and says so in
+its notes.
+
+Everything runs from `.github/scripts/macos_sign.sh`, which imports the
+certificate into a throwaway keychain, signs, verifies the Developer ID
+authority and the runtime flag, submits a zip of the binary with
+`notarytool --wait`, and deletes the keychain afterwards. The code signing
+identifier is `co.basecompute.computearena`.
+
+### Secrets
+
+Five repository secrets, all required together (a partial set fails the
+build, since it means a rotation went wrong), plus one optional:
+
+| Secret | Contents |
+| --- | --- |
+| `APPLE_DEVELOPER_ID_P12` | base64 of the "Developer ID Application" certificate and private key, exported from Keychain Access as `.p12` |
+| `APPLE_DEVELOPER_ID_P12_PASSWORD` | the password chosen for that export |
+| `APPLE_NOTARY_KEY_P8` | an App Store Connect API key (`.p8`), Team key with the Developer role or higher, as raw PEM or base64 |
+| `APPLE_NOTARY_KEY_ID` | that key's ID |
+| `APPLE_NOTARY_ISSUER_ID` | the issuer ID shown on the App Store Connect keys page |
+| `APPLE_DEVELOPER_ID_IDENTITY` | optional: the identity to sign with, e.g. `Developer ID Application: Base Compute (TEAMID)`; by default the Developer ID Application identity inside the `.p12` is used |
+
+From a Mac that holds the certificate:
+
+```sh
+gh secret set APPLE_DEVELOPER_ID_P12 --repo basecompute/computearena-cli --body "$(base64 -i developer-id.p12)"
+gh secret set APPLE_DEVELOPER_ID_P12_PASSWORD --repo basecompute/computearena-cli
+gh secret set APPLE_NOTARY_KEY_P8 --repo basecompute/computearena-cli < AuthKey_XXXXXXXXXX.p8
+gh secret set APPLE_NOTARY_KEY_ID --repo basecompute/computearena-cli --body XXXXXXXXXX
+gh secret set APPLE_NOTARY_ISSUER_ID --repo basecompute/computearena-cli --body 00000000-0000-0000-0000-000000000000
+```
+
+The certificate must include its private key; export it from the login
+keychain's "My Certificates" view, not from the certificate alone. The API
+key is created under Users and Access, Integrations, App Store Connect API,
+on the Team keys tab. Rotate the secrets when either expires; the build's
+error message names whichever is missing.
+
+### What a user sees
+
+```sh
+codesign -dvv --verify ~/.basert/computearena
+```
+
+prints `Authority=Developer ID Application: ...` and a `CodeDirectory` line
+whose flags include `runtime`. Notarization is confirmed in the workflow log
+(`notarytool` reports `Accepted` with the submission ID); a bare command-line
+binary cannot carry a stapled ticket, so Gatekeeper checks it online the first
+time a quarantined copy runs. Copies installed with `gh release download` or
+`curl` piped into `tar` are never quarantined, and a browser-downloaded copy
+now passes Gatekeeper instead of being refused.
 
 ## Troubleshooting
 
