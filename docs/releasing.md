@@ -9,8 +9,9 @@ The CLI ships as one flat tarball per platform, like the BaseRT engine bundles:
 | `computearena-linux-arm64-<version>.tar.gz` | `cross` on the hosted Ubuntu runner | arm64 Linux (for example a DGX Spark), glibc 2.31 or newer |
 
 Each archive holds `computearena`, `LICENSE`, and `README.md`, and has a
-`.sha256` sidecar. `tar -xzf <bundle> -C <dir> computearena` is a complete
-install. Windows and Intel Macs are not built; the runtime adapters and the
+`.sha256` sidecar plus a Sigstore `.sig` and `.pem` pair (see
+[Signatures](#signatures)). `tar -xzf <bundle> -C <dir> computearena` is a
+complete install. Windows and Intel Macs are not built; the runtime adapters and the
 integration tests are Unix-only today.
 
 Every bundle is built by `.github/workflows/build.yml` and smoke-tested before
@@ -111,6 +112,50 @@ tag again once the fix is on `main` (which means through another rc).
 
 The workflow refuses to touch a tag that already has a published release.
 Deleting a published release is a manual decision.
+
+## Signatures
+
+Every bundle is signed with Sigstore keyless signing (cosign) from inside the
+publishing job, which is what BaseRT's `release-sign.yml` sets out to do.
+BaseRT's copy has never actually run: it listens for the `release` event, and
+GitHub does not emit that event for a release created with the workflow
+token. Here the signing is a step of the publish job instead, and each
+signature is verified on the spot before anything is uploaded.
+
+The `.sig` and `.pem` beside a `.tar.gz` prove the archive was produced by
+this repository's `release.yml` on the named tag (or `rc-staging.yml` on the
+rc branch), was logged to Rekor at that time, and has not changed since:
+
+```sh
+cosign verify-blob \
+  --certificate computearena-macos-arm64-0.1.0.tar.gz.pem \
+  --signature   computearena-macos-arm64-0.1.0.tar.gz.sig \
+  --certificate-identity-regexp '^https://github.com/basecompute/computearena-cli/\.github/workflows/release\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  computearena-macos-arm64-0.1.0.tar.gz
+```
+
+For a staging bundle, match `rc-staging\.yml@refs/heads/rc-` instead.
+Any cosign 2.x verifies these; the workflows pin cosign 2.6.5.
+
+Two things this is not:
+
+- **Private.** Rekor is a public transparency log. Each entry records the
+  artifact digest and the signing certificate, which names this internal
+  repository, the workflow file, and the tag or branch. BaseRT's workflow
+  accepted the same exposure.
+- **Apple code signing.** The macOS binary carries only the ad-hoc signature
+  the Apple linker applies to every arm64 executable; it has no Developer ID
+  and is not notarized, same as the BaseRT engine binaries. Installing with
+  `gh release download` or `curl` piped into `tar` sets no quarantine
+  attribute, so Gatekeeper does not intervene. A bundle downloaded in a
+  browser and extracted in Finder is quarantined, and macOS refuses to run
+  the binary until `xattr -d com.apple.quarantine computearena`. Developer ID
+  signing and notarization need an Apple Developer Program membership for the
+  organisation, a "Developer ID Application" certificate and an App Store
+  Connect API key stored as repository secrets, and a signing step gated on
+  those secrets; a bare command-line binary can be notarized but not stapled,
+  so Gatekeeper checks the ticket online.
 
 ## Troubleshooting
 

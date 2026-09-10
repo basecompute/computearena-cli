@@ -8,7 +8,9 @@ name: Release
 # Gates run before anything is built: the tag equals the Cargo workspace
 # version, is newer than the previous release, and points at a commit on main.
 # The bundles come from build.yml — the same build that staged this rc — and
-# the release is created as a draft, given every bundle, and only then
+# are Sigstore-signed in this job (BaseRT's separate release-sign.yml never
+# fires, because releases created with the workflow token emit no `release`
+# event). The release is created as a draft, given every bundle, and only then
 # published and marked latest, so a half-uploaded release never goes live.
 #
 # There is no public mirror repository and no mirror token (unlike BaseRT).
@@ -79,6 +81,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write   # Sigstore keyless signing of the bundles
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
@@ -101,6 +104,24 @@ jobs:
           cd dist
           ls -l
           sha256sum -c -- *.sha256
+
+      - uses: sigstore/cosign-installer@v4.1.2
+        with:
+          cosign-release: v2.6.5   # 2.x keeps the .sig/.pem outputs BaseRT's verify recipe expects
+
+      - name: Sign bundles (Sigstore keyless)
+        # Same step as rc-staging.yml; see the note there. The certificate for
+        # a release names release.yml@refs/tags/vX.Y.Z, which is what the
+        # verify command in docs/releasing.md pins.
+        run: |
+          for f in dist/*.tar.gz; do
+            cosign sign-blob --yes --output-signature "$f.sig" --output-certificate "$f.pem" "$f"
+            cosign verify-blob --certificate "$f.pem" --signature "$f.sig" \
+              --certificate-identity-regexp "^https://github.com/${REPO}/" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com "$f" >/dev/null
+            echo "signed and verified $(basename "$f")"
+          done
+          ls -l dist
 
       - name: Create the release (draft until every bundle is attached)
         run: |

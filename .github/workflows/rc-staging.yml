@@ -12,8 +12,9 @@ name: RC staging
 # repository is internal and there is no mirror export (unlike BaseRT).
 #
 # The build is build.yml, shared with release.yml, so what gets staged is what
-# would ship. The rc branch must already carry the version it names (see
-# .github/scripts/check_version.sh); a mismatch fails here before any build.
+# would ship, and the bundles are Sigstore-signed the same way. The rc branch
+# must already carry the version it names (see .github/scripts/check_version.sh);
+# a mismatch fails here before any build.
 
 on:
   push:
@@ -84,6 +85,7 @@ jobs:
     permissions:
       contents: write        # recreate the staging tag and pre-release
       pull-requests: write   # keep the link on the rc pull request current
+      id-token: write        # Sigstore keyless signing of the bundles
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
@@ -104,6 +106,28 @@ jobs:
           cd dist
           ls -l
           sha256sum -c -- *.sha256
+
+      - uses: sigstore/cosign-installer@v4.1.2
+        with:
+          cosign-release: v2.6.5   # 2.x keeps the .sig/.pem outputs BaseRT's verify recipe expects
+
+      - name: Sign bundles (Sigstore keyless)
+        # Keyless: the job's OIDC token buys a short-lived Fulcio certificate
+        # naming this repository, workflow file, and ref, and the signature is
+        # logged to Rekor (a public log). BaseRT's release-sign.yml intends the
+        # same but has never run: the `release` event it listens for is not
+        # emitted for releases created with the workflow token. So the signing
+        # happens here, before the assets are uploaded, and is verified on the
+        # spot so a broken signature cannot publish.
+        run: |
+          for f in dist/*.tar.gz; do
+            cosign sign-blob --yes --output-signature "$f.sig" --output-certificate "$f.pem" "$f"
+            cosign verify-blob --certificate "$f.pem" --signature "$f.sig" \
+              --certificate-identity-regexp "^https://github.com/${REPO}/" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com "$f" >/dev/null
+            echo "signed and verified $(basename "$f")"
+          done
+          ls -l dist
 
       - name: Write the install snippet
         # Shared by the release notes and the pull-request comment. Pinned to
@@ -140,7 +164,7 @@ jobs:
 
           ⚠️ Pre-release, staging only. Recreated on every push to \`${BRANCH}\` and removed when the release candidate merges. Not for public distribution.
 
-          Each \`.tar.gz\` holds the \`computearena\` binary, \`LICENSE\`, and \`README.md\`; the \`.sha256\` beside it verifies the archive. Bundles: macOS arm64, Linux x86_64, Linux arm64 (glibc 2.31 or newer). Every bundle passed the offline smoke test (version, list, a stub benchmark run, verify, inspect, tamper rejection) before upload.
+          Each \`.tar.gz\` holds the \`computearena\` binary, \`LICENSE\`, and \`README.md\`; the \`.sha256\` beside it verifies the archive, and the \`.sig\` + \`.pem\` pair is a Sigstore keyless signature from this workflow (verify command in \`docs/releasing.md\`). Bundles: macOS arm64, Linux x86_64, Linux arm64 (glibc 2.31 or newer). Every bundle passed the offline smoke test (version, list, a stub benchmark run, verify, inspect, tamper rejection) before upload.
 
           **Install** — needs \`gh auth login\` with access to this repository. Installs to \`~/.basert\`, like the web quickstart; override with \`COMPUTEARENA_INSTALL_DIR\`.
 
