@@ -326,6 +326,7 @@ fn execute(
             };
             let (harness, model) =
                 benchmark::identify_benchmark_paths(runtime, harness, &model, paths)?;
+            benchmark::print_resolved_paths(runtime, &harness)?;
             let Some(cooldown_enabled) = runtime.adapter().confirm(
                 &BenchmarkRequest {
                     model: &model,
@@ -479,6 +480,7 @@ fn interactive(
                         continue;
                     }
                 };
+                benchmark::print_resolved_paths(runtime, &selected_harness)?;
                 let confirmation = runtime.adapter().confirm(
                     &BenchmarkRequest {
                         model: &model,

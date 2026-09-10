@@ -165,7 +165,7 @@ impl Capture {
             let reader = thread::spawn(move || {
                 for line in BufReader::new(source).lines() {
                     let Ok(line) = line else { break };
-                    if sender.send(JobEvent::Line(line)).is_err() {
+                    if sender.send(JobEvent::Line(plain_text(&line))).is_err() {
                         break;
                     }
                 }
@@ -197,6 +197,55 @@ impl Drop for Capture {
     }
 }
 
+/// What a captured line looks like once terminal control is taken out of it.
+/// A runtime that believes it is talking to a terminal colours its output and
+/// rewrites progress in place with carriage returns; the drawing layer drops
+/// the escape byte and prints the rest as text, so `[2K` and `[1;38;2;…m`
+/// would litter the log pane. Escape sequences go, a carriage return keeps
+/// only what was written after it (the state the terminal would have shown),
+/// tabs become spaces, and other control characters are dropped.
+pub(crate) fn plain_text(line: &str) -> String {
+    let mut text = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(character) = chars.next() {
+        match character {
+            '\x1b' => match chars.next() {
+                // CSI: parameters and intermediates, then one final byte.
+                Some('[') => {
+                    for next in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+                // OSC: up to BEL or ESC \ (the ESC is consumed here, the
+                // backslash by the next iteration as an ordinary character
+                // is avoided by checking for it).
+                Some(']') => {
+                    while let Some(next) = chars.next() {
+                        if next == '\x07' {
+                            break;
+                        }
+                        if next == '\x1b' {
+                            if chars.peek() == Some(&'\\') {
+                                chars.next();
+                            }
+                            break;
+                        }
+                    }
+                }
+                // Two-byte escapes (charset selection, keypad modes, ...).
+                Some(_) | None => {}
+            },
+            '\r' => text.clear(),
+            '\t' => text.push_str("    "),
+            character if character.is_control() => {}
+            character => text.push(character),
+        }
+    }
+    text
+}
+
 /// A writable handle to the controlling terminal that survives the redirection
 /// above, used as the drawing target for the whole session.
 pub(crate) fn tty() -> std::io::Result<std::fs::File> {
@@ -220,6 +269,23 @@ fn _assert_traits(file: std::fs::File) -> RawFd {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn terminal_control_is_taken_out_of_captured_lines() {
+        assert_eq!(
+            plain_text("\x1b[1;38;2;195;255;77m→ pp128 · warmup\x1b[0m"),
+            "→ pp128 · warmup"
+        );
+        // In-place progress: only the final state survives a carriage return.
+        assert_eq!(
+            plain_text("\r\x1b[2K→ pp128 · at least 3s\r\x1b[2K✓ pp128 · 417.70 tok/s"),
+            "✓ pp128 · 417.70 tok/s"
+        );
+        assert_eq!(plain_text("\x1b]0;title\x07after"), "after");
+        assert_eq!(plain_text("\x1b]0;title\x1b\\after"), "after");
+        assert_eq!(plain_text("a\tb\x07c"), "a    bc");
+        assert_eq!(plain_text("plain ✓ text"), "plain ✓ text");
+    }
 
     #[test]
     fn scrolling_stops_at_the_first_line_and_resumes_following_at_the_newest() {
