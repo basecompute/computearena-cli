@@ -198,13 +198,27 @@ impl Cooldown {
     }
 }
 
-pub(crate) fn policy() -> Value {
+fn policy_for(scope: &str, note: &str) -> Value {
     json!({"schema":"computearena-conditioning/1","mode":"idle_reset_then_warm","cooldown_enabled":true,
-        "scope":"before_each_workload_process","criterion":"fixed_die_temperature_sensors_only",
+        "scope":scope,"criterion":"fixed_die_temperature_sensors_only",
         "maximum_wait_s":CONDITIONING_MAXIMUM_WAIT_SECONDS,"fallback_wait_s":CONDITIONING_FALLBACK_WAIT_SECONDS,
         "stable_window_s":CONDITIONING_STABLE_WINDOW_SECONDS,"sample_interval_s":POLL_SECONDS,
         "temperature_margin_c":MARGIN_C,"temperature_slope_limit_c_per_s":SLOPE_C_PER_SECOND,
-        "note":"Model loading and native warmup follow the wait; this is not in-runtime BaseRT conditioning"})
+        "note":note})
+}
+
+pub(crate) fn policy() -> Value {
+    policy_for(
+        "before_each_workload_process",
+        "Model loading and native warmup follow each wait",
+    )
+}
+
+pub(crate) fn before_suite_policy() -> Value {
+    policy_for(
+        "before_suite_process",
+        "One wait precedes the BaseRT harness process; there are no between-workload waits",
+    )
 }
 
 #[cfg(test)]

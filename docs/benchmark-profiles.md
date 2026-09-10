@@ -4,7 +4,7 @@ Both adapters present the benchmark plan, resolved executable/model paths, workl
 sizes, memory/heat warning, offline-save notice, and the same profile selector:
 
 1. Standard (default): no cooldown waits.
-2. Thermally controlled: opt-in waits before workloads.
+2. Thermally controlled: opt-in waits at the runtime boundary described below.
 
 Picking a profile is the start confirmation: the selector's entries read
 `Start — <profile> · <estimate>`, alongside a details entry and `Cancel`, so one
@@ -15,13 +15,25 @@ on the thermally controlled entry.
 controlled. Piped input must use `--yes`. Bad model selections or preparation errors return to
 the menu; end-of-input exits instead of repeatedly prompting.
 
+## BaseRT cooldown semantics
+
+The currently released BaseRT harness has no external phase markers. ComputeArena
+therefore waits once before launching the full benchmark suite, then observes the one
+harness process. It does not pass the legacy `--cooldown` option, because that option
+belongs to the harness's multi-pass telemetry protocol. The wait adds 10 seconds to
+3 minutes with usable sensors, or about 30 seconds with the sensorless fallback.
+
+A future harness can provide native per-workload conditioning together with native
+same-run telemetry. ComputeArena uses that path only when the descriptor advertises
+`features.same_run_telemetry: true` and `telemetry_schema: basert-telemetry/4`.
+
 ## llama.cpp cooldown semantics
 
 llama-bench has no external pause hook between workload phases in a running sweep.
 ComputeArena launches each requested PP size with TG0 and the requested TG workload
 with PP0 in a **fresh process**. It waits before each launch, then loading and native
-warmup occur. This is not equivalent to BaseRT's in-runtime conditioning or a reset
-immediately before a measured repetition. Standard mode still uses one process.
+warmup occur. This is not equivalent to BaseRT's one pre-suite wait or a reset immediately
+before a measured repetition. Standard mode still uses one process.
 
 The controller uses a fixed set of initially readable CPU/GPU/die-labelled temperature
 sensors. It excludes battery/storage/ambient labels. The first stable window establishes
@@ -55,13 +67,13 @@ use `llama-bench-independent-pp-tg/1`. No database migration is needed.
 | Interaction/capability | Status |
 | --- | --- |
 | Plan, profiles, confirmation, colors, full binary paths | Shared behavior, with accurate runtime-specific details |
-| Progress | Cooldown status and per-workload stages in conditioned mode; telemetry heartbeat in standard mode |
+| Progress | BaseRT suite cooldown or llama.cpp per-workload cooldown; telemetry heartbeat while an externally observed process runs |
 | Local reports, signature checks, login, preview, submission | Shared commands and handling |
 | Model acquisition | BaseRT catalogue/pull hints; GGUF path plus Hugging Face/browser download hints |
 | Warmup | BaseRT repetitions/minimum duration; llama.cpp native warmup (positive --warmup enables it) |
-| Memory/temperature | BaseRT diagnostic replays; llama.cpp observed process windows including loading/warmup |
-| Energy and runtime KV-cache allocation | Not exposed by the current llama.cpp adapter; explicitly unavailable |
-| Cooldown location | BaseRT inside the harness; llama.cpp before fresh workload-process launches |
+| Memory/temperature | Current BaseRT and llama.cpp: observed process windows including loading/warmup; future BaseRT may provide native same-run detail |
+| Energy and runtime KV-cache allocation | Not exposed by external observation; available only when a future runtime protocol reports it from the measured run |
+| Cooldown location | Current BaseRT: once before the suite; llama.cpp: before fresh workload-process launches; future BaseRT native path: harness-defined and signed |
 
 Hardware cooldown effectiveness and observer throughput overhead still require Metal,
 CUDA, and ROCm tests. Automated tests use fake clocks and runtime executables; they

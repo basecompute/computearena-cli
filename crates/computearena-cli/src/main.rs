@@ -894,15 +894,16 @@ mod tests {
                 "decode": [{"generated_tokens": 128, "elapsed_ns": 20}]
             }
         });
-        assert!(validate_harness_result(&valid).is_ok());
+        assert!(validate_harness_result(&valid, Some(TELEMETRY_SCHEMA)).is_ok());
 
         let mut missing_telemetry = valid.clone();
         missing_telemetry["telemetry"] = Value::Null;
-        assert!(validate_harness_result(&missing_telemetry).is_err());
+        assert!(validate_harness_result(&missing_telemetry, Some(TELEMETRY_SCHEMA)).is_err());
+        assert!(validate_harness_result(&missing_telemetry, None).is_ok());
 
         let mut invalid = valid;
         invalid["raw_samples"]["decode"][0]["elapsed_ns"] = json!(0);
-        assert!(validate_harness_result(&invalid).is_err());
+        assert!(validate_harness_result(&invalid, Some(TELEMETRY_SCHEMA)).is_err());
     }
 
     #[test]

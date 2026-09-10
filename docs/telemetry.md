@@ -4,10 +4,10 @@ Telemetry is automatic for both runtime adapters; no extra flag, credentials, or
 sudo is required. The benchmark plan states its coverage. Reports remain offline,
 signed, and explicitly submitted using the same commands and confirmation flow.
 
-BaseRT retains its harness-native `basert-telemetry/3`: unobserved headline timing
-and separate diagnostic replays. ComputeArena does not duplicate its collector.
-
-llama.cpp records `computearena-telemetry/1` under `benchmark.telemetry`:
+Current BaseRT harnesses expose replay-based `basert-telemetry/3`. ComputeArena
+deliberately does not request that mode: it runs the requested PP/TG suite once and
+wraps that process with the same external observer used for llama.cpp. Both adapters
+therefore record `computearena-telemetry/1` under `benchmark.telemetry`:
 
 - Process resident memory, in MiB: first, last, mean, observed peak, sample count.
   Only the launched process is sampled, not unrelated processes or its children.
@@ -25,11 +25,11 @@ llama.cpp records `computearena-telemetry/1` under `benchmark.telemetry`:
 
 ## Measurement boundaries
 
-The llama.cpp worker is initialized before launching the runtime and samples every
-second until it exits. It covers model loading, native warmup, the entire PP/TG
-sweep, and teardown. These are **concurrently observed whole-run measurements**, not
-per-PP diagnostic replay results. They must not be presented as equivalent to BaseRT
-replay peaks. One-second sampling can miss short peaks or a very short-lived process.
+The worker is initialized before launching the runtime and samples every second until
+it exits. For a standard BaseRT or llama.cpp run it covers model loading, runtime
+warmup, the entire PP/TG sweep, and teardown. These are **concurrently observed
+whole-run measurements**, not per-PP diagnostic results. One-second sampling can miss
+short peaks or a very short-lived process.
 
 The existing `benchmark.memory.process_peak_rss_mb` compatibility field carries the
 observed peak alongside its scope, units, and caveat, so existing CLI/backend memory
@@ -42,9 +42,26 @@ on timeout. Temporary output files are removed automatically. The worker owns it
 OS sensor handles and is stopped/joined on completion or failure.
 
 Energy, runtime allocator/KV-cache queries, and per-workload attribution are explicitly
-unavailable in this version. Power snapshots are not energy measurements, and a
-whole-run sensor reading is not a per-token metric. Optional llama.cpp cooldown groups telemetry by isolated workload process, still
-including loading/warmup (see benchmark-profiles.md). Matching UX does not imply identical measurement capabilities.
+unavailable in the external-observer path. Power snapshots are not energy measurements,
+and a whole-run sensor reading is not a per-token metric. Optional llama.cpp cooldown
+groups telemetry by isolated workload process, still including loading/warmup. Current
+BaseRT cooldown performs one external wait before the suite. See benchmark-profiles.md.
+
+## BaseRT capability transition
+
+Runtime selection is capability-based, not tied to a BaseRT version string:
+
+- Missing or false `features.same_run_telemetry` selects one externally observed
+  harness run and omits both `--telemetry` and the legacy multi-pass `--cooldown`.
+- `features.same_run_telemetry: true` together with
+  `telemetry_schema: basert-telemetry/4` selects the native `--telemetry` path.
+- Advertising native same-run telemetry with an unknown or missing schema fails
+  closed instead of silently changing measurement semantics.
+
+The future native schema may contain energy, KV-cache, allocator, and per-workload
+data, but only if those values are collected during the same runs that produce the
+signed throughput samples. This descriptor contract lets a new BaseRT release plug
+in without requiring a corresponding ComputeArena release.
 
 ## Overhead and validation
 
@@ -57,7 +74,8 @@ Actual GPU overhead and vendor behavior still need tests on Metal/CUDA/ROCm hard
 
 Run `cargo test --workspace --all-targets`. Tests include current-process memory,
 thread shutdown, vendor parsing, command timeouts, observed fake-child execution,
-telemetry signature tampering, JSON round trips, and unchanged BaseRT behavior.
+telemetry signature tampering, JSON round trips, current external BaseRT invocation,
+and future native capability selection.
 These tests may read local sensors/power settings but do not run GPU benchmarks.
 The CLI enables serde_json's `float_roundtrip` feature so telemetry decimals retain
 their signed representation after being saved and parsed again.

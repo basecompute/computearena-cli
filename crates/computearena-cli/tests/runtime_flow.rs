@@ -99,10 +99,11 @@ fn basert_uses_the_same_signed_binary_identity_flow() {
     header.extend(metadata);
     fs::write(&model, header).unwrap();
     let descriptor = json!({"schema":"basert-benchmark-harness-descriptor/1",
-        "runtime":{"name":"basert","version":"0.2.4"},"result_schema":"basert-benchmark-harness/1"});
+        "runtime":{"name":"basert","version":"0.2.4"},"result_schema":"basert-benchmark-harness/1",
+        "telemetry_schema":"basert-telemetry/3",
+        "features":{"telemetry":true,"same_run_telemetry":false}});
     let result = json!({"schema":"basert-benchmark-harness/1","mode":"text","runtime_version":"0.2.4",
         "chip":"Apple M5 Pro","backend":"metal","params":{"pp":"512","tg":128},
-        "telemetry":{"schema":"basert-telemetry/3"},
         "metrics":{"pp512_t_s":5120.0,"decode_t_s":128.0},
         "raw_samples":{"prefill":{"512":[{"tokens":512,"elapsed_ns":100000000}]},
             "decode":[{"generated_tokens":128,"elapsed_ns":1000000000}]}});
@@ -134,6 +135,10 @@ fn basert_uses_the_same_signed_binary_identity_flow() {
         64
     );
     assert_eq!(value["runtime"]["binary"]["version"], "0.2.4");
+    assert_eq!(
+        value["benchmark"]["telemetry"]["schema"],
+        "computearena-telemetry/1"
+    );
     let verified = Command::new(env!("CARGO_BIN_EXE_computearena"))
         .arg("verify")
         .arg(report)

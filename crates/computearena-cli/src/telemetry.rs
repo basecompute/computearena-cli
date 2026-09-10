@@ -228,6 +228,22 @@ fn unavailable(reason: &str) -> Value {
     json!({"schema":"computearena-telemetry/1","available":false,"reason":reason})
 }
 
+/// Attach runtime-neutral whole-process telemetry and retain the compatibility
+/// memory field consumed by existing local summaries and the web projection.
+/// Detailed scope and limitations remain on the telemetry object.
+pub(crate) fn attach_whole_process(benchmark: &mut Value, telemetry: Value) -> Option<f64> {
+    let peak = telemetry
+        .pointer("/process_memory/statistics/peak")
+        .and_then(Value::as_f64);
+    if let Some(peak) = peak {
+        benchmark["memory"] = json!({"process_peak_rss_mb":peak,
+            "measurement_relation":"concurrent_observer","scope":"whole_runtime_process",
+            "unit":"MiB","note":"Observed sampled peak, including loading and warmup; not a kernel high-water mark"});
+    }
+    benchmark["telemetry"] = telemetry;
+    peak
+}
+
 /// Start/end command probes are outside the runtime's measured execution.
 /// stdout is drained by wait_with_output while the independent observer runs.
 pub(crate) fn run_observed(command: &mut Command) -> Result<(Output, Value)> {
