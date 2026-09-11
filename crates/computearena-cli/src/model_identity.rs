@@ -6,9 +6,11 @@
 //! pretending that unlike quantizations are the same artifact.
 
 use crate::adapters::Runtime;
-use crate::reports::{atomic_write_json, Paths};
+use crate::reports::Paths;
+use anyhow::Context;
 use serde_json::{json, Value};
 use std::fs;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 pub(crate) const IDENTITY_SCHEMA: &str = "computearena-model/1";
@@ -58,7 +60,7 @@ pub(crate) fn verify_submission_model(report: &Value) -> SubmissionModelVerifica
     );
     let (Some("huggingface"), Some(repository), Some(revision), Some(path)) = tuple else {
         return SubmissionModelVerification::Unresolved(
-            "exact Hugging Face repository, revision, and path are unavailable".to_string(),
+            "no exact Hugging Face file is recorded; the server will match the hash against artifacts it has verified".to_string(),
         );
     };
 
@@ -81,23 +83,28 @@ pub(crate) fn verify_submission_model(report: &Value) -> SubmissionModelVerifica
         );
     }
 
+    // The server decides the model family from what the publisher says
+    // now; a changed card is a grouping question, not a reason to refuse.
     let claimed_canonical = report
         .pointer("/model/canonical/repo_id")
         .and_then(Value::as_str);
-    if let (Some(claimed), Some(published)) = (
-        claimed_canonical,
-        identity.file.canonical_repository.as_deref(),
-    ) {
-        if !claimed.eq_ignore_ascii_case(published) {
-            return SubmissionModelVerification::Mismatch(
-                "canonical model does not match the Hugging Face repository metadata".to_string(),
-            );
+    let published = identity.file.canonical_repository.as_deref();
+    SubmissionModelVerification::Verified(match (claimed_canonical, published) {
+        (Some(claimed), Some(published)) if !claimed.eq_ignore_ascii_case(published) => {
+            format!(
+                "artifact hash verified; the publisher now links it to {published} rather than {claimed}, and ComputeArena decides the grouping"
+            )
         }
-    }
-    SubmissionModelVerification::Verified(match identity.file.canonical_repository {
-        Some(canonical) => format!("artifact hash and model family verified as {canonical}"),
-        None => "artifact hash verified; model family remains unresolved".to_string(),
+        (_, Some(published)) => format!("artifact hash and model family verified as {published}"),
+        (Some(claimed), None) => {
+            format!("artifact hash verified; ComputeArena decides whether it groups as {claimed}")
+        }
+        (None, None) => "artifact hash verified; model family remains unresolved".to_string(),
     })
+}
+
+pub(crate) fn has_receipt(root: &Path, artifact_sha256: &str) -> bool {
+    receipt_path(root, artifact_sha256).is_file()
 }
 
 fn receipts_dir(root: &Path) -> PathBuf {
@@ -153,15 +160,32 @@ pub(crate) fn record_huggingface_download(
     let path = receipt_path(root, artifact_sha256);
     if path.is_file() {
         let existing: Value = serde_json::from_slice(&fs::read(&path)?)?;
-        if existing.pointer("/artifact/sha256").and_then(Value::as_str) == Some(artifact_sha256) {
+        if existing.pointer("/artifact/sha256").and_then(Value::as_str) != Some(artifact_sha256) {
+            anyhow::bail!(
+                "model provenance for {artifact_sha256} conflicts with {}",
+                path.display()
+            );
+        }
+        if existing == receipt {
             return Ok(());
         }
-        anyhow::bail!(
-            "model provenance for {artifact_sha256} conflicts with {}",
-            path.display()
-        );
     }
-    atomic_write_json(&path, &receipt)
+    write_receipt(&path, &receipt)
+}
+
+/// A receipt describes one exact set of bytes, so a newer receipt for the
+/// same SHA-256 replaces the older one: `computearena identify` and later
+/// downloads can correct the repository, revision, or model family recorded.
+fn write_receipt(path: &Path, receipt: &Value) -> anyhow::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("creating a receipt under {}", parent.display()))?;
+    serde_json::to_writer_pretty(&mut temp, receipt)?;
+    temp.write_all(b"\n")?;
+    temp.as_file().sync_all()?;
+    temp.persist(path).map_err(|error| error.error)?;
+    Ok(())
 }
 
 /// Bind manually acquired bytes to one exact Hugging Face file. The caller
@@ -290,6 +314,11 @@ fn huggingface_repo_id(url: &str) -> Option<String> {
     Some(format!("{owner}/{model}"))
 }
 
+/// BaseRT's `hub.json` names the repository the bytes came from and, usually,
+/// a mutable ref, but never the file. Without a receipt from the listing
+/// lookup the claim stays hash-only: the server matches the hash against the
+/// artifacts it has already verified rather than being told a file name that
+/// was never checked.
 fn base_sidecar(path: &Path, artifact_sha256: &str) -> Option<Value> {
     let bytes = fs::read(path.parent()?.join("hub.json")).ok()?;
     let sidecar: Value = serde_json::from_slice(&bytes).ok()?;
@@ -301,17 +330,13 @@ fn base_sidecar(path: &Path, artifact_sha256: &str) -> Option<Value> {
         return None;
     }
     let repository = sidecar.get("hf_repo").and_then(Value::as_str)?;
-    let revision = sidecar
-        .get("revision")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
     let canonical = sidecar.get("source_repo").and_then(Value::as_str);
     Some(json!({
         "artifact": {
             "provider": "huggingface",
             "repo_id": repository,
-            "revision": revision,
-            "path": path.file_name().and_then(|name| name.to_str()),
+            "revision": Value::Null,
+            "path": Value::Null,
             "sha256": artifact_sha256
         },
         "canonical": canonical.map(|repo_id| json!({
@@ -341,16 +366,13 @@ fn embedded_gguf_identity(model: &Value, artifact_sha256: &str) -> Option<Value>
         .get("repo_url")
         .and_then(Value::as_str)
         .and_then(huggingface_repo_id);
+    // `general.base_model` names what the source model was trained from (an
+    // instruct model's pretraining base, say), not the model itself, so only
+    // the source repository can stand for the model family.
     let canonical = model
         .get("source_repo_url")
         .and_then(Value::as_str)
-        .and_then(huggingface_repo_id)
-        .or_else(|| {
-            model
-                .get("base_model_repo_url")
-                .and_then(Value::as_str)
-                .and_then(huggingface_repo_id)
-        });
+        .and_then(huggingface_repo_id);
     if artifact_repository.is_none() && canonical.is_none() {
         return None;
     }
@@ -506,13 +528,18 @@ pub(crate) fn report_identity_notice(model: &Value) -> String {
     .into_iter()
     .all(|pointer| model.pointer(pointer).and_then(Value::as_str).is_some());
 
-    match (exact_artifact, canonical) {
-        (true, Some(canonical)) => format!(
+    let repository = model.pointer("/artifact/repo_id").and_then(Value::as_str);
+
+    match (exact_artifact, canonical, repository) {
+        (true, Some(canonical), _) => format!(
             "Model identity recorded as {}; the server will independently verify the exact artifact when submitted.",
             canonical
         ),
-        (true, None) => "The exact model artifact was recorded for server verification, but its canonical model family is unresolved.".to_string(),
-        (false, _) => "Model identity is unresolved. The signed report remains submittable and will be labelled unverified; use computearena identify to bind manually acquired bytes to an exact Hugging Face file.".to_string(),
+        (true, None, _) => "The exact model artifact was recorded for server verification, but its canonical model family is unresolved.".to_string(),
+        (false, _, Some(repository)) => format!(
+            "The model bytes were recorded from {repository} without an exact file; the server will match their hash against artifacts it has already verified."
+        ),
+        (false, _, None) => "Model identity is unresolved. The signed report remains submittable and will be labelled unverified; use computearena identify to bind manually acquired bytes to an exact Hugging Face file.".to_string(),
     }
 }
 
@@ -582,7 +609,7 @@ mod tests {
         let model = finalize(
             Runtime::Basert,
             &paths,
-            Path::new("/tmp/unknown.base"),
+            &temporary.path().join("unknown.base"),
             json!({"name": "unknown", "quantization": "base_q4"}),
             &sha256,
         );
@@ -592,6 +619,74 @@ mod tests {
         assert_eq!(model["artifact"]["quantization"]["namespace"], "basert");
         assert_eq!(model["provenance"]["method"], "local_file");
         assert_eq!(model["artifact_sha256"], sha256);
+    }
+
+    #[test]
+    fn basert_sidecars_record_the_repository_but_never_invent_a_file() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = Paths::resolve(Some(temporary.path().join("data"))).unwrap();
+        let sha256 = "c".repeat(64);
+        let variant = temporary.path().join("Qwen3-4B").join("default-q4");
+        fs::create_dir_all(&variant).unwrap();
+        fs::write(
+            variant.join("hub.json"),
+            serde_json::to_vec(&json!({
+                "hf_repo": "basecompute/Qwen3-4B",
+                "source_repo": "Qwen/Qwen3-4B",
+                "revision": "main",
+                "base_sha256": sha256
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let model = finalize(
+            Runtime::Basert,
+            &paths,
+            &variant.join("model.base"),
+            json!({"name": "Qwen/Qwen3-4B", "quantization": "base_q4"}),
+            &sha256,
+        );
+
+        assert_eq!(model["artifact"]["repo_id"], "basecompute/Qwen3-4B");
+        assert!(model["artifact"]["path"].is_null());
+        assert!(model["artifact"]["revision"].is_null());
+        assert_eq!(model["canonical"]["repo_id"], "Qwen/Qwen3-4B");
+        assert_eq!(model["provenance"]["method"], "basert_hub_sidecar");
+        assert!(report_identity_notice(&model).contains("without an exact file"));
+    }
+
+    #[test]
+    fn receipts_are_refreshed_when_better_provenance_arrives() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = Paths::resolve(Some(temporary.path().to_path_buf())).unwrap();
+        let sha256 = "d".repeat(64);
+        for canonical in [None, Some("Qwen/Qwen3-4B")] {
+            record_huggingface_download(
+                &paths.root,
+                "basecompute/Qwen3-4B",
+                "0123456789abcdef",
+                "Qwen3-4B-Q4.base",
+                &sha256,
+                Some(&sha256),
+                canonical,
+                "basert_pull",
+            )
+            .unwrap();
+        }
+        let receipt = read_receipt(&paths, &sha256).unwrap();
+        assert_eq!(receipt["canonical"]["repo_id"], "Qwen/Qwen3-4B");
+        assert!(has_receipt(&paths.root, &sha256));
+        assert!(record_huggingface_download(
+            &paths.root,
+            "other/repo",
+            "abc",
+            "x.base",
+            &"e".repeat(64),
+            None,
+            None,
+            "basert_pull"
+        )
+        .is_ok());
     }
 
     #[test]

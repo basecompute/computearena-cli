@@ -170,7 +170,26 @@ pub(crate) fn pull(cli: &Path, model: &RemoteModel) -> Result<PathBuf> {
         .context("BaseRT completed the pull but did not list the installed model")
 }
 
+/// Record the provenance of a model `basert pull` just installed. The pull
+/// itself is done; failing to match the file on the Hub only means the report
+/// will identify the bytes by hash instead of by an exact file.
 pub(crate) fn record_download(root: &Path, model: &Path) -> Result<()> {
+    let artifact_sha256 = crate::adapters::file_sha256(model)?;
+    match resolve_artifact(root, model, &artifact_sha256) {
+        Ok(file) => println!("Matched the installed model to {file} on Hugging Face."),
+        Err(error) => println!(
+            "Could not match the installed model to a Hugging Face file ({error:#}); its reports will identify it by hash."
+        ),
+    }
+    Ok(())
+}
+
+/// Bind an installed BaseRT model to the exact Hub file whose published
+/// SHA-256 matches it, and save a receipt. BaseRT's `hub.json` names the
+/// repository and usually a mutable ref, never the file, so the file name is
+/// recovered from the repository listing rather than guessed from the local
+/// path. Returns the matched `repository/path`.
+pub(crate) fn resolve_artifact(root: &Path, model: &Path, artifact_sha256: &str) -> Result<String> {
     let sidecar_path = model
         .parent()
         .context("BaseRT model has no variant directory")?
@@ -184,60 +203,34 @@ pub(crate) fn record_download(root: &Path, model: &Path) -> Result<()> {
         .get("hf_repo")
         .and_then(Value::as_str)
         .context("BaseRT model provenance omitted its Hugging Face repository")?;
-    let artifact_sha256 = crate::adapters::file_sha256(model)?;
-    let expected_sha256 = sidecar.get("base_sha256").and_then(Value::as_str);
-    if expected_sha256.is_some_and(|expected| !expected.eq_ignore_ascii_case(&artifact_sha256)) {
-        bail!("the installed BaseRT model does not match its provenance SHA-256");
+    if let Some(expected) = sidecar.get("base_sha256").and_then(Value::as_str) {
+        if !expected.eq_ignore_ascii_case(artifact_sha256) {
+            bail!(
+                "the installed file does not match the SHA-256 recorded in {}",
+                sidecar_path.display()
+            );
+        }
     }
-    let sidecar_revision = sidecar
+    let revision = sidecar
         .get("revision")
         .and_then(Value::as_str)
         .unwrap_or("main");
-    if let Ok(file) =
-        crate::huggingface::find_file_by_sha256(repository, sidecar_revision, &artifact_sha256)
-    {
-        let canonical = sidecar
-            .get("source_repo")
-            .and_then(Value::as_str)
-            .or(file.canonical_repository.as_deref());
-        return crate::model_identity::record_huggingface_download(
-            root,
-            repository,
-            &file.revision,
-            &file.path,
-            &artifact_sha256,
-            file.sha256.as_deref(),
-            canonical,
-            "basert_pull",
-        );
-    }
-    let identity = crate::huggingface::repository_identity(repository).ok();
-    let revision = identity
-        .as_ref()
-        .map(|identity| identity.revision.as_str())
-        .or(Some(sidecar_revision))
-        .unwrap_or("unknown");
+    let file = crate::huggingface::find_file_by_sha256(repository, revision, artifact_sha256)?;
     let canonical = sidecar
         .get("source_repo")
         .and_then(Value::as_str)
-        .or_else(|| {
-            identity
-                .as_ref()
-                .and_then(|identity| identity.canonical_repository.as_deref())
-        });
+        .or(file.canonical_repository.as_deref());
     crate::model_identity::record_huggingface_download(
         root,
         repository,
-        revision,
-        model
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("model.base"),
-        &artifact_sha256,
-        expected_sha256,
+        &file.revision,
+        &file.path,
+        artifact_sha256,
+        file.sha256.as_deref(),
         canonical,
         "basert_pull",
-    )
+    )?;
+    Ok(format!("{repository}/{}", file.path))
 }
 
 #[cfg(test)]

@@ -51,6 +51,28 @@ struct SubmissionOutcome {
     kind: SubmissionOutcomeKind,
     detail: Option<String>,
 }
+
+/// What a submission run did, for callers that summarise it in one line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SubmissionSummary {
+    pub(crate) submitted: usize,
+    pub(crate) duplicates: usize,
+    /// Reports left out because they failed the preflight checks.
+    pub(crate) skipped: usize,
+}
+
+impl SubmissionSummary {
+    pub(crate) fn describe(&self) -> String {
+        let mut parts = vec![format!("Submitted {} benchmark(s)", self.submitted)];
+        if self.duplicates > 0 {
+            parts.push(format!("{} already present", self.duplicates));
+        }
+        if self.skipped > 0 {
+            parts.push(format!("{} skipped as invalid", self.skipped));
+        }
+        parts.join("; ")
+    }
+}
 pub(crate) fn select_reports_for_submission(
     paths: &Paths,
     requested: &[String],
@@ -179,9 +201,9 @@ pub(crate) fn submit_reports(
     api_url: &str,
     assume_yes: bool,
     skip_invalid: bool,
-) -> Result<()> {
+) -> Result<SubmissionSummary> {
     if reports.is_empty() {
-        return Ok(());
+        return Ok(SubmissionSummary::default());
     }
     let ui = TerminalUi::detect();
     let checking_started = start_activity(ui, "Checking selected benchmarks…");
@@ -243,13 +265,17 @@ pub(crate) fn submit_reports(
                 "{} Nothing was uploaded.",
                 ui.neutral("Submission cancelled.")
             );
-            return Ok(());
+            return Ok(SubmissionSummary {
+                skipped: preflight.invalid.len(),
+                ..SubmissionSummary::default()
+            });
         }
     }
 
     let endpoint = format!("{api_url}/submissions");
     let client = api_client(SUBMISSION_HTTP_TIMEOUT)?;
     let report_count = preflight.ready.len();
+    let skipped = preflight.invalid.len();
     let mut outcomes = Vec::with_capacity(report_count);
     let mut queue = preflight.ready.into_iter().enumerate();
     while let Some((index, report)) = queue.next() {
@@ -401,7 +427,11 @@ pub(crate) fn submit_reports(
         "{} Submission complete: {submitted} uploaded, {duplicates} already present.",
         ui.success("✓"),
     );
-    Ok(())
+    Ok(SubmissionSummary {
+        submitted,
+        duplicates,
+        skipped,
+    })
 }
 
 pub(crate) fn preflight_submissions(reports: &[PathBuf]) -> SubmissionPreflight {

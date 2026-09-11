@@ -431,7 +431,7 @@ fn execute(
             skip_invalid,
         } => {
             let reports = select_reports_for_submission(paths, &reports, TerminalUi::detect())?;
-            submit_reports(paths, &reports, api_url, yes, skip_invalid)
+            submit_reports(paths, &reports, api_url, yes, skip_invalid).map(|_| ())
         }
     }
 }

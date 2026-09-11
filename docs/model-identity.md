@@ -22,11 +22,17 @@ hashes it while streaming, and compares it with the Hub's LFS object ID. A
 content-addressed receipt is saved under `model-provenance/`.
 
 For BaseRT, ComputeArena delegates to `basert pull`. It then hashes the installed
-`.base` file and records BaseRT's adjacent `hub.json` fields. When online, it
-also resolves the artifact repository's Hugging Face metadata to recover the
-canonical upstream model. Multiple internal catalogue variants that map to one
-`basert pull --target` choice are shown once; BaseRT selects the compatible
-artifact for the current backend.
+`.base` file, reads BaseRT's adjacent `hub.json` (the artifact repository, the
+source repository, and usually a mutable ref, but never a file name), and looks
+the hash up in the repository's file listing to recover the exact published
+file, saving a receipt when it finds one. A model installed before ComputeArena
+tracked provenance is matched the same way the first time it is benchmarked.
+When no file matches (offline, or a locally converted artifact that was never
+published), the report carries the repository and the hash but no file name;
+the server then matches the hash against artifacts it has already verified
+instead of being told a path that was never checked. Multiple internal
+catalogue variants that map to one `basert pull --target` choice are shown
+once; BaseRT selects the compatible artifact for the current backend.
 
 ## Models acquired elsewhere
 
@@ -41,7 +47,21 @@ computearena identify /path/to/model.base \
 
 The command resolves the revision, fetches only file metadata, hashes the local
 file, and saves a receipt only if the SHA-256 values match. A repository URL or
-free-form model name is intentionally insufficient.
+free-form model name is intentionally insufficient. Receipts are keyed by
+SHA-256 and replaced when a later download or `identify` learns more about the
+same bytes, so a corrected repository or model family takes effect on the next
+benchmark.
+
+## Model families
+
+A repository's card is followed to an upstream model only when it declares
+itself a quantization of that model (the Hub's `base_model:quantized:`
+relation). Finetunes, adapters, and merges are different models, so an
+instruct model stays distinct from the pretraining base its card links to. The
+server applies the same rule and additionally follows a link only from
+publishers it trusts to quantize or convert models; its decision wins, and a
+difference between the CLI's recorded family and the server's grouping never
+blocks a submission.
 
 ## Trust boundary
 
