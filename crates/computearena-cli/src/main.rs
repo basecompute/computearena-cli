@@ -329,6 +329,10 @@ fn execute(
     harness: Option<PathBuf>,
     api_url: &str,
 ) -> Result<()> {
+    if runtime == Runtime::Basert && matches!(&command, Action::Run { .. } | Action::Install { .. })
+    {
+        runtimes::print_platform_notice(TerminalUi::detect(), runtime);
+    }
     match command {
         Action::Run {
             model,

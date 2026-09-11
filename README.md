@@ -188,7 +188,9 @@ copy installed the same way. Neither touches shell profiles. `--archive`
 unpacks a bundle you already have instead of contacting GitHub. Prebuilt
 runtime bundles exist for macOS arm64 and Linux arm64 with CUDA (BaseRT) and
 for macOS and Linux CPU or Metal builds (llama.cpp); other platforms and GPU
-builds of llama.cpp are installed by hand.
+builds of llama.cpp are installed by hand. ComputeArena warns Linux x86-64
+users before entering BaseRT because no prebuilt BaseRT runtime is currently
+published for that architecture; a compatible manually built harness still works.
 
 ### BaseRT
 

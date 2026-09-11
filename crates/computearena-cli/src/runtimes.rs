@@ -29,6 +29,27 @@ const USER_AGENT: &str = concat!("computearena-cli/", env!("CARGO_PKG_VERSION"))
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(900);
 const RELEASE_LIST_SIZE: usize = 20;
 
+fn platform_notice_for(runtime: Runtime, os: &str, arch: &str) -> Option<String> {
+    (runtime == Runtime::Basert && os == "linux" && arch == "x86_64").then(|| {
+        "BaseRT does not currently publish a prebuilt Linux x86-64 runtime. ComputeArena itself works on this architecture: choose llama.cpp, or pass a compatible basert-benchmark-harness that you built yourself."
+            .to_string()
+    })
+}
+
+/// A warning for platforms on which the ComputeArena client is published but
+/// the selected runtime is not. This is advisory: a manually built compatible
+/// harness remains usable.
+pub(crate) fn platform_notice(runtime: Runtime) -> Option<String> {
+    platform_notice_for(runtime, std::env::consts::OS, std::env::consts::ARCH)
+}
+
+pub(crate) fn print_platform_notice(ui: TerminalUi, runtime: Runtime) {
+    if let Some(notice) = platform_notice(runtime) {
+        println!();
+        println!("{} {}", ui.warning("!"), ui.neutral(notice));
+    }
+}
+
 // --- Discovery --------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,19 +167,33 @@ fn not_found_message(runtime: Runtime) -> String {
             .iter()
             .map(|directory| compact_path(directory)),
     );
+    let install_hint = if platform_notice(runtime).is_some() {
+        "ComputeArena cannot install a prebuilt BaseRT runtime on this architecture.".to_string()
+    } else {
+        format!(
+            "Or run `computearena {} install` to let ComputeArena download it.",
+            adapter.name()
+        )
+    };
     format!(
-        "{} was not found; ComputeArena looked for {} on {}.\n{}\nOr run `computearena {} install` to let ComputeArena download it.",
+        "{} was not found; ComputeArena looked for {} on {}.\n{}\n{}",
         adapter.display_name(),
         adapter.binary_name(),
         looked.join(" and in "),
         manual_instructions(runtime).join("\n"),
-        adapter.name()
+        install_hint
     )
 }
 
 /// How to obtain the runtime without ComputeArena's help.
 pub(crate) fn manual_instructions(runtime: Runtime) -> Vec<String> {
     match runtime {
+        Runtime::Basert if platform_notice(runtime).is_some() => vec![
+            platform_notice(runtime).unwrap(),
+            "Choose llama.cpp for a supported prebuilt runtime on Linux x86-64.".to_string(),
+            "If you built BaseRT yourself, pass --runtime-path /path/to/basert-benchmark-harness."
+                .to_string(),
+        ],
         Runtime::Basert => vec![
             format!("Install BaseRT with the official installer: {BASERT_INSTALL_SCRIPT}"),
             "Restart your terminal afterwards so basert-benchmark-harness is on PATH,".to_string(),
@@ -1010,6 +1045,16 @@ pub(crate) fn ensure_runtime(
 mod tests {
     use super::*;
 
+    #[test]
+    fn linux_x86_64_explains_that_basert_has_no_prebuilt_runtime() {
+        let notice = platform_notice_for(Runtime::Basert, "linux", "x86_64").unwrap();
+        assert!(notice.contains("does not currently publish"));
+        assert!(notice.contains("llama.cpp"));
+        assert!(notice.contains("built yourself"));
+        assert!(platform_notice_for(Runtime::LlamaCpp, "linux", "x86_64").is_none());
+        assert!(platform_notice_for(Runtime::Basert, "linux", "aarch64").is_none());
+    }
+
     fn llama_releases() -> Vec<Value> {
         vec![
             json!({"tag_name":"v0.4.0","draft":false,"assets":[{"name":"nightly-tag.txt","browser_download_url":"https://x/nightly-tag.txt","size":7}]}),
@@ -1200,7 +1245,12 @@ mod tests {
     #[test]
     fn manual_instructions_name_the_official_channels() {
         let basert = manual_instructions(Runtime::Basert).join("\n");
-        assert!(basert.contains(BASERT_INSTALL_SCRIPT));
+        if let Some(notice) = platform_notice(Runtime::Basert) {
+            assert!(basert.contains(&notice));
+            assert!(!basert.contains(BASERT_INSTALL_SCRIPT));
+        } else {
+            assert!(basert.contains(BASERT_INSTALL_SCRIPT));
+        }
         assert!(basert.contains("--runtime-path"));
         let llama = manual_instructions(Runtime::LlamaCpp).join("\n");
         assert!(llama.contains("brew install llama.cpp"));
