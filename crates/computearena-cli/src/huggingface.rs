@@ -5,16 +5,37 @@
 //! the environment (`HF_TOKEN`), which gated repositories need.
 use crate::config::{HTTP_CONNECT_TIMEOUT, HUGGINGFACE_API, HUGGINGFACE_HOST};
 use anyhow::{bail, Context, Result};
-use percent_encoding::percent_decode_str;
+use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Characters that stay literal inside one URL path segment.
+const PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
+
+/// Percent-encode one path segment, so a branch name such as `refs/pr/1`
+/// stays a single segment and no value can steer a request to another path.
+fn encode_segment(value: &str) -> String {
+    utf8_percent_encode(value, PATH_SEGMENT).to_string()
+}
+
+fn encode_path(value: &str) -> String {
+    value
+        .split('/')
+        .map(encode_segment)
+        .collect::<Vec<_>>()
+        .join("/")
+}
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const SEARCH_RESULTS: usize = 25;
 
@@ -108,42 +129,95 @@ pub(crate) fn search(query: &str) -> Result<Vec<HubModel>> {
         .collect())
 }
 
-/// The GGUF files inside one repository, smallest first: quantizations are
-/// usually chosen by the size a device can hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BaseModelRelation {
+    Quantized,
+    Finetune,
+    Adapter,
+    Merge,
+    Unknown,
+}
+
+fn relation_of(value: &str) -> Option<BaseModelRelation> {
+    match value {
+        "quantized" => Some(BaseModelRelation::Quantized),
+        "finetune" => Some(BaseModelRelation::Finetune),
+        "adapter" => Some(BaseModelRelation::Adapter),
+        "merge" => Some(BaseModelRelation::Merge),
+        _ => None,
+    }
+}
+
+fn is_repository_id(value: &str) -> bool {
+    let mut parts = value.split('/');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(owner), Some(model), None) => [owner, model].iter().all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        }),
+        _ => false,
+    }
+}
+
+/// The single upstream model a repository declares itself a quantization of.
+///
+/// Only a `quantized` relation is followed. A finetune, adapter, or merge is a
+/// different model, and an instruct model's card links to its pretraining
+/// base exactly that way. The server applies the same rule together with its
+/// own publisher trust list, so this is the client's best claim, not the
+/// verdict.
 fn canonical_repository(info: &Value) -> Option<String> {
-    fn add(repositories: &mut BTreeSet<String>, value: &str) {
-        let value = value
-            .strip_prefix("quantized:")
-            .or_else(|| value.strip_prefix("finetune:"))
-            .or_else(|| value.strip_prefix("adapter:"))
-            .unwrap_or(value);
-        if value.split('/').filter(|part| !part.is_empty()).count() == 2 {
-            repositories.insert(value.to_string());
+    fn add(
+        links: &mut BTreeMap<String, (String, BaseModelRelation)>,
+        declared: Option<BaseModelRelation>,
+        raw: &str,
+    ) {
+        let (relation, repository) = match raw.split_once(':') {
+            Some((prefix, rest)) if relation_of(prefix).is_some() => (relation_of(prefix), rest),
+            _ => (None, raw),
+        };
+        if !is_repository_id(repository) {
+            return;
+        }
+        let relation = relation.or(declared).unwrap_or(BaseModelRelation::Unknown);
+        let entry = links
+            .entry(repository.to_ascii_lowercase())
+            .or_insert((repository.to_string(), relation));
+        if entry.1 == BaseModelRelation::Unknown {
+            entry.1 = relation;
         }
     }
-    let mut repositories = BTreeSet::new();
+    let declared = info
+        .pointer("/cardData/base_model_relation")
+        .and_then(Value::as_str)
+        .and_then(relation_of);
+    let mut links = BTreeMap::new();
     match info.pointer("/cardData/base_model") {
-        Some(Value::String(value)) => add(&mut repositories, value),
+        Some(Value::String(value)) => add(&mut links, declared, value),
         Some(Value::Array(values)) => {
             for value in values.iter().filter_map(Value::as_str) {
-                add(&mut repositories, value);
+                add(&mut links, declared, value);
             }
         }
         _ => {}
     }
-    if repositories.is_empty() {
-        for tag in info
-            .get("tags")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .filter_map(|tag| tag.strip_prefix("base_model:"))
-        {
-            add(&mut repositories, tag);
-        }
+    for tag in info
+        .get("tags")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(|tag| tag.strip_prefix("base_model:"))
+    {
+        add(&mut links, declared, tag);
     }
-    (repositories.len() == 1).then(|| repositories.into_iter().next().unwrap())
+    if links.len() != 1 {
+        return None;
+    }
+    let (repository, relation) = links.into_values().next()?;
+    (relation == BaseModelRelation::Quantized).then_some(repository)
 }
 
 fn repository_info(repository: &str) -> Result<Value> {
@@ -157,7 +231,10 @@ fn repository_info(repository: &str) -> Result<Value> {
 }
 
 fn repository_info_at(repository: &str, revision: &str) -> Result<Value> {
-    let url = format!("{HUGGINGFACE_API}/models/{repository}/revision/{revision}");
+    let url = format!(
+        "{HUGGINGFACE_API}/models/{repository}/revision/{}",
+        encode_segment(revision)
+    );
     serde_json::from_str(
         &request(&url, SEARCH_TIMEOUT)?
             .text()
@@ -243,7 +320,8 @@ fn next_page(response: &reqwest::blocking::Response) -> Option<String> {
 
 fn repository_tree(repository: &str, revision: &str) -> Result<Vec<Value>> {
     let mut url = Some(format!(
-        "{HUGGINGFACE_API}/models/{repository}/tree/{revision}?recursive=true&expand=true"
+        "{HUGGINGFACE_API}/models/{repository}/tree/{}?recursive=true&expand=true",
+        encode_segment(revision)
     ));
     let mut entries = Vec::new();
     let mut seen = BTreeSet::new();
@@ -305,7 +383,7 @@ pub(crate) fn artifact_identity(
     let identity = repository_identity_at(repository, requested_revision)?;
     let info_url = format!(
         "{HUGGINGFACE_API}/models/{repository}/paths-info/{}",
-        identity.revision
+        encode_segment(&identity.revision)
     );
     let mut builder = client(SEARCH_TIMEOUT)?
         .post(&info_url)
@@ -492,7 +570,8 @@ pub(crate) fn download(root: &Path, repository: &str, file: &HubFile) -> Result<
 
     let url = format!(
         "{HUGGINGFACE_HOST}/{repository}/resolve/{}/{}?download=true",
-        file.revision, file.path
+        encode_segment(&file.revision),
+        encode_path(&file.path)
     );
     println!("Downloading {} ({})", file.path, format_size(file.size));
     let mut response = request(&url, DOWNLOAD_TIMEOUT)?;
@@ -645,5 +724,33 @@ mod tests {
             "cardData": {"base_model": ["one/model", "two/model"]}
         });
         assert_eq!(canonical_repository(&info), None);
+    }
+
+    #[test]
+    fn only_quantizations_inherit_the_upstream_model() {
+        let instruct = serde_json::json!({
+            "cardData": {"base_model": "google/gemma-3-1b-pt"},
+            "tags": ["base_model:google/gemma-3-1b-pt", "base_model:finetune:google/gemma-3-1b-pt"]
+        });
+        assert_eq!(canonical_repository(&instruct), None);
+        let declared = serde_json::json!({
+            "cardData": {"base_model": "Qwen/Qwen3-4B", "base_model_relation": "quantized"}
+        });
+        assert_eq!(
+            canonical_repository(&declared).as_deref(),
+            Some("Qwen/Qwen3-4B")
+        );
+        let undeclared = serde_json::json!({"cardData": {"base_model": "Qwen/Qwen3-4B"}});
+        assert_eq!(canonical_repository(&undeclared), None);
+    }
+
+    #[test]
+    fn revisions_and_paths_are_encoded_per_segment() {
+        assert_eq!(encode_segment("refs/pr/1"), "refs%2Fpr%2F1");
+        assert_eq!(encode_segment("../x"), "..%2Fx");
+        assert_eq!(
+            encode_path("Q4_K_M/model one.gguf"),
+            "Q4_K_M/model%20one.gguf"
+        );
     }
 }

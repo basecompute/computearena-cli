@@ -547,8 +547,14 @@ impl App {
             JobKind::Submit,
             format!("Submitting {count} benchmark(s)"),
             move || {
-                submit_reports(&paths, &reports, &api_url, true, false)?;
-                Ok(format!("Submitted {count} benchmark(s)"))
+                // A report that fails its checks is listed and left out; it
+                // must not stop the others from being uploaded.
+                let summary = submit_reports(&paths, &reports, &api_url, true, true)?;
+                Ok(if summary.skipped == 0 && summary.duplicates == 0 {
+                    format!("Submitted {count} benchmark(s)")
+                } else {
+                    summary.describe()
+                })
             },
         ));
         self.screens.push(Screen::Running);

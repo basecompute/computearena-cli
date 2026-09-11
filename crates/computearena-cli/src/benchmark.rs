@@ -525,6 +525,25 @@ pub(crate) fn run_benchmark(
         start_activity(ui, "Hashing the model artifact (outside benchmark timing)…");
     let model_sha256 = file_sha256(model)?;
     finish_activity(ui, hashing_started, "Model artifact fingerprint ready");
+    // A BaseRT model installed before ComputeArena tracked provenance has a
+    // hub.json but no receipt. Match it now, ahead of the timed section, so
+    // the report can name the exact published file.
+    if runtime == Runtime::Basert
+        && !crate::model_identity::has_receipt(&paths.root, &model_sha256)
+        && model
+            .parent()
+            .is_some_and(|directory| directory.join("hub.json").is_file())
+    {
+        let matching_started = start_activity(ui, "Matching the model to its Hugging Face file…");
+        match crate::basert_models::resolve_artifact(&paths.root, model, &model_sha256) {
+            Ok(file) => finish_activity(ui, matching_started, format!("Model matched to {file}")),
+            Err(error) => finish_activity(
+                ui,
+                matching_started,
+                format!("Model will be identified by hash ({error:#})"),
+            ),
+        }
+    }
     let benchmark_started = start_activity(
         ui,
         format!("Running the benchmark with {}…", harness.display()),
