@@ -739,11 +739,6 @@ impl App {
 
     // ---- key handling ----------------------------------------------------
 
-    /// A wheel notch, or any other coarse scroll.
-    pub(crate) fn scroll(&mut self, delta: isize) {
-        self.move_cursor(delta);
-    }
-
     pub(crate) fn on_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> Result<()> {
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {

@@ -124,11 +124,7 @@ fn header(frame: &mut Frame, area: Rect, app: &App) {
         ..bar
     };
     let name = wordmark("ComputeArena");
-    let links = format!(
-        "{} · {}  ",
-        COMPUTEARENA_WEBSITE.trim_start_matches("https://"),
-        COMPUTEARENA_DISCORD.trim_start_matches("https://")
-    );
+    let links = format!("{} · {}  ", COMPUTEARENA_WEBSITE, COMPUTEARENA_DISCORD);
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             format!("  {name}"),
@@ -203,13 +199,13 @@ fn footer(frame: &mut Frame, area: Rect, app: &App) {
             "↑/↓ move · Space tick · a all · Enter preview · Esc back"
         }
         Screen::Reports { .. } => "↑/↓ move · Enter verify · Esc back",
-        Screen::Preview { .. } => "↑/↓ or wheel scroll · Enter submit · Esc back",
+        Screen::Preview { .. } => "↑/↓ scroll · Enter submit · Esc back",
         // While a job runs, Enter and Esc do nothing; once it is done, Enter
         // is the way on, so the footer leads with it.
         Screen::Running if app.job.as_ref().is_none_or(Job::finished) => {
-            "Enter continue · ↑/↓ or wheel scroll · PgUp/PgDn page · Esc back"
+            "Enter continue · ↑/↓ scroll · PgUp/PgDn page · Esc back"
         }
-        Screen::Running => "↑/↓ or wheel scroll · PgUp/PgDn page · Ctrl+C quit",
+        Screen::Running => "↑/↓ scroll · PgUp/PgDn page · Ctrl+C quit",
         Screen::Loading { .. } => "working…",
         Screen::HubSearch { .. } => "type a search · Enter search · Esc back",
         Screen::HubModels { .. } => "↑/↓ move · Enter list files · Esc back",

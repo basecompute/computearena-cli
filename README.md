@@ -99,8 +99,9 @@ or, from a checkout, `cargo build --release`, which writes
    download a GGUF for you, smallest quantization first; set `HF_TOKEN` in
    your environment for gated repositories.
 3. Run `computearena`. In a terminal this opens the full-screen interface:
-   arrow keys move, Enter selects, Esc goes back, Ctrl+C leaves, and the
-   wheel or PgUp/PgDn scrolls long output. It asks which
+   arrow keys move, Enter selects, Esc goes back, Ctrl+C leaves, and
+   PgUp/PgDn scrolls long output. The terminal retains the mouse, so URLs can
+   be clicked and text can be selected and copied normally. It asks which
    runtime to use only when the answer is not obvious — one installed, or the
    one you used last — shows the executable it found (or offers to install
    one), and opens a menu: run benchmarks, submit previous benchmarks, list
