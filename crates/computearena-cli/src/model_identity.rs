@@ -14,6 +14,92 @@ use std::path::{Component, Path, PathBuf};
 pub(crate) const IDENTITY_SCHEMA: &str = "computearena-model/1";
 const RECEIPT_SCHEMA: &str = "computearena-model-provenance/1";
 
+#[derive(Clone, Debug)]
+pub(crate) enum SubmissionModelVerification {
+    Verified(String),
+    Unresolved(String),
+    Unavailable(String),
+    Mismatch(String),
+}
+
+/// Advisory client-side check used immediately before submission. The server
+/// repeats this independently because a public CLI is not a trust boundary.
+pub(crate) fn verify_submission_model(report: &Value) -> SubmissionModelVerification {
+    if report
+        .pointer("/model/identity_schema")
+        .and_then(Value::as_str)
+        != Some(IDENTITY_SCHEMA)
+    {
+        return SubmissionModelVerification::Unresolved(
+            "legacy report; no runtime-neutral model identity".to_string(),
+        );
+    }
+    let artifact = match report.pointer("/model/artifact") {
+        Some(Value::Object(artifact)) => artifact,
+        _ => {
+            return SubmissionModelVerification::Unresolved(
+                "model artifact identity is incomplete".to_string(),
+            )
+        }
+    };
+    let sha256 = match artifact.get("sha256").and_then(Value::as_str) {
+        Some(value) if value.len() == 64 => value,
+        _ => {
+            return SubmissionModelVerification::Unresolved(
+                "model artifact SHA-256 is unavailable".to_string(),
+            )
+        }
+    };
+    let tuple = (
+        artifact.get("provider").and_then(Value::as_str),
+        artifact.get("repo_id").and_then(Value::as_str),
+        artifact.get("revision").and_then(Value::as_str),
+        artifact.get("path").and_then(Value::as_str),
+    );
+    let (Some("huggingface"), Some(repository), Some(revision), Some(path)) = tuple else {
+        return SubmissionModelVerification::Unresolved(
+            "exact Hugging Face repository, revision, and path are unavailable".to_string(),
+        );
+    };
+
+    let identity = match crate::huggingface::artifact_identity(repository, revision, path) {
+        Ok(identity) => identity,
+        Err(error) => {
+            return SubmissionModelVerification::Unavailable(format!(
+                "could not contact Hugging Face: {error}"
+            ))
+        }
+    };
+    let Some(published_sha256) = identity.file.sha256.as_deref() else {
+        return SubmissionModelVerification::Unresolved(
+            "Hugging Face does not publish a SHA-256 for this artifact".to_string(),
+        );
+    };
+    if !published_sha256.eq_ignore_ascii_case(sha256) {
+        return SubmissionModelVerification::Mismatch(
+            "artifact SHA-256 does not match the claimed Hugging Face file".to_string(),
+        );
+    }
+
+    let claimed_canonical = report
+        .pointer("/model/canonical/repo_id")
+        .and_then(Value::as_str);
+    if let (Some(claimed), Some(published)) = (
+        claimed_canonical,
+        identity.file.canonical_repository.as_deref(),
+    ) {
+        if !claimed.eq_ignore_ascii_case(published) {
+            return SubmissionModelVerification::Mismatch(
+                "canonical model does not match the Hugging Face repository metadata".to_string(),
+            );
+        }
+    }
+    SubmissionModelVerification::Verified(match identity.file.canonical_repository {
+        Some(canonical) => format!("artifact hash and model family verified as {canonical}"),
+        None => "artifact hash verified; model family remains unresolved".to_string(),
+    })
+}
+
 fn receipts_dir(root: &Path) -> PathBuf {
     root.join("model-provenance")
 }

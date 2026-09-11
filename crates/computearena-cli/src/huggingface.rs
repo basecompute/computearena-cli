@@ -277,7 +277,32 @@ fn repository_tree(repository: &str, revision: &str) -> Result<Vec<Value>> {
 /// objects without downloading the model again.
 pub(crate) fn file_identity(url: &str) -> Result<HubFileIdentity> {
     let (repository, requested_revision, path) = parse_file_url(url)?;
-    let identity = repository_identity_at(&repository, &requested_revision)?;
+    artifact_identity(&repository, &requested_revision, &path)
+}
+
+/// Resolve an already identified repository/revision/path tuple without
+/// searching the whole Hub. Submission preflight uses this bounded lookup to
+/// compare the report's local SHA-256 with the publisher's LFS object ID.
+pub(crate) fn artifact_identity(
+    repository: &str,
+    requested_revision: &str,
+    path: &str,
+) -> Result<HubFileIdentity> {
+    if repository.split('/').count() != 2
+        || repository
+            .split('/')
+            .any(|part| part.is_empty() || matches!(part, "." | ".."))
+    {
+        bail!("invalid Hugging Face repository ID in model identity");
+    }
+    if path.starts_with('/')
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || matches!(part, "." | ".."))
+    {
+        bail!("invalid Hugging Face artifact path in model identity");
+    }
+    let identity = repository_identity_at(repository, requested_revision)?;
     let info_url = format!(
         "{HUGGINGFACE_API}/models/{repository}/paths-info/{}",
         identity.revision
@@ -312,9 +337,9 @@ pub(crate) fn file_identity(url: &str) -> Result<HubFileIdentity> {
         .filter(|sha| sha.len() == 64 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .map(|sha| sha.to_ascii_lowercase());
     Ok(HubFileIdentity {
-        repository,
+        repository: repository.to_string(),
         file: HubFile {
-            path,
+            path: path.to_string(),
             size: entry
                 .get("size")
                 .and_then(Value::as_u64)

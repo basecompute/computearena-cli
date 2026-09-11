@@ -1,6 +1,7 @@
 use crate::api::{client as api_client, error_message as api_error_message};
 use crate::auth::load_api_session;
 use crate::config::SUBMISSION_HTTP_TIMEOUT;
+use crate::model_identity::{verify_submission_model, SubmissionModelVerification};
 use crate::reports::{
     model_identity_for_report, report_summaries, resolve_report, short_id, verify_report, Paths,
 };
@@ -20,6 +21,7 @@ pub(crate) struct PreparedSubmission {
     pub(crate) path: PathBuf,
     value: Value,
     bytes: Vec<u8>,
+    model_verification: SubmissionModelVerification,
 }
 
 #[derive(Debug)]
@@ -183,12 +185,18 @@ pub(crate) fn submit_reports(
     }
     let ui = TerminalUi::detect();
     let checking_started = start_activity(ui, "Checking selected benchmarks…");
-    let preflight = preflight_submissions(reports);
+    let mut preflight = preflight_submissions(reports);
     finish_activity(
         ui,
         checking_started,
         format!("Checked {} benchmark(s)", reports.len()),
     );
+    if !preflight.ready.is_empty() {
+        let model_started =
+            start_activity(ui, "Verifying exact model artifacts with Hugging Face…");
+        verify_submission_models(&mut preflight);
+        finish_activity(ui, model_started, "Model artifact check complete");
+    }
     print_submission_preflight(ui, &preflight);
 
     if assume_yes && !skip_invalid && !preflight.invalid.is_empty() {
@@ -296,6 +304,22 @@ pub(crate) fn submit_reports(
                                 provenance.get("download_url").and_then(Value::as_str)
                             {
                                 println!("{}", ui.neutral(format!("Official downloads: {url}")));
+                            }
+                        }
+                        if let Some(verification) = response.get("model_verification") {
+                            let status = verification
+                                .get("status")
+                                .and_then(Value::as_str)
+                                .unwrap_or("unresolved");
+                            if let Some(message) =
+                                verification.get("message").and_then(Value::as_str)
+                            {
+                                let marker = if status == "verified" {
+                                    ui.success("✓")
+                                } else {
+                                    ui.warning("!")
+                                };
+                                println!("{marker} Server model verification: {message}");
                             }
                         }
                     }
@@ -417,9 +441,27 @@ pub(crate) fn preflight_submissions(reports: &[PathBuf]) -> SubmissionPreflight 
             path: path.clone(),
             value,
             bytes,
+            model_verification: SubmissionModelVerification::Unresolved("not checked".to_string()),
         });
     }
     preflight
+}
+
+fn verify_submission_models(preflight: &mut SubmissionPreflight) {
+    let candidates = std::mem::take(&mut preflight.ready);
+    for mut report in candidates {
+        let verification = verify_submission_model(&report.value);
+        if let SubmissionModelVerification::Mismatch(reason) = verification {
+            preflight.invalid.push(InvalidSubmission {
+                label: submission_label(&report.value, &report.path),
+                path: report.path,
+                reason: format!("Model provenance mismatch: {reason}"),
+            });
+        } else {
+            report.model_verification = verification;
+            preflight.ready.push(report);
+        }
+    }
 }
 
 fn print_submission_preflight(ui: TerminalUi, preflight: &SubmissionPreflight) {
@@ -430,6 +472,43 @@ fn print_submission_preflight(ui: TerminalUi, preflight: &SubmissionPreflight) {
         "Ready to submit",
         ui.success(preflight.ready.len())
     );
+
+    let mut verified = 0;
+    let mut unresolved = 0;
+    let mut unavailable = 0;
+    for report in &preflight.ready {
+        match report.model_verification {
+            SubmissionModelVerification::Verified(_) => verified += 1,
+            SubmissionModelVerification::Unresolved(_) => unresolved += 1,
+            SubmissionModelVerification::Unavailable(_) => unavailable += 1,
+            SubmissionModelVerification::Mismatch(_) => unreachable!("mismatches are invalid"),
+        }
+    }
+    println!("\n{}", ui.brand_bold("Model identity"));
+    println!("  {:<22} {}", "Verified artifacts", ui.success(verified));
+    println!("  {:<22} {}", "Unresolved", ui.neutral(unresolved));
+    println!("  {:<22} {}", "Check unavailable", ui.warning(unavailable));
+    for report in &preflight.ready {
+        let detail = match &report.model_verification {
+            SubmissionModelVerification::Verified(message) => {
+                Some((ui.success("✓"), message.as_str()))
+            }
+            SubmissionModelVerification::Unresolved(message) => {
+                Some((ui.neutral("—"), message.as_str()))
+            }
+            SubmissionModelVerification::Unavailable(message) => {
+                Some((ui.warning("!"), message.as_str()))
+            }
+            SubmissionModelVerification::Mismatch(_) => None,
+        };
+        if let Some((marker, message)) = detail {
+            println!(
+                "  {marker} {}",
+                submission_label(&report.value, &report.path)
+            );
+            println!("    {}", ui.neutral(message));
+        }
+    }
     println!(
         "  {:<22} {}  {}",
         "Invalid reports",
