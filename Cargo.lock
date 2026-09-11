@@ -342,6 +342,7 @@ dependencies = [
  "rand_core 0.6.4",
  "ratatui",
  "reqwest",
+ "semver",
  "serde_json",
  "sha2",
  "sysinfo",

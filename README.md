@@ -279,7 +279,13 @@ Submitting the same report again succeeds rather than failing.
 
 The client talks to `https://computearena.ai/api/v1`. `--api-url` or
 `COMPUTEARENA_API_URL` point it at another deployment, such as a local
-development server; sessions are kept per URL.
+development server; sessions are kept per URL. Interactive sessions check the latest
+stable GitHub release in the background, cache successful checks for 24 hours,
+and show a quickstart link only when a newer semantic version exists. Network
+failures never block offline benchmarking. API calls include the client version
+in both the user agent and x-computearena-client-version header; a server retiring
+an old client should return HTTP 426 with client_upgrade_required and may include
+minimumClientVersion for an actionable upgrade message.
 
 ## Configuration
 

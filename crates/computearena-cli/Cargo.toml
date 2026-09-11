@@ -21,6 +21,7 @@ flate2.workspace = true
 rand_core.workspace = true
 ratatui.workspace = true
 reqwest.workspace = true
+semver.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tar.workspace = true
