@@ -1245,7 +1245,12 @@ mod tests {
     #[test]
     fn manual_instructions_name_the_official_channels() {
         let basert = manual_instructions(Runtime::Basert).join("\n");
-        assert!(basert.contains(BASERT_INSTALL_SCRIPT));
+        if let Some(notice) = platform_notice(Runtime::Basert) {
+            assert!(basert.contains(&notice));
+            assert!(!basert.contains(BASERT_INSTALL_SCRIPT));
+        } else {
+            assert!(basert.contains(BASERT_INSTALL_SCRIPT));
+        }
         assert!(basert.contains("--runtime-path"));
         let llama = manual_instructions(Runtime::LlamaCpp).join("\n");
         assert!(llama.contains("brew install llama.cpp"));
