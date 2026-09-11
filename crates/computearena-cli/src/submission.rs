@@ -528,6 +528,8 @@ fn print_submission_preflight(ui: TerminalUi, preflight: &SubmissionPreflight) {
             println!("    {}", ui.muted(invalid.path.display()));
         }
     }
+    println!();
+    println!("{}", ui.neutral(crate::reports::SIGNATURE_SCOPE_NOTICE));
 }
 
 fn submission_file_label(path: &Path) -> String {

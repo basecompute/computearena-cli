@@ -495,6 +495,27 @@ pub(crate) fn finalize(
     model
 }
 
+pub(crate) fn report_identity_notice(model: &Value) -> String {
+    let canonical = model.pointer("/canonical/repo_id").and_then(Value::as_str);
+    let exact_artifact = [
+        "/artifact/repo_id",
+        "/artifact/revision",
+        "/artifact/path",
+        "/artifact/sha256",
+    ]
+    .into_iter()
+    .all(|pointer| model.pointer(pointer).and_then(Value::as_str).is_some());
+
+    match (exact_artifact, canonical) {
+        (true, Some(canonical)) => format!(
+            "Model identity recorded as {}; the server will independently verify the exact artifact when submitted.",
+            canonical
+        ),
+        (true, None) => "The exact model artifact was recorded for server verification, but its canonical model family is unresolved.".to_string(),
+        (false, _) => "Model identity is unresolved. The signed report remains submittable and will be labelled unverified; use computearena identify to bind manually acquired bytes to an exact Hugging Face file.".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,5 +592,28 @@ mod tests {
         assert_eq!(model["artifact"]["quantization"]["namespace"], "basert");
         assert_eq!(model["provenance"]["method"], "local_file");
         assert_eq!(model["artifact_sha256"], sha256);
+    }
+
+    #[test]
+    fn report_notice_never_claims_local_execution_attestation() {
+        let unresolved = json!({
+            "artifact": {"sha256": "aa"},
+            "canonical": null
+        });
+        assert!(report_identity_notice(&unresolved).contains("unresolved"));
+        assert!(report_identity_notice(&unresolved).contains("unverified"));
+
+        let resolvable = json!({
+            "artifact": {
+                "repo_id": "basecompute/Qwen3-4B",
+                "revision": "0123456789abcdef",
+                "path": "model.base",
+                "sha256": "aa"
+            },
+            "canonical": {"repo_id": "Qwen/Qwen3-4B"}
+        });
+        let notice = report_identity_notice(&resolvable);
+        assert!(notice.contains("server will independently verify"));
+        assert!(!notice.contains("execution verified"));
     }
 }

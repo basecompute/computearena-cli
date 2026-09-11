@@ -643,6 +643,7 @@ impl App {
                     .and_then(Value::as_str)
                     .unwrap_or("unknown");
                 println!("Run ID: {run_id}");
+                println!("{}", crate::reports::SIGNATURE_SCOPE_NOTICE);
                 Ok("Signature is valid".to_string())
             },
         ));

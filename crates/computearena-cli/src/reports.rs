@@ -13,6 +13,9 @@ use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+pub(crate) const SIGNATURE_SCOPE_NOTICE: &str =
+    "A valid report signature detects changes made after signing. It does not attest that a modified client honestly executed the benchmark.";
+
 #[derive(Clone, Debug)]
 pub(crate) struct Paths {
     pub(crate) root: PathBuf,

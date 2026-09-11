@@ -560,6 +560,7 @@ pub(crate) fn run_benchmark(
     let run_id = random_id();
     let model_metadata =
         crate::model_identity::finalize(runtime, paths, model, result.model, &model_sha256);
+    let model_identity_notice = crate::model_identity::report_identity_notice(&model_metadata);
 
     // Intentionally omit the user's account and local model path: a benchmark
     // can be created offline and attached to an authenticated account later.
@@ -594,6 +595,8 @@ pub(crate) fn run_benchmark(
     println!("Saved signed benchmark: {}", path.display());
     println!("Run ID: {run_id}");
     println!("Report SHA-256: {digest}");
+    println!("{}", ui.neutral(model_identity_notice));
+    println!("{}", ui.muted(crate::reports::SIGNATURE_SCOPE_NOTICE));
     if runtime == Runtime::LlamaCpp {
         if let Err(error) = crate::recent_gguf::remember(paths, model) {
             eprintln!(

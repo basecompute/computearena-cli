@@ -404,6 +404,7 @@ fn execute(
             finish_activity(ui, started, "Signature is valid");
             println!("Report: {}", path.display());
             println!("Installation key: {key_id}");
+            println!("{}", ui.neutral(reports::SIGNATURE_SCOPE_NOTICE));
             Ok(())
         }
         Action::Identify {
@@ -602,6 +603,7 @@ fn interactive(
                             );
                             println!("  Installation key: {}", short_id(&key));
                             println!("  File: {}", path.display());
+                            println!("  {}", ui.neutral(reports::SIGNATURE_SCOPE_NOTICE));
                         }
                         Err(error) => {
                             eprintln!("\n{} {error:#}", ui.error("✗ Verification failed:"));
