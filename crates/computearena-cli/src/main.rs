@@ -19,6 +19,7 @@ mod theme;
 #[cfg(unix)]
 mod tui;
 mod ui;
+mod updates;
 
 use auth::{load_api_session, login, logout, resolve_api_url};
 #[cfg(test)]
@@ -337,6 +338,10 @@ fn execute(
     harness: Option<PathBuf>,
     api_url: &str,
 ) -> Result<()> {
+    if runtime == Runtime::Basert && matches!(&command, Action::Run { .. } | Action::Install { .. })
+    {
+        runtimes::print_platform_notice(TerminalUi::detect(), runtime);
+    }
     match command {
         Action::Run {
             model,
@@ -904,6 +909,9 @@ mod tests {
         ));
         assert!(should_stop_submission(
             reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        ));
+        assert!(should_stop_submission(
+            reqwest::StatusCode::UPGRADE_REQUIRED
         ));
     }
 

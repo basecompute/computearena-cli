@@ -1,5 +1,5 @@
 use crate::api::{
-    client as api_client, error_code as api_error_code, error_message as api_error_message,
+    client as api_client, error_code as api_error_code, server_error as api_server_error,
 };
 use crate::config::{
     AUTH_HTTP_TIMEOUT, DEFAULT_API_URL, DEFAULT_DEVICE_AUTH_EXPIRES_SECS,
@@ -71,11 +71,7 @@ pub(crate) fn login(paths: &Paths, api_url: &str) -> Result<()> {
     let status = response.status();
     let body = response.text().unwrap_or_default();
     if !status.is_success() {
-        bail!(
-            "{}",
-            api_error_message(&body)
-                .unwrap_or_else(|| format!("server returned HTTP {}", status.as_u16()))
-        );
+        bail!("{}", api_server_error(status, &body));
     }
     let device: Value = serde_json::from_str(&body).context("parsing login response")?;
     let device_code = required_json_string(&device, "deviceCode")?;
@@ -132,11 +128,7 @@ pub(crate) fn login(paths: &Paths, api_url: &str) -> Result<()> {
         if api_error_code(&body).as_deref() == Some("authorization_pending") {
             continue;
         }
-        bail!(
-            "{}",
-            api_error_message(&body)
-                .unwrap_or_else(|| format!("server returned HTTP {}", status.as_u16()))
-        );
+        bail!("{}", api_server_error(status, &body));
     }
     bail!("login code expired; run `computearena login` again")
 }
@@ -161,8 +153,7 @@ fn validate_api_session(api_url: &str, session: &ApiSession) -> Result<Option<St
     }
     bail!(
         "could not validate saved login: {}",
-        api_error_message(&body)
-            .unwrap_or_else(|| format!("server returned HTTP {}", status.as_u16()))
+        api_server_error(status, &body)
     )
 }
 

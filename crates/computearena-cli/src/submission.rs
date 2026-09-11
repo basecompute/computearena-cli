@@ -1,4 +1,4 @@
-use crate::api::{client as api_client, error_message as api_error_message};
+use crate::api::{client as api_client, server_error as api_server_error};
 use crate::auth::load_api_session;
 use crate::config::SUBMISSION_HTTP_TIMEOUT;
 use crate::model_identity::{verify_submission_model, SubmissionModelVerification};
@@ -359,8 +359,7 @@ pub(crate) fn submit_reports(
                         detail: submission_id.map(|id| format!("Submission ID: {id}")),
                     });
                 } else {
-                    let message = api_error_message(&body)
-                        .unwrap_or_else(|| format!("server returned HTTP {}", status.as_u16()));
+                    let message = api_server_error(status, &body);
                     eprintln!("{} {message}", ui.error("✗"));
                     outcomes.push(SubmissionOutcome {
                         label,
@@ -593,6 +592,7 @@ pub(crate) fn should_stop_submission(status: reqwest::StatusCode) -> bool {
             | reqwest::StatusCode::FORBIDDEN
             | reqwest::StatusCode::REQUEST_TIMEOUT
             | reqwest::StatusCode::TOO_MANY_REQUESTS
+            | reqwest::StatusCode::UPGRADE_REQUIRED
     ) || status.is_server_error()
 }
 
