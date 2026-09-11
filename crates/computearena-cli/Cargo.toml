@@ -16,6 +16,7 @@ base64.workspace = true
 clap.workspace = true
 dialoguer.workspace = true
 dirs.workspace = true
+percent-encoding.workspace = true
 ed25519-dalek.workspace = true
 flate2.workspace = true
 rand_core.workspace = true

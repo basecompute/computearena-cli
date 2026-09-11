@@ -558,11 +558,8 @@ pub(crate) fn run_benchmark(
     let public_bytes = public.to_bytes();
     let key_id = sha256_hex(&public_bytes);
     let run_id = random_id();
-    let mut model_metadata = result.model;
-    model_metadata["upstream_id"] = Value::Null;
-    model_metadata["upstream_id_source"] = json!("unresolved");
-    model_metadata["identity_verification"] = json!("unverified");
-    model_metadata["artifact_sha256"] = json!(model_sha256);
+    let model_metadata =
+        crate::model_identity::finalize(runtime, paths, model, result.model, &model_sha256);
 
     // Intentionally omit the user's account and local model path: a benchmark
     // can be created offline and attached to an authenticated account later.

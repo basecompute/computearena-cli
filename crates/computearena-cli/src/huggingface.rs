@@ -5,7 +5,10 @@
 //! the environment (`HF_TOKEN`), which gated repositories need.
 use crate::config::{HTTP_CONNECT_TIMEOUT, HUGGINGFACE_API, HUGGINGFACE_HOST};
 use anyhow::{bail, Context, Result};
+use percent_encoding::percent_decode_str;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -21,9 +24,23 @@ pub(crate) struct HubModel {
     pub(crate) likes: u64,
 }
 
+#[derive(Clone)]
 pub(crate) struct HubFile {
     pub(crate) path: String,
     pub(crate) size: u64,
+    pub(crate) revision: String,
+    pub(crate) sha256: Option<String>,
+    pub(crate) canonical_repository: Option<String>,
+}
+
+pub(crate) struct RepositoryIdentity {
+    pub(crate) revision: String,
+    pub(crate) canonical_repository: Option<String>,
+}
+
+pub(crate) struct HubFileIdentity {
+    pub(crate) repository: String,
+    pub(crate) file: HubFile,
 }
 
 fn client(timeout: Duration) -> Result<reqwest::blocking::Client> {
@@ -93,17 +110,265 @@ pub(crate) fn search(query: &str) -> Result<Vec<HubModel>> {
 
 /// The GGUF files inside one repository, smallest first: quantizations are
 /// usually chosen by the size a device can hold.
-pub(crate) fn gguf_files(repository: &str) -> Result<Vec<HubFile>> {
-    let url = format!("{HUGGINGFACE_API}/models/{repository}/tree/main?recursive=true");
-    let body: Value = serde_json::from_str(
+fn canonical_repository(info: &Value) -> Option<String> {
+    fn add(repositories: &mut BTreeSet<String>, value: &str) {
+        let value = value
+            .strip_prefix("quantized:")
+            .or_else(|| value.strip_prefix("finetune:"))
+            .or_else(|| value.strip_prefix("adapter:"))
+            .unwrap_or(value);
+        if value.split('/').filter(|part| !part.is_empty()).count() == 2 {
+            repositories.insert(value.to_string());
+        }
+    }
+    let mut repositories = BTreeSet::new();
+    match info.pointer("/cardData/base_model") {
+        Some(Value::String(value)) => add(&mut repositories, value),
+        Some(Value::Array(values)) => {
+            for value in values.iter().filter_map(Value::as_str) {
+                add(&mut repositories, value);
+            }
+        }
+        _ => {}
+    }
+    if repositories.is_empty() {
+        for tag in info
+            .get("tags")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter_map(|tag| tag.strip_prefix("base_model:"))
+        {
+            add(&mut repositories, tag);
+        }
+    }
+    (repositories.len() == 1).then(|| repositories.into_iter().next().unwrap())
+}
+
+fn repository_info(repository: &str) -> Result<Value> {
+    let url = format!("{HUGGINGFACE_API}/models/{repository}");
+    serde_json::from_str(
         &request(&url, SEARCH_TIMEOUT)?
             .text()
-            .context("reading the repository listing")?,
+            .context("reading Hugging Face model metadata")?,
     )
-    .context("parsing the repository listing")?;
-    let entries = body
+    .context("parsing Hugging Face model metadata")
+}
+
+fn repository_info_at(repository: &str, revision: &str) -> Result<Value> {
+    let url = format!("{HUGGINGFACE_API}/models/{repository}/revision/{revision}");
+    serde_json::from_str(
+        &request(&url, SEARCH_TIMEOUT)?
+            .text()
+            .context("reading Hugging Face model metadata")?,
+    )
+    .context("parsing Hugging Face model metadata")
+}
+
+pub(crate) fn repository_identity(repository: &str) -> Result<RepositoryIdentity> {
+    let info = repository_info(repository)?;
+    Ok(RepositoryIdentity {
+        revision: info
+            .get("sha")
+            .and_then(Value::as_str)
+            .context("Hugging Face model metadata omitted its immutable revision")?
+            .to_string(),
+        canonical_repository: canonical_repository(&info),
+    })
+}
+
+fn repository_identity_at(repository: &str, revision: &str) -> Result<RepositoryIdentity> {
+    let info = repository_info_at(repository, revision)?;
+    Ok(RepositoryIdentity {
+        revision: info
+            .get("sha")
+            .and_then(Value::as_str)
+            .context("Hugging Face model metadata omitted its immutable revision")?
+            .to_string(),
+        canonical_repository: canonical_repository(&info),
+    })
+}
+
+fn decode_path_segment(value: &str) -> Result<String> {
+    percent_decode_str(value)
+        .decode_utf8()
+        .map(|value| value.into_owned())
+        .context("Hugging Face URL contains invalid UTF-8")
+}
+
+fn parse_file_url(value: &str) -> Result<(String, String, String)> {
+    let url = reqwest::Url::parse(value).context("parsing the Hugging Face file URL")?;
+    if url.scheme() != "https" || url.host_str() != Some("huggingface.co") {
+        bail!("expected an https://huggingface.co/... file URL");
+    }
+    let parts: Vec<_> = url
+        .path_segments()
+        .context("Hugging Face file URL has no path")?
+        .map(decode_path_segment)
+        .collect::<Result<_>>()?;
+    if parts.len() < 5 || !matches!(parts[2].as_str(), "blob" | "resolve") {
+        bail!(
+            "expected a Hugging Face file URL such as https://huggingface.co/owner/model/blob/revision/path/to/model.gguf"
+        );
+    }
+    Ok((
+        format!("{}/{}", parts[0], parts[1]),
+        parts[3].clone(),
+        parts[4..].join("/"),
+    ))
+}
+
+fn next_page(response: &reqwest::blocking::Response) -> Option<String> {
+    response
+        .headers()
+        .get(reqwest::header::LINK)?
+        .to_str()
+        .ok()?
+        .split(',')
+        .find_map(|link| {
+            let (url, attributes) = link.trim().split_once(';')?;
+            if !attributes
+                .split(';')
+                .any(|attribute| attribute.trim() == "rel=\"next\"")
+            {
+                return None;
+            }
+            url.trim()
+                .strip_prefix('<')?
+                .strip_suffix('>')
+                .map(str::to_string)
+        })
+}
+
+fn repository_tree(repository: &str, revision: &str) -> Result<Vec<Value>> {
+    let mut url = Some(format!(
+        "{HUGGINGFACE_API}/models/{repository}/tree/{revision}?recursive=true&expand=true"
+    ));
+    let mut entries = Vec::new();
+    let mut seen = BTreeSet::new();
+    while let Some(page) = url.take() {
+        if !seen.insert(page.clone()) {
+            bail!("Hugging Face returned a cyclic pagination link");
+        }
+        let response = request(&page, SEARCH_TIMEOUT)?;
+        url = next_page(&response);
+        if let Some(next) = &url {
+            let next = reqwest::Url::parse(next).context("parsing Hugging Face pagination URL")?;
+            if next.scheme() != "https" || next.host_str() != Some("huggingface.co") {
+                bail!("Hugging Face returned an unsafe pagination URL");
+            }
+        }
+        let body: Value =
+            serde_json::from_str(&response.text().context("reading the repository listing")?)
+                .context("parsing the repository listing")?;
+        entries.extend(
+            body.as_array()
+                .context("Hugging Face returned an unexpected repository listing")?
+                .iter()
+                .cloned(),
+        );
+    }
+    Ok(entries)
+}
+
+/// Resolve a human-facing Hugging Face file URL to immutable repository and
+/// file identity. `paths-info` exposes the content SHA-256 for LFS/Xet model
+/// objects without downloading the model again.
+pub(crate) fn file_identity(url: &str) -> Result<HubFileIdentity> {
+    let (repository, requested_revision, path) = parse_file_url(url)?;
+    let identity = repository_identity_at(&repository, &requested_revision)?;
+    let info_url = format!(
+        "{HUGGINGFACE_API}/models/{repository}/paths-info/{}",
+        identity.revision
+    );
+    let mut builder = client(SEARCH_TIMEOUT)?
+        .post(&info_url)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(serde_json::to_vec(&serde_json::json!({"paths": [&path]}))?);
+    if let Some(token) = std::env::var_os("HF_TOKEN").filter(|token| !token.is_empty()) {
+        builder = builder.bearer_auth(token.to_string_lossy());
+    }
+    let response = builder
+        .send()
+        .with_context(|| format!("contacting {info_url}"))?;
+    if !response.status().is_success() {
+        bail!("Hugging Face answered {} for {info_url}", response.status());
+    }
+    let body: Value = serde_json::from_str(
+        &response
+            .text()
+            .context("reading Hugging Face file metadata")?,
+    )
+    .context("parsing Hugging Face file metadata")?;
+    let entry = body
         .as_array()
-        .context("Hugging Face returned an unexpected repository listing")?;
+        .and_then(|entries| entries.first())
+        .filter(|entry| entry.get("type").and_then(Value::as_str) == Some("file"))
+        .with_context(|| format!("{repository} has no file named {path} at that revision"))?;
+    let sha256 = entry
+        .pointer("/lfs/oid")
+        .and_then(Value::as_str)
+        .filter(|sha| sha.len() == 64 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(|sha| sha.to_ascii_lowercase());
+    Ok(HubFileIdentity {
+        repository,
+        file: HubFile {
+            path,
+            size: entry
+                .get("size")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+            revision: identity.revision,
+            sha256,
+            canonical_repository: identity.canonical_repository,
+        },
+    })
+}
+
+/// Find the single Hub file whose published LFS SHA-256 matches local bytes.
+/// This recovers the actual artifact path when a runtime sidecar only records
+/// a repository and a mutable ref such as `main`.
+pub(crate) fn find_file_by_sha256(
+    repository: &str,
+    revision: &str,
+    sha256: &str,
+) -> Result<HubFile> {
+    let identity = repository_identity_at(repository, revision)?;
+    let entries = repository_tree(repository, &identity.revision)?;
+    let mut matches = entries.iter().filter(|entry| {
+        entry
+            .pointer("/lfs/oid")
+            .and_then(Value::as_str)
+            .is_some_and(|oid| oid.eq_ignore_ascii_case(sha256))
+    });
+    let entry = matches.next().with_context(|| {
+        format!("{repository} has no file matching the local SHA-256 at {revision}")
+    })?;
+    if matches.next().is_some() {
+        bail!("{repository} contains multiple files with that SHA-256 at {revision}");
+    }
+    Ok(HubFile {
+        path: entry
+            .get("path")
+            .and_then(Value::as_str)
+            .context("Hugging Face file metadata omitted its path")?
+            .to_string(),
+        size: entry
+            .get("size")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        revision: identity.revision,
+        sha256: Some(sha256.to_ascii_lowercase()),
+        canonical_repository: identity.canonical_repository,
+    })
+}
+
+pub(crate) fn gguf_files(repository: &str) -> Result<Vec<HubFile>> {
+    let identity = repository_identity(repository)?;
+    let revision = identity.revision;
+    let canonical_repository = identity.canonical_repository;
+    let entries = repository_tree(repository, &revision)?;
     let mut files: Vec<HubFile> = entries
         .iter()
         .filter(|entry| entry.get("type").and_then(Value::as_str) == Some("file"))
@@ -118,6 +383,15 @@ pub(crate) fn gguf_files(repository: &str) -> Result<Vec<HubFile>> {
                     .get("size")
                     .and_then(Value::as_u64)
                     .unwrap_or_default(),
+                revision: revision.clone(),
+                sha256: entry
+                    .pointer("/lfs/oid")
+                    .and_then(Value::as_str)
+                    .filter(|sha| {
+                        sha.len() == 64 && sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+                    .map(|sha| sha.to_ascii_lowercase()),
+                canonical_repository: canonical_repository.clone(),
             })
         })
         .collect();
@@ -145,19 +419,43 @@ pub(crate) fn format_size(bytes: u64) -> String {
 
 /// Where a downloaded model lives: under the ComputeArena data directory, laid
 /// out like the repository it came from so two files never collide.
-pub(crate) fn download_path(root: &Path, repository: &str, file: &str) -> PathBuf {
+pub(crate) fn download_path(root: &Path, repository: &str, file: &str) -> Result<PathBuf> {
     let mut path = root.join("models");
     for segment in repository.split('/').chain(file.split('/')) {
+        if segment.is_empty() || matches!(segment, "." | "..") {
+            bail!("Hugging Face returned an unsafe model path");
+        }
         path.push(segment);
     }
-    path
+    Ok(path)
 }
 
 /// Fetch one file, printing progress. Downloads to a temporary name first so an
 /// interrupted transfer never looks like a usable model.
 pub(crate) fn download(root: &Path, repository: &str, file: &HubFile) -> Result<PathBuf> {
-    let destination = download_path(root, repository, &file.path);
+    let destination = download_path(root, repository, &file.path)?;
     if destination.is_file() {
+        let sha256 = crate::adapters::file_sha256(&destination)?;
+        if file
+            .sha256
+            .as_deref()
+            .is_some_and(|expected| expected != sha256)
+        {
+            bail!(
+                "the existing file at {} does not match Hugging Face's SHA-256",
+                destination.display()
+            );
+        }
+        crate::model_identity::record_huggingface_download(
+            root,
+            repository,
+            &file.revision,
+            &file.path,
+            &sha256,
+            file.sha256.as_deref(),
+            file.canonical_repository.as_deref(),
+            "computearena_download",
+        )?;
         println!("Already downloaded: {}", destination.display());
         return Ok(destination);
     }
@@ -168,8 +466,8 @@ pub(crate) fn download(root: &Path, repository: &str, file: &HubFile) -> Result<
         .with_context(|| format!("creating {}", directory.display()))?;
 
     let url = format!(
-        "{HUGGINGFACE_HOST}/{repository}/resolve/main/{}?download=true",
-        file.path
+        "{HUGGINGFACE_HOST}/{repository}/resolve/{}/{}?download=true",
+        file.revision, file.path
     );
     println!("Downloading {} ({})", file.path, format_size(file.size));
     let mut response = request(&url, DOWNLOAD_TIMEOUT)?;
@@ -179,6 +477,7 @@ pub(crate) fn download(root: &Path, repository: &str, file: &HubFile) -> Result<
         File::create(&partial).with_context(|| format!("creating {}", partial.display()))?;
     let mut buffer = vec![0_u8; 1024 * 1024];
     let mut received: u64 = 0;
+    let mut digest = Sha256::new();
     let mut reported = Instant::now();
     loop {
         let count = response.read(&mut buffer).context("reading the download")?;
@@ -188,6 +487,7 @@ pub(crate) fn download(root: &Path, repository: &str, file: &HubFile) -> Result<
         output
             .write_all(&buffer[..count])
             .context("writing the download")?;
+        digest.update(&buffer[..count]);
         received += count as u64;
         // One line every couple of seconds: enough to show life, few enough to
         // stay readable in a log pane.
@@ -213,6 +513,19 @@ pub(crate) fn download(root: &Path, repository: &str, file: &HubFile) -> Result<
             format_size(total)
         );
     }
+    let sha256 = format!("{:x}", digest.finalize());
+    if file
+        .sha256
+        .as_deref()
+        .is_some_and(|expected| expected != sha256)
+    {
+        let _ = std::fs::remove_file(&partial);
+        bail!(
+            "Hugging Face SHA-256 mismatch for {}: expected {}, got {sha256}",
+            file.path,
+            file.sha256.as_deref().unwrap_or("unknown")
+        );
+    }
     std::fs::rename(&partial, &destination).with_context(|| {
         format!(
             "moving {} into place at {}",
@@ -220,6 +533,16 @@ pub(crate) fn download(root: &Path, repository: &str, file: &HubFile) -> Result<
             destination.display()
         )
     })?;
+    crate::model_identity::record_huggingface_download(
+        root,
+        repository,
+        &file.revision,
+        &file.path,
+        &sha256,
+        file.sha256.as_deref(),
+        file.canonical_repository.as_deref(),
+        "computearena_download",
+    )?;
     println!("Saved {}", destination.display());
     Ok(destination)
 }
@@ -253,11 +576,49 @@ mod tests {
     }
 
     #[test]
+    fn parses_huggingface_file_urls() {
+        assert_eq!(
+            parse_file_url(
+                "https://huggingface.co/bartowski/Qwen-GGUF/blob/main/models/Q4_K_M/model%20one.gguf?download=true"
+            )
+            .unwrap(),
+            (
+                "bartowski/Qwen-GGUF".to_string(),
+                "main".to_string(),
+                "models/Q4_K_M/model one.gguf".to_string()
+            )
+        );
+        assert!(parse_file_url("https://example.com/a/b/blob/main/model.gguf").is_err());
+    }
+
+    #[test]
     fn downloads_mirror_the_repository_layout_under_the_data_directory() {
-        let path = download_path(Path::new("/data"), "TheBloke/Qwen-GGUF", "q4/model.gguf");
+        let path =
+            download_path(Path::new("/data"), "TheBloke/Qwen-GGUF", "q4/model.gguf").unwrap();
         assert_eq!(
             path,
             Path::new("/data/models/TheBloke/Qwen-GGUF/q4/model.gguf")
         );
+        assert!(download_path(Path::new("/data"), "owner/model", "../model.gguf").is_err());
+    }
+
+    #[test]
+    fn reads_one_canonical_base_model_from_hub_metadata() {
+        let info = serde_json::json!({
+            "cardData": {"base_model": "Qwen/Qwen3-4B"},
+            "tags": ["base_model:quantized:Qwen/Qwen3-4B"]
+        });
+        assert_eq!(
+            canonical_repository(&info).as_deref(),
+            Some("Qwen/Qwen3-4B")
+        );
+    }
+
+    #[test]
+    fn merged_models_do_not_claim_one_canonical_identity() {
+        let info = serde_json::json!({
+            "cardData": {"base_model": ["one/model", "two/model"]}
+        });
+        assert_eq!(canonical_repository(&info), None);
     }
 }
