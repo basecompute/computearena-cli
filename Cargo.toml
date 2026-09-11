@@ -14,6 +14,7 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 dialoguer = { version = "0.12", default-features = false, features = ["fuzzy-select"] }
 dirs = "5"
+percent-encoding = "2"
 libc = "0.2"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 flate2 = "1"

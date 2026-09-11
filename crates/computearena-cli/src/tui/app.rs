@@ -41,6 +41,12 @@ pub(crate) struct HubFileRow {
     pub(crate) file: crate::huggingface::HubFile,
 }
 
+pub(crate) struct BaseRtModelRow {
+    pub(crate) label: String,
+    pub(crate) detail: String,
+    pub(crate) model: crate::basert_models::RemoteModel,
+}
+
 pub(crate) struct ReportRow {
     pub(crate) label: String,
     pub(crate) detail: String,
@@ -89,6 +95,11 @@ pub(crate) enum Screen {
     HubFiles {
         repository: String,
         rows: Vec<HubFileRow>,
+        cursor: usize,
+    },
+    BaseRtModels {
+        rows: Vec<BaseRtModelRow>,
+        filter: String,
         cursor: usize,
     },
     Account {
@@ -145,6 +156,7 @@ enum Loaded {
     Reports(Vec<ReportRow>, ReportMode),
     HubModels(Vec<HubModelRow>),
     HubFiles(String, Vec<HubFileRow>),
+    BaseRtModels(Vec<BaseRtModelRow>),
 }
 
 struct Pending {
@@ -176,7 +188,7 @@ pub(crate) struct App {
     pending: Option<Pending>,
     /// Where the running download will land, so its plan can open when it
     /// finishes.
-    downloaded: Option<PathBuf>,
+    downloaded: Arc<Mutex<Option<PathBuf>>>,
     pub(crate) status: String,
     pub(crate) should_quit: bool,
     /// Where the benchmark job leaves the path of the report it saved, so
@@ -207,7 +219,7 @@ impl App {
             screens: Vec::new(),
             job: None,
             pending: None,
-            downloaded: None,
+            downloaded: Arc::new(Mutex::new(None)),
             status: update_notice
                 .map(|notice| notice.message())
                 .unwrap_or_default(),
@@ -473,6 +485,18 @@ impl App {
                     cursor: 0,
                 });
             }
+            Ok(Loaded::BaseRtModels(rows)) => {
+                if rows.is_empty() {
+                    self.status =
+                        "Every compatible BaseRT catalogue model is installed".to_string();
+                    return;
+                }
+                self.screens.push(Screen::BaseRtModels {
+                    rows,
+                    filter: String::new(),
+                    cursor: 0,
+                });
+            }
             Ok(Loaded::Reports(rows, mode)) => {
                 if rows.is_empty() {
                     self.screens.push(Screen::Info {
@@ -536,8 +560,14 @@ impl App {
             JobKind::Submit,
             format!("Submitting {count} benchmark(s)"),
             move || {
-                submit_reports(&paths, &reports, &api_url, true, false)?;
-                Ok(format!("Submitted {count} benchmark(s)"))
+                // A report that fails its checks is listed and left out; it
+                // must not stop the others from being uploaded.
+                let summary = submit_reports(&paths, &reports, &api_url, true, true)?;
+                Ok(if summary.skipped == 0 && summary.duplicates == 0 {
+                    format!("Submitted {count} benchmark(s)")
+                } else {
+                    summary.describe()
+                })
             },
         ));
         self.screens.push(Screen::Running);
@@ -554,21 +584,62 @@ impl App {
             .next()
             .unwrap_or(&file.path)
             .to_string();
-        self.downloaded = Some(crate::huggingface::download_path(
-            &root,
-            &repository,
-            &file.path,
-        ));
+        let downloaded = self.downloaded.clone();
+        *downloaded.lock().unwrap_or_else(PoisonError::into_inner) = None;
         self.job = Some(Job::spawn(
             JobKind::Download,
             format!("Downloading {name} from {repository}"),
             move || {
                 let path = crate::huggingface::download(&root, &repository, &file)?;
                 crate::recent_gguf::remember(&paths, &path)?;
+                *downloaded.lock().unwrap_or_else(PoisonError::into_inner) = Some(path);
                 Ok(format!("Downloaded {name}"))
             },
         ));
         self.screens.push(Screen::Running);
+    }
+
+    fn open_basert_models(&mut self) -> Result<()> {
+        let harness = self.executable.clone();
+        self.screens.push(Screen::Loading {
+            message: "Loading the BaseRT model catalogue…".to_string(),
+        });
+        self.pending = Some(Pending::spawn(move || {
+            let rows = crate::basert_models::available(harness.as_deref())?
+                .into_iter()
+                .map(|model| BaseRtModelRow {
+                    label: model.id.clone(),
+                    detail: format!(
+                        "{} · {} · {}",
+                        crate::basert_models::display_pull_target(&model.pull_target),
+                        model.architecture,
+                        model
+                            .size_bytes
+                            .map(crate::huggingface::format_size)
+                            .unwrap_or_else(|| "size unavailable".to_string())
+                    ),
+                    model,
+                })
+                .collect();
+            Ok(Loaded::BaseRtModels(rows))
+        }));
+        Ok(())
+    }
+
+    fn start_basert_download(&mut self, model: crate::basert_models::RemoteModel) -> Result<()> {
+        let cli = crate::basert_models::locate_cli(self.executable.as_deref())?;
+        let root = self.paths.root.clone();
+        let downloaded = self.downloaded.clone();
+        *downloaded.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        let title = format!("Downloading {} ({})", model.id, model.pull_target);
+        self.job = Some(Job::spawn(JobKind::Download, title, move || {
+            let path = crate::basert_models::pull(&cli, &model)?;
+            crate::basert_models::record_download(&root, &path)?;
+            *downloaded.lock().unwrap_or_else(PoisonError::into_inner) = Some(path);
+            Ok(format!("Downloaded {} ({})", model.id, model.pull_target))
+        }));
+        self.screens.push(Screen::Running);
+        Ok(())
     }
 
     fn start_verify(&mut self, report: PathBuf) {
@@ -591,6 +662,7 @@ impl App {
                     .and_then(Value::as_str)
                     .unwrap_or("unknown");
                 println!("Run ID: {run_id}");
+                println!("{}", crate::reports::SIGNATURE_SCOPE_NOTICE);
                 Ok("Signature is valid".to_string())
             },
         ));
@@ -704,11 +776,18 @@ impl App {
             JobKind::Download => {
                 while matches!(
                     self.screen(),
-                    Screen::HubFiles { .. } | Screen::HubModels { .. }
+                    Screen::HubFiles { .. }
+                        | Screen::HubModels { .. }
+                        | Screen::BaseRtModels { .. }
                 ) {
                     self.back();
                 }
-                if let (Some(Ok(_)), Some(path)) = (&saved, self.downloaded.take()) {
+                let path = self
+                    .downloaded
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take();
+                if let (Some(Ok(_)), Some(path)) = (&saved, path) {
                     self.open_plan(path)?;
                 }
             }
@@ -797,6 +876,11 @@ impl App {
                 input.push(character);
                 return Ok(());
             }
+            Screen::BaseRtModels { filter, cursor, .. } => {
+                filter.push(character);
+                *cursor = 0;
+                return Ok(());
+            }
             _ => {}
         }
         match character {
@@ -822,6 +906,10 @@ impl App {
             }
             Screen::HubSearch { input } => {
                 input.pop();
+            }
+            Screen::BaseRtModels { filter, cursor, .. } => {
+                filter.pop();
+                *cursor = 0;
             }
             _ => {}
         }
@@ -865,6 +953,19 @@ impl App {
             .collect()
     }
 
+    fn visible_basert_models(rows: &[BaseRtModelRow], filter: &str) -> Vec<usize> {
+        let needle = filter.to_ascii_lowercase();
+        rows.iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                needle.is_empty()
+                    || row.label.to_ascii_lowercase().contains(&needle)
+                    || row.detail.to_ascii_lowercase().contains(&needle)
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
     fn list_length(&self) -> usize {
         match self.screen() {
             Screen::Runtime { .. } => 2,
@@ -875,6 +976,9 @@ impl App {
             Screen::Reports { rows, .. } => rows.len(),
             Screen::HubModels { rows, .. } => rows.len(),
             Screen::HubFiles { rows, .. } => rows.len(),
+            Screen::BaseRtModels { rows, filter, .. } => {
+                Self::visible_basert_models(rows, filter).len()
+            }
             Screen::Account { .. } => 2,
             Screen::Preview { lines, .. } => lines.len(),
             Screen::PathEntry { .. } | Screen::Running | Screen::Info { .. } => 0,
@@ -901,6 +1005,7 @@ impl App {
             | Screen::Reports { cursor, .. }
             | Screen::HubModels { cursor, .. }
             | Screen::HubFiles { cursor, .. }
+            | Screen::BaseRtModels { cursor, .. }
             | Screen::Account { cursor } => cursor,
             Screen::Preview { scroll, .. } => scroll,
             _ => return,
@@ -921,6 +1026,7 @@ impl App {
             | Screen::Reports { cursor, .. }
             | Screen::HubModels { cursor, .. }
             | Screen::HubFiles { cursor, .. }
+            | Screen::BaseRtModels { cursor, .. }
             | Screen::Account { cursor } => *cursor = position.min(length.saturating_sub(1)),
             Screen::Preview { scroll, .. } => *scroll = position.min(length.saturating_sub(1)),
             _ => {}
@@ -1046,11 +1152,18 @@ impl App {
                 cursor,
             } => {
                 let repository = repository.clone();
-                let file = crate::huggingface::HubFile {
-                    path: rows[*cursor].file.path.clone(),
-                    size: rows[*cursor].file.size,
-                };
+                let file = rows[*cursor].file.clone();
                 self.start_download(repository, file);
+            }
+            Screen::BaseRtModels {
+                rows,
+                filter,
+                cursor,
+            } => {
+                let visible = Self::visible_basert_models(rows, filter);
+                if let Some(index) = visible.get(*cursor) {
+                    self.start_basert_download(rows[*index].model.clone())?;
+                }
             }
             Screen::Models {
                 rows,
@@ -1063,9 +1176,12 @@ impl App {
                 };
                 match (rows[*index].path.clone(), rows[*index].source) {
                     (Some(path), _) => self.open_plan(path)?,
-                    (None, ModelSource::Hub) => self.screens.push(Screen::HubSearch {
-                        input: String::new(),
-                    }),
+                    (None, ModelSource::Hub) => match self.runtime {
+                        Runtime::Basert => self.open_basert_models()?,
+                        Runtime::LlamaCpp => self.screens.push(Screen::HubSearch {
+                            input: String::new(),
+                        }),
+                    },
                     (None, ModelSource::Local) => self.screens.push(Screen::PathEntry {
                         input: String::new(),
                         error: None,
@@ -1236,16 +1352,15 @@ fn model_rows(runtime: Runtime, paths: &Paths) -> Result<Vec<ModelRow>> {
             })
             .collect(),
     };
-    if runtime == Runtime::LlamaCpp {
-        // Most people have no GGUF on disk yet, so the Hub is offered before
-        // the path prompt rather than after it.
-        rows.push(ModelRow {
-            label: "Search Hugging Face for a GGUF…".to_string(),
-            detail: "Download a model to benchmark".to_string(),
-            path: None,
-            source: ModelSource::Hub,
-        });
-    }
+    rows.push(ModelRow {
+        label: match runtime {
+            Runtime::Basert => "Browse the BaseRT model catalogue…".to_string(),
+            Runtime::LlamaCpp => "Search Hugging Face for a GGUF…".to_string(),
+        },
+        detail: "Download a model to benchmark".to_string(),
+        path: None,
+        source: ModelSource::Hub,
+    });
     rows.push(ModelRow {
         label: match runtime {
             Runtime::Basert => "Enter another model path…".to_string(),
@@ -1298,7 +1413,7 @@ mod tests {
             screens: vec![Screen::Menu { cursor: 0 }],
             job: None,
             pending: None,
-            downloaded: None,
+            downloaded: Arc::new(Mutex::new(None)),
             status: String::new(),
             should_quit: false,
             completed_report: Arc::new(Mutex::new(None)),

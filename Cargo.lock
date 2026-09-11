@@ -339,6 +339,7 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "libc",
+ "percent-encoding",
  "rand_core 0.6.4",
  "ratatui",
  "reqwest",

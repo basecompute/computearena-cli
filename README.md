@@ -93,11 +93,11 @@ or, from a checkout, `cargo build --release`, which writes
    `brew install llama.cpp` or its
    [releases](https://github.com/ggml-org/llama.cpp/releases). The client can
    also install either one for you (see [Runtimes](#runtimes)).
-2. Have a model on disk: a `.base` bundle for BaseRT, for example from
-   `basert pull Qwen/Qwen3-0.6B`, or a `.gguf` file for llama.cpp. For
-   llama.cpp the model picker can also search the Hugging Face Hub and
-   download a GGUF for you, smallest quantization first; set `HF_TOKEN` in
-   your environment for gated repositories.
+2. Choose a model. The BaseRT picker can browse BaseRT's public catalogue and
+   run its backend-aware `basert pull` flow; the llama.cpp picker can search
+   Hugging Face and download a GGUF, smallest file first. Existing `.base` and
+   `.gguf` files can still be entered directly. Set `HF_TOKEN` for gated
+   Hugging Face repositories.
 3. Run `computearena`. In a terminal this opens the full-screen interface:
    arrow keys move, Enter selects, Esc goes back, Ctrl+C leaves, and the
    wheel or PgUp/PgDn scrolls long output. It asks which
@@ -123,11 +123,12 @@ computearena llama-cpp run model.gguf    # benchmark and save a signed report
 computearena list                        # saved reports (--json for machines)
 computearena inspect <run-id-or-path>    # print one report
 computearena verify <run-id-or-path>     # check its signature
+computearena identify model.gguf <hf-file-url> # verify a manually downloaded model
 computearena login                       # connect this installation to your account
 computearena submit                      # upload chosen reports
 ```
 
-`run`, `list`, `inspect`, `verify`, `login`, `logout`, `install`, and `submit`
+`run`, `list`, `inspect`, `verify`, `identify`, `login`, `logout`, `install`, and `submit`
 work under either runtime selector. Without a selector they act as BaseRT
 commands, so scripts written for earlier versions keep working. `--data-dir`,
 `--runtime-path` (alias `--harness`), and `--api-url` are accepted anywhere.
@@ -198,7 +199,10 @@ The harness must advertise the `basert-benchmark-harness/1` protocol through
 `describe --json`. `COMPUTEARENA_BASERT_HARNESS` is the environment equivalent
 of `--runtime-path`. BaseRT 0.2.4 and newer can also start this client with
 `basert computearena`, provided `computearena` is beside `basert` or on
-`PATH`.
+`PATH`. The model picker uses the `basert` command beside the harness, on
+`PATH`, or in BaseRT's install directory to list and pull catalogue models.
+BaseRT remains responsible for choosing a compatible backend artifact,
+downloading split files, conversion, and writing `hub.json` provenance.
 
 ### llama.cpp
 
@@ -224,9 +228,10 @@ under a `basert/computearena` directory instead; the first run moves that
 directory whole, reports, key, sessions, and installed runtimes included,
 and says so. Inside it, `reports/` holds one
 JSON file per run, `keys/installation.ed25519` is the private signing key
-created on first use, `auth.json` holds login sessions, and
-`runtimes/` holds llama.cpp builds the client installed. `--output` writes a
-report elsewhere instead.
+created on first use, `auth.json` holds login sessions, `runtimes/` holds
+llama.cpp builds the client installed, and `model-provenance/` holds
+content-addressed receipts for models acquired or identified through
+ComputeArena. `--output` writes a report elsewhere instead.
 
 Each report is a `computearena-benchmark/1` envelope: a run ID, a timestamp,
 the client version, the runtime (name, version, adapter descriptor, and the
@@ -246,10 +251,28 @@ sign invented numbers. The executable and model hashes identify what was
 claimed to run; they do not attest the process, its libraries, or GPU kernels,
 and they cannot see a file swapped and restored between the two hashes.
 
-Model identity is deliberately left unresolved. The name and quantization
-embedded in the file are kept as display metadata and marked `unverified`. No
-filename catalogue or override decides what a file really is, and instruct,
-MoE, revision, and fine-tune variants are never assumed equivalent.
+Model identity separates three things in `computearena-model/1`: the canonical
+Hugging Face model class, the converted artifact repository/revision/path, and
+the SHA-256 of the exact local bytes. Quantization is namespaced by format, so
+BaseRT Q4 and GGUF Q4_K_M remain distinct variants of a model class. Downloads
+are pinned to immutable Hugging Face revisions and checked against published
+LFS SHA-256 values when available. BaseRT `hub.json`, standard Hugging Face
+cache paths, and GGUF source metadata provide conservative fallback evidence.
+Ambiguous merges and files with no evidence stay unresolved rather than being
+grouped by filename.
+
+For a file copied or downloaded outside either model picker, bind it to the
+exact Hub object before benchmarking:
+
+```sh
+computearena identify ./model.gguf \
+  https://huggingface.co/owner/repository/blob/<revision>/path/to/model.gguf
+```
+
+This succeeds only when the local SHA-256 matches the Hub's file object. It
+does not let a user assign a model name without evidence. See
+[docs/model-identity.md](docs/model-identity.md) for the report fields and
+trust limits.
 
 Chip names pass through one normalization before signing, so known aliases
 (M5Pro and Apple M5 Pro, or GB10 and NVIDIA GB10) receive one name while the
