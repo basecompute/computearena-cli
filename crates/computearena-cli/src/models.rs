@@ -1,4 +1,5 @@
 use crate::config::{MODEL_ID_COLUMN_WIDTH, MODEL_QUANT_COLUMN_WIDTH, MODEL_VARIANT_COLUMN_WIDTH};
+use crate::reports::Paths;
 use crate::theme::selector_theme;
 use crate::ui::{finish_activity, prompt, start_activity, visible_rows, TerminalUi};
 use anyhow::{bail, Context, Result};
@@ -30,6 +31,7 @@ pub(crate) fn inspect_model(path: &Path) -> Result<Value> {
         "name": fallback_name,
         "file_name": path.file_name().and_then(|name| name.to_str()).unwrap_or("unknown"),
         "size_bytes": file.len(),
+        "format": "base",
         "format_schema": required_header_u64(&header, "schema")?,
         "architecture": required_header_string(&header, "arch")?,
         "quantization": required_header_string(&header, "quant_scheme")?,
@@ -111,7 +113,7 @@ pub(crate) fn display_name(path: &Path) -> String {
     }
 }
 
-pub(crate) fn prompt_model_path() -> Result<Option<PathBuf>> {
+pub(crate) fn prompt_model_path(paths: &Paths) -> Result<Option<PathBuf>> {
     let ui = TerminalUi::detect();
     let started = start_activity(ui, "Scanning installed BaseRT model metadata…");
     let installed = installed_models()?;
@@ -122,14 +124,15 @@ pub(crate) fn prompt_model_path() -> Result<Option<PathBuf>> {
     );
     if installed.is_empty() {
         print_model_acquisition_help(ui, true);
-        return model_path_from_input(prompt("Model path: ")?).map(Some);
     }
 
-    print_model_acquisition_help(ui, false);
+    if !installed.is_empty() {
+        print_model_acquisition_help(ui, false);
+    }
     if io::stdin().is_terminal() && io::stderr().is_terminal() {
-        prompt_model_path_interactive(&installed, ui)
+        prompt_model_path_interactive(&installed, paths, ui)
     } else {
-        prompt_model_path_numbered(&installed, ui)
+        prompt_model_path_numbered(&installed, paths, ui)
     }
 }
 
@@ -146,24 +149,28 @@ fn print_model_acquisition_help(ui: TerminalUi, no_models_installed: bool) {
     println!(
         "  {}  {}",
         ui.neutral("Browse"),
-        ui.accent_bold(BASERT_REMOTE_MODELS_COMMAND)
+        ui.accent_bold("Browse and download in this model picker")
     );
     println!(
         "  {}    {}",
         ui.neutral("Pull"),
-        ui.accent_bold(BASERT_PULL_MODEL_COMMAND)
+        ui.accent_bold(format!("or use {BASERT_PULL_MODEL_COMMAND}"))
     );
     println!(
         "{}",
-        ui.muted("Run this step again after pulling to refresh the list.")
+        ui.muted(format!(
+            "The catalogue is the same one shown by `{BASERT_REMOTE_MODELS_COMMAND}`."
+        ))
     );
 }
 
 fn prompt_model_path_interactive(
     installed: &[InstalledModel],
+    paths: &Paths,
     ui: TerminalUi,
 ) -> Result<Option<PathBuf>> {
     let mut choices = model_choice_labels(installed);
+    choices.push("Browse the BaseRT model catalogue…".to_string());
     choices.push("Enter another model path…".to_string());
     println!(
         "{}",
@@ -184,6 +191,9 @@ fn prompt_model_path_interactive(
         println!("{} Model selection cancelled", ui.neutral("←"));
         return Ok(None);
     };
+    if index == installed.len() {
+        return prompt_remote_model(paths, ui);
+    }
     let Some(model) = installed.get(index) else {
         return model_path_from_input(prompt("Model path: ")?).map(Some);
     };
@@ -193,12 +203,17 @@ fn prompt_model_path_interactive(
 
 fn prompt_model_path_numbered(
     installed: &[InstalledModel],
+    paths: &Paths,
     ui: TerminalUi,
 ) -> Result<Option<PathBuf>> {
     println!("Installed BaseRT models:");
     for (index, label) in model_choice_labels(installed).iter().enumerate() {
         println!("  {} {label}", ui.brand_bold(format!("{}.", index + 1)));
     }
+    println!(
+        "  {} Browse the BaseRT model catalogue",
+        ui.brand_bold("d.")
+    );
     println!("  {} Enter another model path", ui.brand_bold("p."));
     let input = prompt("Choose a model number or enter a path: ")?;
     if matches!(input.to_ascii_lowercase().as_str(), "q" | "quit" | "back") {
@@ -215,7 +230,71 @@ fn prompt_model_path_numbered(
     if input.eq_ignore_ascii_case("p") {
         return model_path_from_input(prompt("Model path: ")?).map(Some);
     }
+    if input.eq_ignore_ascii_case("d") {
+        return prompt_remote_model(paths, ui);
+    }
     model_path_from_input(input).map(Some)
+}
+
+fn prompt_remote_model(paths: &Paths, ui: TerminalUi) -> Result<Option<PathBuf>> {
+    let cli = crate::basert_models::locate_cli(None)?;
+    let started = start_activity(ui, "Loading the BaseRT model catalogue…");
+    let models = crate::basert_models::available(None)?;
+    finish_activity(
+        ui,
+        started,
+        format!("Found {} downloadable model option(s)", models.len()),
+    );
+    if models.is_empty() {
+        println!("Every compatible catalogue model is already installed.");
+        return Ok(None);
+    }
+    let labels: Vec<_> = models
+        .iter()
+        .map(|model| {
+            format!(
+                "{}  {}  {}  {}",
+                model.id,
+                crate::basert_models::display_pull_target(&model.pull_target),
+                model.architecture,
+                model
+                    .size_bytes
+                    .map(crate::huggingface::format_size)
+                    .unwrap_or_else(|| "size unavailable".to_string())
+            )
+        })
+        .collect();
+    let selected = if io::stdin().is_terminal() && io::stderr().is_terminal() {
+        FuzzySelect::with_theme(&selector_theme())
+            .with_prompt("Download a BaseRT model")
+            .items(&labels)
+            .max_length(visible_rows(labels.len()))
+            .report(false)
+            .interact_opt()
+            .context("reading BaseRT model selection")?
+    } else {
+        for (index, label) in labels.iter().enumerate() {
+            println!("  {} {label}", ui.brand_bold(format!("{}.", index + 1)));
+        }
+        let input = prompt("Choose a model number (or q to go back): ")?;
+        if matches!(input.to_ascii_lowercase().as_str(), "q" | "quit" | "back") {
+            return Ok(None);
+        }
+        Some(
+            input
+                .parse::<usize>()
+                .ok()
+                .and_then(|index| index.checked_sub(1))
+                .filter(|index| *index < models.len())
+                .context("model selection is out of range")?,
+        )
+    };
+    let Some(index) = selected else {
+        return Ok(None);
+    };
+    let path = crate::basert_models::pull(&cli, &models[index])?;
+    crate::basert_models::record_download(&paths.root, &path)?;
+    Ok(Some(path))
 }
 
 pub(crate) fn model_choice_labels(installed: &[InstalledModel]) -> Vec<String> {

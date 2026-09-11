@@ -203,7 +203,13 @@ fn back_from_a_missing_runtime_returns_to_the_runtime_choice() {
     assert!(output.status.success(), "{}", text(&output));
     let text = text(&output);
     assert!(text.contains("BaseRT was not found"));
-    assert!(text.contains("curl -LsSf https://basecompute.co/install.sh | sh"));
+    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        assert!(text.contains("does not currently publish a prebuilt Linux x86-64 runtime"));
+        assert!(text.contains("--runtime-path /path/to/basert-benchmark-harness"));
+        assert!(!text.contains("https://basecompute.co/install.sh"));
+    } else {
+        assert!(text.contains("curl -LsSf https://basecompute.co/install.sh | sh"));
+    }
     assert!(text.contains("basert-home") || text.contains("~/.basert"));
     assert_eq!(text.matches("Choose a runtime").count(), 2);
 }

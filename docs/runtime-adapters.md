@@ -16,9 +16,13 @@ Both retain the computearena-benchmark/1 signed envelope, so old reports remain 
 - Model selection for llama.cpp offers the Hugging Face Hub alongside recent files: search
   models filtered to GGUF, list a repository's .gguf files smallest first, download into
   the ComputeArena data directory, and go straight to that model's plan. `HF_TOKEN` is
-  forwarded when set, for gated repositories.
-- computearena basert [run|list|inspect|verify|login|logout|submit|install]
-- computearena llama-cpp [run|list|inspect|verify|login|logout|submit|install]
+  forwarded when set, for gated repositories. Downloads use immutable revisions and verify
+  published LFS SHA-256 values when available.
+- Model selection for BaseRT offers BaseRT's public catalogue alongside installed files.
+  ComputeArena invokes the installed `basert list --remote` and `basert pull` commands so
+  BaseRT owns backend selection, split downloads, conversion, and `hub.json` provenance.
+- computearena basert [run|list|inspect|verify|identify|login|logout|submit|install]
+- computearena llama-cpp [run|list|inspect|verify|identify|login|logout|submit|install]
 - install downloads the runtime's prebuilt release after showing the plan; --archive
   unpacks a local bundle instead. Discovery prefers --runtime-path, then environment
   variables, then a ComputeArena-installed copy, then PATH, then the runtime's default
@@ -44,7 +48,8 @@ of repetitions. The plan states this before execution. Automatic external teleme
 is collected over the whole process (see telemetry.md). Optional cooldown runs each
 workload in a fresh process using llama-bench-conditioned-pp-tg/1 (see benchmark-profiles.md).
 Native effective settings are preserved.
-No equivalence between BaseRT and GGUF quantization names is assumed.
+No equivalence between BaseRT and GGUF quantization names is assumed. Both adapters emit
+the runtime-neutral `computearena-model/1` identity described in model-identity.md.
 
 The PP/TG counts alone do not establish equivalent timing semantics. llama.cpp
 records a distinct protocol ID and its exclusion of sampling/tokenization.

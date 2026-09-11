@@ -329,7 +329,7 @@ dependencies = [
 
 [[package]]
 name = "computearena-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -339,9 +339,11 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "libc",
+ "percent-encoding",
  "rand_core 0.6.4",
  "ratatui",
  "reqwest",
+ "semver",
  "serde_json",
  "sha2",
  "sysinfo",

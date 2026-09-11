@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/computearena-cli"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "Apache-2.0"
 rust-version = "1.85"
@@ -14,12 +14,14 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 dialoguer = { version = "0.12", default-features = false, features = ["fuzzy-select"] }
 dirs = "5"
+percent-encoding = "2"
 libc = "0.2"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 flate2 = "1"
 rand_core = { version = "0.6", features = ["getrandom"] }
 ratatui = "0.30"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
+semver = "1"
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 sha2 = { version = "0.10", features = ["asm"] }
 tar = "0.4"

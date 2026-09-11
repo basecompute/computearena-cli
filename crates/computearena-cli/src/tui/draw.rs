@@ -1,8 +1,8 @@
 //! Rendering. Every screen shares the same frame: a header naming the session,
 //! a body, and a key bar, so nothing moves between screens except the body.
 use super::app::{
-    App, HubFileRow, HubModelRow, ModelRow, ReportMode, ReportRow, Screen, MENU_ITEMS,
-    SETUP_ACTIONS,
+    App, BaseRtModelRow, HubFileRow, HubModelRow, ModelRow, ReportMode, ReportRow, Screen,
+    MENU_ITEMS, SETUP_ACTIONS,
 };
 use super::job::Job;
 use crate::benchmark::LOAD_WARNING;
@@ -214,6 +214,7 @@ fn footer(frame: &mut Frame, area: Rect, app: &App) {
         Screen::HubSearch { .. } => "type a search · Enter search · Esc back",
         Screen::HubModels { .. } => "↑/↓ move · Enter list files · Esc back",
         Screen::HubFiles { .. } => "↑/↓ move · Enter download · Esc back",
+        Screen::BaseRtModels { .. } => "type to filter · ↑/↓ move · Enter download · Esc back",
         _ => "↑/↓ move · Enter select · Esc back · Ctrl+C quit",
     };
     let status = if app.status.is_empty() {
@@ -281,6 +282,11 @@ fn body(frame: &mut Frame, area: Rect, app: &mut App) {
             rows,
             cursor,
         } => hub_files_screen(frame, area, repository, rows, *cursor),
+        Screen::BaseRtModels {
+            rows,
+            filter,
+            cursor,
+        } => basert_models_screen(frame, area, rows, filter, *cursor),
         Screen::Account { cursor } => account_screen(
             frame,
             area,
@@ -641,6 +647,33 @@ fn hub_files_screen(
         items,
         cursor,
     );
+}
+
+fn basert_models_screen(
+    frame: &mut Frame,
+    area: Rect,
+    rows: &[BaseRtModelRow],
+    filter: &str,
+    cursor: usize,
+) {
+    let needle = filter.to_ascii_lowercase();
+    let items = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| {
+            needle.is_empty()
+                || row.label.to_ascii_lowercase().contains(&needle)
+                || row.detail.to_ascii_lowercase().contains(&needle)
+        })
+        .enumerate()
+        .map(|(visible, (_, row))| item(row.label.clone(), row.detail.clone(), visible == cursor))
+        .collect();
+    let title = if filter.is_empty() {
+        "BaseRT · available models".to_string()
+    } else {
+        format!("BaseRT · filter: {filter}")
+    };
+    render_list(frame, area, &title, items, cursor);
 }
 
 fn account_screen(

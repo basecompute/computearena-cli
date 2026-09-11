@@ -525,6 +525,25 @@ pub(crate) fn run_benchmark(
         start_activity(ui, "Hashing the model artifact (outside benchmark timing)…");
     let model_sha256 = file_sha256(model)?;
     finish_activity(ui, hashing_started, "Model artifact fingerprint ready");
+    // A BaseRT model installed before ComputeArena tracked provenance has a
+    // hub.json but no receipt. Match it now, ahead of the timed section, so
+    // the report can name the exact published file.
+    if runtime == Runtime::Basert
+        && !crate::model_identity::has_receipt(&paths.root, &model_sha256)
+        && model
+            .parent()
+            .is_some_and(|directory| directory.join("hub.json").is_file())
+    {
+        let matching_started = start_activity(ui, "Matching the model to its Hugging Face file…");
+        match crate::basert_models::resolve_artifact(&paths.root, model, &model_sha256) {
+            Ok(file) => finish_activity(ui, matching_started, format!("Model matched to {file}")),
+            Err(error) => finish_activity(
+                ui,
+                matching_started,
+                format!("Model will be identified by hash ({error:#})"),
+            ),
+        }
+    }
     let benchmark_started = start_activity(
         ui,
         format!("Running the benchmark with {}…", harness.display()),
@@ -558,11 +577,9 @@ pub(crate) fn run_benchmark(
     let public_bytes = public.to_bytes();
     let key_id = sha256_hex(&public_bytes);
     let run_id = random_id();
-    let mut model_metadata = result.model;
-    model_metadata["upstream_id"] = Value::Null;
-    model_metadata["upstream_id_source"] = json!("unresolved");
-    model_metadata["identity_verification"] = json!("unverified");
-    model_metadata["artifact_sha256"] = json!(model_sha256);
+    let model_metadata =
+        crate::model_identity::finalize(runtime, paths, model, result.model, &model_sha256);
+    let model_identity_notice = crate::model_identity::report_identity_notice(&model_metadata);
 
     // Intentionally omit the user's account and local model path: a benchmark
     // can be created offline and attached to an authenticated account later.
@@ -597,6 +614,8 @@ pub(crate) fn run_benchmark(
     println!("Saved signed benchmark: {}", path.display());
     println!("Run ID: {run_id}");
     println!("Report SHA-256: {digest}");
+    println!("{}", ui.neutral(model_identity_notice));
+    println!("{}", ui.muted(crate::reports::SIGNATURE_SCOPE_NOTICE));
     if runtime == Runtime::LlamaCpp {
         if let Err(error) = crate::recent_gguf::remember(paths, model) {
             eprintln!(

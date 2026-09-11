@@ -2,10 +2,12 @@ mod adapters;
 mod api;
 use adapters::{BenchmarkRequest, Runtime};
 mod auth;
+mod basert_models;
 mod benchmark;
 mod conditioning;
 mod config;
 mod huggingface;
+mod model_identity;
 mod models;
 mod protocol;
 mod recent_gguf;
@@ -17,6 +19,7 @@ mod theme;
 #[cfg(unix)]
 mod tui;
 mod ui;
+mod updates;
 
 use auth::{load_api_session, login, logout, resolve_api_url};
 #[cfg(test)]
@@ -145,6 +148,13 @@ enum Action {
     Inspect { report: String },
     /// Verify one report's Ed25519 signature.
     Verify { report: String },
+    /// Bind a manually acquired model to an exact Hugging Face file by SHA-256.
+    Identify {
+        /// Local .base or .gguf model file.
+        model: PathBuf,
+        /// Full Hugging Face file URL, including blob/resolve revision and path.
+        huggingface_url: String,
+    },
     /// Log in through a browser and connect this installation.
     Login,
     /// Revoke and remove the session for the selected API URL.
@@ -328,6 +338,10 @@ fn execute(
     harness: Option<PathBuf>,
     api_url: &str,
 ) -> Result<()> {
+    if runtime == Runtime::Basert && matches!(&command, Action::Run { .. } | Action::Install { .. })
+    {
+        runtimes::print_platform_notice(TerminalUi::detect(), runtime);
+    }
     match command {
         Action::Run {
             model,
@@ -395,6 +409,19 @@ fn execute(
             finish_activity(ui, started, "Signature is valid");
             println!("Report: {}", path.display());
             println!("Installation key: {key_id}");
+            println!("{}", ui.neutral(reports::SIGNATURE_SCOPE_NOTICE));
+            Ok(())
+        }
+        Action::Identify {
+            model,
+            huggingface_url,
+        } => {
+            let ui = TerminalUi::detect();
+            let started = start_activity(ui, "Matching the local file to Hugging Face…");
+            let identity =
+                model_identity::identify_huggingface_file(&paths.root, &model, &huggingface_url)?;
+            finish_activity(ui, started, "Model identity saved");
+            println!("{}", serde_json::to_string_pretty(&identity)?);
             Ok(())
         }
         Action::Login => login(paths, api_url),
@@ -409,7 +436,7 @@ fn execute(
             skip_invalid,
         } => {
             let reports = select_reports_for_submission(paths, &reports, TerminalUi::detect())?;
-            submit_reports(paths, &reports, api_url, yes, skip_invalid)
+            submit_reports(paths, &reports, api_url, yes, skip_invalid).map(|_| ())
         }
     }
 }
@@ -581,6 +608,7 @@ fn interactive(
                             );
                             println!("  Installation key: {}", short_id(&key));
                             println!("  File: {}", path.display());
+                            println!("  {}", ui.neutral(reports::SIGNATURE_SCOPE_NOTICE));
                         }
                         Err(error) => {
                             eprintln!("\n{} {error:#}", ui.error("✗ Verification failed:"));
@@ -881,6 +909,9 @@ mod tests {
         ));
         assert!(should_stop_submission(
             reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        ));
+        assert!(should_stop_submission(
+            reqwest::StatusCode::UPGRADE_REQUIRED
         ));
     }
 

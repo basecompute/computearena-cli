@@ -75,7 +75,12 @@ pub(crate) fn inspect(path: &Path) -> Result<Value> {
         let item = value(&mut file, kind, 0)?;
         if matches!(
             key.as_str(),
-            "general.name" | "general.architecture" | "general.file_type"
+            "general.name"
+                | "general.architecture"
+                | "general.file_type"
+                | "general.repo_url"
+                | "general.source.repo_url"
+                | "general.base_model.0.repo_url"
         ) {
             metadata.insert(key, item);
         }
@@ -110,6 +115,9 @@ pub(crate) fn inspect(path: &Path) -> Result<Value> {
         "architecture": metadata.get("general.architecture"),
         "quantization": quant, "gguf_file_type": file_type,
         "format": "gguf", "format_version": version,
+        "repo_url": metadata.get("general.repo_url"),
+        "source_repo_url": metadata.get("general.source.repo_url"),
+        "base_model_repo_url": metadata.get("general.base_model.0.repo_url"),
         "file_name": path.file_name().and_then(|s| s.to_str()),
         "size_bytes": file.metadata()?.len()
     }))
