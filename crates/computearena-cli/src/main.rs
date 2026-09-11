@@ -17,6 +17,7 @@ mod theme;
 #[cfg(unix)]
 mod tui;
 mod ui;
+mod updates;
 
 use auth::{load_api_session, login, logout, resolve_api_url};
 #[cfg(test)]
@@ -881,6 +882,9 @@ mod tests {
         ));
         assert!(should_stop_submission(
             reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        ));
+        assert!(should_stop_submission(
+            reqwest::StatusCode::UPGRADE_REQUIRED
         ));
     }
 

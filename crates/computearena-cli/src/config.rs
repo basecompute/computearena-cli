@@ -32,6 +32,9 @@ pub(crate) const HUGGINGFACE_HOST: &str = "https://huggingface.co";
 pub(crate) const HUGGINGFACE_API: &str = "https://huggingface.co/api";
 
 pub(crate) const COMPUTEARENA_WEBSITE: &str = "https://computearena.ai";
+pub(crate) const COMPUTEARENA_QUICKSTART: &str = "https://computearena.ai/quickstart";
+pub(crate) const COMPUTEARENA_INSTALL_SCRIPT: &str =
+    "curl -LsSf https://computearena.ai/install.sh | sh";
 pub(crate) const COMPUTEARENA_DISCORD: &str = "https://discord.gg/CCT24GWhPG";
 
 pub(crate) const BASERT_HARNESS_NAME: &str = "basert-benchmark-harness";

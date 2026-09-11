@@ -185,6 +185,7 @@ pub(crate) struct App {
     /// A freshly saved report waiting for the person to sign in before it is
     /// offered for submission.
     pub(crate) pending_submission: Option<PathBuf>,
+    update_check: Option<crate::updates::UpdateCheck>,
 }
 
 impl App {
@@ -195,6 +196,7 @@ impl App {
         harness_override: Option<PathBuf>,
         api_url: String,
     ) -> Result<Self> {
+        let (update_notice, update_check) = crate::updates::start(&paths);
         let mut app = Self {
             paths,
             api_url,
@@ -206,10 +208,13 @@ impl App {
             job: None,
             pending: None,
             downloaded: None,
-            status: String::new(),
+            status: update_notice
+                .map(|notice| notice.message())
+                .unwrap_or_default(),
             should_quit: false,
             completed_report: Arc::new(Mutex::new(None)),
             pending_submission: None,
+            update_check,
         };
         app.refresh_account();
         // The same rule as the printed session: only ask which runtime to use
@@ -305,6 +310,14 @@ impl App {
 
     pub(crate) fn tick(&mut self) -> bool {
         let mut changed = false;
+        let update = self.update_check.as_ref().and_then(|check| check.poll());
+        if let Some(update) = update {
+            self.update_check = None;
+            if let Some(notice) = update {
+                self.status = notice.message();
+                changed = true;
+            }
+        }
         if let Some(pending) = self.pending.as_ref() {
             match pending.receiver.try_recv() {
                 Ok(loaded) => {
@@ -1290,6 +1303,7 @@ mod tests {
             should_quit: false,
             completed_report: Arc::new(Mutex::new(None)),
             pending_submission: None,
+            update_check: None,
         }
     }
 
