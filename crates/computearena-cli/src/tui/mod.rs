@@ -12,9 +12,7 @@ use crate::adapters::Runtime;
 use crate::reports::Paths;
 use anyhow::{Context, Result};
 use app::App;
-use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseEventKind,
-};
+use ratatui::crossterm::event::{self, Event, KeyEventKind};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -28,9 +26,6 @@ use std::time::Duration;
 /// Long jobs redirect the process's own output, so the interface draws through
 /// a duplicate of the terminal taken before any of that happens.
 type Screen = Terminal<CrosstermBackend<std::fs::File>>;
-
-/// Lines moved per wheel notch.
-const SCROLL_LINES: isize = 3;
 
 pub(crate) fn session(
     runtime: Runtime,
@@ -60,7 +55,7 @@ fn install_panic_hook() {
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
         if let Ok(mut file) = job::tty() {
-            let _ = ratatui::crossterm::execute!(file, DisableMouseCapture, LeaveAlternateScreen);
+            let _ = ratatui::crossterm::execute!(file, LeaveAlternateScreen);
         }
         previous(info);
     }));
@@ -70,19 +65,15 @@ fn start() -> Result<Screen> {
     install_panic_hook();
     let mut file = job::tty()?;
     enable_raw_mode()?;
-    // Mouse capture is what delivers wheel events; the terminal's own text
-    // selection still works with Shift held.
-    execute!(file, EnterAlternateScreen, EnableMouseCapture)?;
+    // Leave mouse events with the terminal so URLs are clickable and normal
+    // drag selection/copy works without requiring a modifier key.
+    execute!(file, EnterAlternateScreen)?;
     Ok(Terminal::new(CrosstermBackend::new(file))?)
 }
 
 fn stop(terminal: &mut Screen) {
     let _ = disable_raw_mode();
-    let _ = execute!(
-        terminal.backend_mut(),
-        DisableMouseCapture,
-        LeaveAlternateScreen
-    );
+    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
     let _ = terminal.show_cursor();
     let _ = terminal.backend_mut().flush();
 }
@@ -96,11 +87,6 @@ fn run(terminal: &mut Screen, app: &mut App) -> Result<()> {
         if event::poll(idle)? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key)?,
-                Event::Mouse(mouse) => match mouse.kind {
-                    MouseEventKind::ScrollUp => app.scroll(-SCROLL_LINES),
-                    MouseEventKind::ScrollDown => app.scroll(SCROLL_LINES),
-                    _ => {}
-                },
                 Event::Resize(_, _) => {}
                 _ => {}
             }
