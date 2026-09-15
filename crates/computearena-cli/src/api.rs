@@ -45,7 +45,7 @@ pub(crate) fn server_error(status: reqwest::StatusCode, body: &str) -> String {
     if status == reqwest::StatusCode::CONFLICT
         && error_code(body).as_deref() == Some("submission_deleted")
     {
-        return "This benchmark was previously deleted from ComputeArena. This saved report cannot be submitted again, including through Select all. Run a new benchmark to publish new results. Your local report is unchanged.".to_string();
+        return "This benchmark was previously deleted from ComputeArena. This saved report cannot be submitted again, including through Select all. You can rerun the same model with the same settings and submit the newly generated report as a separate benchmark. Your local report is unchanged.".to_string();
     }
     let message =
         error_message(body).unwrap_or_else(|| format!("server returned HTTP {}", status.as_u16()));
@@ -108,7 +108,8 @@ mod tests {
             let message = server_error(reqwest::StatusCode::CONFLICT, body);
             assert!(message.contains("previously deleted"));
             assert!(message.contains("Select all"));
-            assert!(message.contains("Run a new benchmark"));
+            assert!(message.contains("rerun the same model with the same settings"));
+            assert!(message.contains("newly generated report as a separate benchmark"));
             assert!(message.contains("local report is unchanged"));
         }
         let body = r#"{"error":{"code":"submission_conflict","message":"Different report"}}"#;

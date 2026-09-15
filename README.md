@@ -305,7 +305,9 @@ If you deleted it on the website, re-submitting that saved report fails instead,
 including through **Select all**. The CLI labels it **Failed: previously deleted**
 and continues attempting the other valid reports. Successful uploads remain
 saved; the final summary counts the failures and the command exits nonzero.
-Local files are unchanged. Run a new benchmark to publish new results.
+Local files are unchanged. You can rerun the same model with the same settings
+and submit the newly generated report as a separate benchmark. There is no need
+to choose a different configuration.
 
 The client talks to `https://computearena.ai/api/v1`. `--api-url` or
 `COMPUTEARENA_API_URL` point it at another deployment, such as a local

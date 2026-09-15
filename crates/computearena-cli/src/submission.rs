@@ -18,7 +18,7 @@ use std::fs;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 
-pub(crate) const DELETED_SUBMISSION_NOTICE: &str = "Previously deleted reports will fail to submit.\nSelect all does not restore them. Other valid reports\nwill still be attempted. Local files stay unchanged.";
+pub(crate) const DELETED_SUBMISSION_NOTICE: &str = "Previously deleted reports will fail to submit.\nSelect all does not restore them. Other valid reports\nwill still be attempted. Local files stay unchanged.\nYou can rerun the same model with the same settings,\nthen submit the newly generated report as a separate\nbenchmark.";
 
 #[derive(Debug)]
 pub(crate) struct PreparedSubmission {

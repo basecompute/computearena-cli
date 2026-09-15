@@ -218,7 +218,8 @@ fn select_all_reports_deleted_failures_and_still_uploads_other_benchmarks() {
         for hint in [
             "Failed: previously deleted",
             "Select all does not restore",
-            "Run a new benchmark",
+            "rerun the same model with the same settings",
+            "newly generated report as a separate benchmark",
             "local files are unchanged",
         ] {
             assert!(printed.contains(hint), "missing {hint}: {printed}");
