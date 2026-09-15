@@ -4,7 +4,7 @@ ComputeArena owns menus, authentication, signing, report storage, and submission
 RuntimeAdapter implementations own executable discovery, capabilities, model selection,
 benchmark execution, and translation into the shared raw sample/metric structure.
 BaseRT keeps its native harness evidence; llama.cpp uses computearena-measurements/1.
-Compatible adapters normalize timing semantics to computearena-throughput/2 while
+Adapters retain versioned timing/context semantics in their protocol metadata while
 retaining their runtime-specific evidence. Both retain the computearena-benchmark/1
 signed envelope, so old reports remain readable.
 
@@ -48,20 +48,27 @@ Capability probing uses --help because --version is not implemented consistently
 
 The initial llama.cpp adapter uses native warmup and records it as runtime_native.
 --warmup 0 disables it; any positive value enables native warmup, not that number
-of repetitions. The plan states this before execution. Standard mode uses one PP
-sweep process and one TG process; optional cooldown uses one fresh process per
+of repetitions. The plan states this before execution. Standard mode uses a PP512
+process, then a TG process, then a remaining-PP-sweep process; optional cooldown uses one fresh process per
 workload (see benchmark-profiles.md). Automatic external telemetry is collected
 for each process and native effective settings are preserved.
 No equivalence between BaseRT and GGUF quantization names is assumed. Both adapters emit
 the runtime-neutral `computearena-model/1` identity described in model-identity.md.
 
-The PP/TG counts alone do not establish equivalent timing semantics. A BaseRT
-harness is comparable only when it advertises isolated workload contexts and
-returns protocol metadata matching the request. Compatible BaseRT and llama.cpp
-runs then share `computearena-throughput/2`: per-workload isolation, zero-context
-PP, one-seed-token TG, model loading excluded, and minimum required context
-capacity. Consumers must retain runtime, quantization, protocol, and signed
-runtime evidence. Existing measurements are not retroactively relabelled.
+The PP/TG counts alone do not establish equivalent timing semantics. BaseRT's
+new `features.headline_context_capacity` selects `--headline-first`: 4K reserved
+capacity for PP512/TG128 first, then the remaining PP sweep. It produces
+`computearena-throughput/3` with nested `basert-throughput-protocol/2` evidence.
+Only capacity and order change, not the harness's warmup or timed operations.
+Older isolated harnesses still use `/2`; legacy harnesses retain their old path.
+
+llama.cpp remains `/2` with additional order and context-request evidence. Its
+unmodified native capacity request is PP+TG+initial-depth, not forced to 4K.
+Physical allocation padding is not inferred. No patched runtime, extra depth,
+or unsupported flag is introduced. Both runtimes run the requested headline
+first when supported, and use their existing native warmup/timing policies.
+Consumers retain runtime, quantization, protocol and signed runtime evidence.
+Existing measurements are not retroactively relabelled or excluded from rankings.
 
 ## Binary provenance
 

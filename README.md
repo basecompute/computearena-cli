@@ -218,12 +218,18 @@ reads its GGUF header only. The history lives in `recent-gguf.json` in the
 data directory, is never part of a report, and can be deleted to reset the
 list; a corrupt or unwritable history never blocks a benchmark.
 
-llama.cpp runs the PP sweep with zero initial context and TG128 with one
-untimed seed token in a separate process. Compatible BaseRT harnesses use the
-same runtime-neutral `computearena-throughput/2` contract and isolate each
-workload with the minimum required context capacity. Runtime-specific evidence,
-native warmup, and the exclusion of sampling and tokenization remain signed in
-the report; legacy harnesses are retained but explicitly marked non-comparable.
+The standard headline is PP512 followed by TG128 **before** the remaining PP
+sweep. PP starts empty; TG starts with one untimed seed token. A capable BaseRT
+harness reserves 4K for the headline (`computearena-throughput/3`), without
+changing its existing warmup, repetitions, timing or telemetry. Older harnesses
+retain their existing invocation and recorded protocol.
+
+ComputeArena uses the user's unmodified llama-bench build. Its native capacity
+is retained: stock llama-bench has no independent 4K reservation option, and
+`-d 4096` would add real history instead. This difference, actual workload order,
+warmup and context requests are signed in the JSON. There is no claim of exact
+cross-runtime equivalence. Existing reports remain verifiable and submittable;
+protocol differences are not a new leaderboard filter.
 The measurement contract is in [docs/runtime-adapters.md](docs/runtime-adapters.md).
 
 ## Reports and signatures
@@ -346,6 +352,10 @@ reports, sessions, and the signing key.
   evidence retained as `basert-throughput-protocol/1` or
   `llama-bench-json/1`. Older BaseRT results use
   `computearena-throughput-legacy/1` and are marked non-comparable.
+- Headline-first BaseRT capacity: `computearena-throughput/3`, native evidence
+  `basert-throughput-protocol/2` / `basert-bench-capacity/1`. The historical
+  `comparable` metadata is not a guarantee of identical measured performance
+  and does not exclude older reports from the website.
 - Telemetry: `computearena-telemetry/1` for externally observed BaseRT and
   llama.cpp runs. A BaseRT harness advertising `features.same_run_telemetry`
   uses native `basert-telemetry/4` instead.

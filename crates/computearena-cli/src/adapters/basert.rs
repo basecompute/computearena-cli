@@ -24,6 +24,20 @@ fn supports_isolated_workloads(descriptor: &Value) -> bool {
         == Some(true)
 }
 
+fn supports_headline_capacity(descriptor: &Value) -> Result<bool> {
+    let supported = descriptor
+        .pointer("/features/headline_context_capacity")
+        .and_then(Value::as_bool)
+        == Some(true);
+    if supported
+        && descriptor["capacity_protocol_schema"].as_str()
+            != Some(crate::protocol::BASERT_CAPACITY_PROTOCOL_SCHEMA)
+    {
+        bail!("BaseRT advertises an unsupported headline context protocol");
+    }
+    Ok(supported)
+}
+
 fn telemetry_mode(descriptor: &Value) -> Result<TelemetryMode> {
     if descriptor
         .pointer("/features/same_run_telemetry")
@@ -92,6 +106,7 @@ impl RuntimeAdapter for BaseRtAdapter {
         let ui = TerminalUi::detect();
         let mode = telemetry_mode(descriptor)?;
         let isolated_workloads = supports_isolated_workloads(descriptor);
+        let headline_capacity = supports_headline_capacity(descriptor)?;
         let suite_conditioning = if mode == TelemetryMode::ExternalWholeProcess && r.cooldown {
             let mut cooldown = crate::conditioning::Cooldown::new();
             Some(cooldown.prepare("BaseRT benchmark suite"))
@@ -108,7 +123,9 @@ impl RuntimeAdapter for BaseRtAdapter {
             .arg(r.reps.to_string())
             .arg("-w")
             .arg(r.warmup.to_string());
-        if isolated_workloads {
+        if headline_capacity {
+            command.arg("--headline-first");
+        } else if isolated_workloads {
             command.arg("--isolated-workloads");
         }
         let native_environment_before =
@@ -147,7 +164,7 @@ impl RuntimeAdapter for BaseRtAdapter {
         };
         crate::benchmark::validate_harness_result(&benchmark, expected_schema)?;
         validate_requested_workloads(&benchmark, r)?;
-        normalize_protocol(&mut benchmark, r, isolated_workloads)?;
+        normalize_protocol(&mut benchmark, r, isolated_workloads, headline_capacity)?;
         if let Some(environment) = native_environment {
             crate::telemetry::attach_environment(&mut benchmark, environment);
         }
@@ -190,9 +207,13 @@ fn normalize_protocol(
     benchmark: &mut Value,
     request: &BenchmarkRequest<'_>,
     isolated_workloads: bool,
+    headline_capacity: bool,
 ) -> Result<()> {
     let runtime_protocol = benchmark.get("protocol").cloned().unwrap_or(Value::Null);
     benchmark["params"]["decode_context_tokens"] = json!(DECODE_INITIAL_CONTEXT_TOKENS);
+    if headline_capacity {
+        return normalize_headline_protocol(benchmark, request, runtime_protocol);
+    }
     if !isolated_workloads {
         benchmark["protocol"] = json!({
             "id":"computearena-throughput-legacy/1",
@@ -242,6 +263,63 @@ fn normalize_protocol(
         "tokenization_timed":false,
         "sampling_timed":false,
         "runtime_protocol":runtime_protocol
+    });
+    Ok(())
+}
+
+fn normalize_headline_protocol(
+    benchmark: &mut Value,
+    request: &BenchmarkRequest<'_>,
+    runtime: Value,
+) -> Result<()> {
+    use crate::protocol::{
+        headline_order, headline_prefill, BASERT_CAPACITY_PROTOCOL_SCHEMA,
+        HEADLINE_CONTEXT_CAPACITY, HEADLINE_PROTOCOL_ID,
+    };
+    let headline = headline_prefill(request.pp).parse::<u64>()?;
+    let capacity = (headline + u64::from(request.tg)).max(HEADLINE_CONTEXT_CAPACITY);
+    if runtime["schema"] != BASERT_CAPACITY_PROTOCOL_SCHEMA
+        || runtime["profile"] != "basert-bench-capacity/1"
+        || runtime["context_isolation"] != "headline_then_per_prefill"
+        || runtime["context_capacity_policy"] != "basert_bench_default"
+        || runtime["model_load_in_timing"] != false
+        || runtime["execution_layout"] != "headline_then_prefill_processes"
+        || runtime["execution_order"] != json!(headline_order(request.pp, request.tg))
+    {
+        bail!("BaseRT returned incompatible headline capacity/order metadata");
+    }
+    for prompt in request.pp.split(',') {
+        let tokens = prompt.parse::<u64>()?;
+        let expected = if tokens == headline {
+            capacity
+        } else {
+            tokens.max(HEADLINE_CONTEXT_CAPACITY)
+        };
+        if runtime["prefill"][prompt]["initial_context_tokens"] != 0
+            || runtime["prefill"][prompt]["context_capacity_tokens"].as_u64() != Some(expected)
+        {
+            bail!("BaseRT returned incompatible PP{tokens} capacity metadata");
+        }
+    }
+    if runtime["decode"]["initial_context_tokens"] != DECODE_INITIAL_CONTEXT_TOKENS
+        || runtime["decode"]["context_capacity_tokens"] != capacity
+        || runtime["decode"]["seed_prefill_in_timing"] != false
+        || runtime["measurement"]["timed_repetitions"] != request.reps
+        || runtime["measurement"]["requested_warmup_repetitions"] != request.warmup
+        || benchmark["params"]["ctx"] != capacity
+    {
+        bail!("BaseRT returned incompatible headline measurement metadata");
+    }
+    benchmark["protocol"] = json!({
+        "id":HEADLINE_PROTOCOL_ID, "comparable":true,
+        "profile":"headline-first-capacity/1", "context_isolation":"headline_then_per_prefill",
+        "context_capacity_policy":"basert_bench_default", "model_load_in_timing":false,
+        "prefill":{"initial_context_tokens":0},
+        "decode":{"initial_context_tokens":DECODE_INITIAL_CONTEXT_TOKENS,"context_capacity_tokens":capacity},
+        "execution_order":runtime["execution_order"], "execution_layout":runtime["execution_layout"],
+        "measurement":runtime["measurement"], "cooldown_enabled":request.cooldown,
+        "tokenization_timed":false, "sampling_timed":false,
+        "runtime_protocol":runtime
     });
     Ok(())
 }
@@ -304,6 +382,70 @@ mod tests {
     use super::*;
 
     #[test]
+    fn headline_capacity_is_capability_gated_and_does_not_change_warmup() {
+        assert!(!supports_headline_capacity(&json!({})).unwrap());
+        assert!(supports_headline_capacity(
+            &json!({"features":{"headline_context_capacity":true}})
+        )
+        .is_err());
+        assert!(
+            supports_headline_capacity(&json!({"features":{"headline_context_capacity":true},
+            "capacity_protocol_schema":crate::protocol::BASERT_CAPACITY_PROTOCOL_SCHEMA}))
+            .unwrap()
+        );
+        let request = BenchmarkRequest {
+            model: Path::new("test.base"),
+            pp: "128,512",
+            tg: 128,
+            reps: 3,
+            warmup: 0,
+            cooldown: false,
+        };
+        let original = json!({"params":{"ctx":4096},"protocol":{
+            "schema":"basert-throughput-protocol/2","profile":"basert-bench-capacity/1",
+            "context_isolation":"headline_then_per_prefill","context_capacity_policy":"basert_bench_default",
+            "model_load_in_timing":false,"execution_layout":"headline_then_prefill_processes",
+            "execution_order":["pp512","tg128","pp128"],
+            "prefill":{"128":{"initial_context_tokens":0,"context_capacity_tokens":4096},
+                       "512":{"initial_context_tokens":0,"context_capacity_tokens":4096}},
+            "decode":{"initial_context_tokens":1,"context_capacity_tokens":4096,"seed_prefill_in_timing":false},
+            "measurement":{"timed_repetitions":3,"requested_warmup_repetitions":0}
+        }});
+        let mut report = original.clone();
+        normalize_protocol(&mut report, &request, true, true).unwrap();
+        assert_eq!(
+            report["protocol"]["id"],
+            crate::protocol::HEADLINE_PROTOCOL_ID
+        );
+        assert_eq!(
+            report["protocol"]["measurement"]["requested_warmup_repetitions"],
+            0
+        );
+        assert_eq!(report["protocol"]["runtime_protocol"], original["protocol"]);
+        for (pointer, value) in [
+            ("/protocol/decode/initial_context_tokens", json!(4096)),
+            ("/protocol/decode/context_capacity_tokens", json!(129)),
+            ("/protocol/prefill/128/context_capacity_tokens", json!(128)),
+            ("/protocol/measurement/timed_repetitions", json!(5)),
+            (
+                "/protocol/measurement/requested_warmup_repetitions",
+                json!(12),
+            ),
+            (
+                "/protocol/execution_order",
+                json!(["pp128", "pp512", "tg128"]),
+            ),
+        ] {
+            let mut invalid = original.clone();
+            *invalid.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                normalize_protocol(&mut invalid, &request, true, true).is_err(),
+                "{pointer}"
+            );
+        }
+    }
+
+    #[test]
     fn replay_based_harnesses_use_external_observation() {
         let descriptor = json!({"telemetry_schema":"basert-telemetry/3",
             "features":{"telemetry":true,"same_run_telemetry":false}});
@@ -353,7 +495,7 @@ mod tests {
                 "decode":{"initial_context_tokens":1,"context_capacity_tokens":129}
             }
         });
-        normalize_protocol(&mut benchmark, &request, true).unwrap();
+        normalize_protocol(&mut benchmark, &request, true, false).unwrap();
         assert_eq!(benchmark["protocol"]["id"], THROUGHPUT_PROTOCOL_ID);
         assert_eq!(benchmark["protocol"]["comparable"], true);
         assert_eq!(benchmark["params"]["decode_context_tokens"], 1);

@@ -48,9 +48,10 @@ impl Sandbox {
             "n_gpu_layers":0,"backends":"CPU","cpu_info":"Test CPU","gpu_info":"",
             "samples_ns":[100000000,200000000]})];
         let script = format!(
-            "#!/bin/sh\ncase \"$1\" in\n describe) printf '%s\\n' '{descriptor}';;\n --help) printf '%s\\n' '--n-prompt --n-gen --n-depth --repetitions --no-warmup json';;\n *) case \" $* \" in\n  *\" -d 1 \"*) printf '%s\\n' '{}' ;;\n  *) printf '%s\\n' '{}' ;;\n esac;;\nesac\n",
+            "#!/bin/sh\ncase \"$1\" in\n describe) printf '%s\\n' '{descriptor}';;\n --help) printf '%s\\n' '--n-prompt --n-gen --n-depth --repetitions --no-warmup json';;\n *) case \" $* \" in\n  *\" -d 1 \"*) printf '%s\\n' '{}' ;;\n  *\" -p 512 \"*) printf '%s\\n' '{}' ;;\n  *) printf '%s\\n' '{}' ;;\n esac;;\nesac\n",
             Value::Array(tg_rows),
-            Value::Array(pp_rows)
+            json!(&pp_rows[1..]),
+            json!(&pp_rows[..1])
         );
         fs::create_dir_all(at.parent().unwrap()).unwrap();
         fs::write(at, script).unwrap();

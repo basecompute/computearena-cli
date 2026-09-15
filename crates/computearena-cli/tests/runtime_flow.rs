@@ -36,9 +36,10 @@ fn llama_cpp_offline_run_signs_runtime_identity_and_remains_verifiable_after_upg
 
     let executable = dir.path().join("llama-bench");
     fs::write(&executable, format!(
-        "#!/bin/sh\nif [ \"$1\" = --help ]; then\nprintf '%s\\n' '--n-prompt --n-gen --n-depth --repetitions --no-warmup json'\nelse\ncase \" $* \" in\n  *\" -d 1 \"*) printf '%s\\n' '{}' ;;\n  *) printf '%s\\n' '{}' ;;\nesac\nfi\n",
+        "#!/bin/sh\nif [ \"$1\" = --help ]; then\nprintf '%s\\n' '--n-prompt --n-gen --n-depth --repetitions --no-warmup json'\nelse\ncase \" $* \" in\n  *\" -d 1 \"*) printf '%s\\n' '{}' ;;\n  *\" -p 512 \"*) printf '%s\\n' '{}' ;;\n  *) printf '%s\\n' '{}' ;;\nesac\nfi\n",
         serde_json::to_string(&tg_rows).unwrap(),
-        serde_json::to_string(&pp_rows).unwrap()
+        serde_json::to_string(&pp_rows[1..]).unwrap(),
+        serde_json::to_string(&pp_rows[..1]).unwrap()
     )).unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
     let report = dir.path().join("report.json");

@@ -227,7 +227,8 @@ fn aggregate_observations(
 }
 
 fn run_unconditioned(executable: &Path, r: &BenchmarkRequest<'_>) -> Result<(Value, Value)> {
-    let (prefill, prefill_telemetry) = run_native(executable, r, r.pp, 0, 0)?;
+    let headline = crate::protocol::headline_prefill(r.pp);
+    let (prefill, prefill_telemetry) = run_native(executable, r, headline, 0, 0)?;
     let (decode, decode_telemetry) = run_native(
         executable,
         r,
@@ -246,14 +247,27 @@ fn run_unconditioned(executable: &Path, r: &BenchmarkRequest<'_>) -> Result<(Val
             .iter()
             .cloned(),
     );
-    let telemetry = aggregate_observations(
-        "separate_prefill_and_decode_processes",
-        vec![
-            ("prefill_sweep".into(), prefill_telemetry),
-            (format!("tg{}", r.tg), decode_telemetry),
-        ],
-        None,
-    );
+    let mut observations = vec![
+        (format!("pp{headline}"), prefill_telemetry),
+        (format!("tg{}", r.tg), decode_telemetry),
+    ];
+    let remaining =
+        r.pp.split(',')
+            .filter(|pp| *pp != headline)
+            .collect::<Vec<_>>()
+            .join(",");
+    if !remaining.is_empty() {
+        let (sweep, telemetry) = run_native(executable, r, &remaining, 0, 0)?;
+        rows.extend(
+            sweep
+                .as_array()
+                .context("llama.cpp sweep output must be an array")?
+                .iter()
+                .cloned(),
+        );
+        observations.push(("remaining_prefill_sweep".into(), telemetry));
+    }
+    let telemetry = aggregate_observations("headline_then_prefill_processes", observations, None);
     Ok((Value::Array(rows), telemetry))
 }
 
@@ -262,15 +276,18 @@ fn run_conditioned(
     r: &BenchmarkRequest<'_>,
     mut prepare: impl FnMut(&str) -> Value,
 ) -> Result<(Value, Value)> {
-    let schedule: Vec<(u32, u32, u32)> =
-        r.pp.split(',')
-            .map(|v| v.parse::<u32>().map(|pp| (pp, 0, 0)))
-            .chain(std::iter::once(Ok((
-                0,
-                r.tg,
-                crate::protocol::DECODE_INITIAL_CONTEXT_TOKENS as u32,
-            ))))
-            .collect::<std::result::Result<_, _>>()?;
+    let headline = crate::protocol::headline_prefill(r.pp);
+    let mut schedule = vec![
+        (headline.parse::<u32>()?, 0, 0),
+        (
+            0,
+            r.tg,
+            crate::protocol::DECODE_INITIAL_CONTEXT_TOKENS as u32,
+        ),
+    ];
+    for pp in r.pp.split(',').filter(|pp| *pp != headline) {
+        schedule.push((pp.parse::<u32>()?, 0, 0));
+    }
     let mut rows = Vec::new();
     let mut observations = Vec::new();
     let mut conditioning = Map::new();
@@ -381,6 +398,8 @@ pub(crate) fn normalize(value: &Value, r: &BenchmarkRequest<'_>) -> Result<Runti
     let mut decode = None;
     let mut metrics = Map::new();
     let mut settings = Map::new();
+    let mut execution_order = Vec::new();
+    let mut context_requests = Map::new();
     // Persist effective configuration, never local model paths or raw stderr.
     const SETTINGS: &[&str] = &[
         "n_batch",
@@ -418,6 +437,12 @@ pub(crate) fn normalize(value: &Value, r: &BenchmarkRequest<'_>) -> Result<Runti
         let pp = row["n_prompt"].as_u64().context("missing n_prompt")?;
         let tg = row["n_gen"].as_u64().context("missing n_gen")?;
         let is_pp = pp > 0 && tg == 0;
+        let label = if is_pp {
+            format!("pp{pp}")
+        } else {
+            format!("tg{tg}")
+        };
+        execution_order.push(label.clone());
         let expected_depth = if is_pp {
             0
         } else {
@@ -426,6 +451,16 @@ pub(crate) fn normalize(value: &Value, r: &BenchmarkRequest<'_>) -> Result<Runti
         if row["n_depth"].as_u64() != Some(expected_depth) {
             bail!("llama.cpp returned an unexpected context depth");
         }
+        // Stock llama-bench derives the requested context from PP+TG+depth.
+        // The engine may pad allocations; never claim unreported physical capacity.
+        context_requests.insert(
+            label,
+            json!({
+                "initial_context_tokens":expected_depth,
+                "requested_context_capacity_tokens":pp+tg+expected_depth,
+                "capacity_source":"llama_bench_native_workload_parameters"
+            }),
+        );
         if !(is_pp && expected.contains(&pp) || pp == 0 && tg == u64::from(r.tg)) {
             bail!("llama.cpp returned an unexpected workload PP{pp}/TG{tg}");
         }
@@ -509,8 +544,13 @@ pub(crate) fn normalize(value: &Value, r: &BenchmarkRequest<'_>) -> Result<Runti
                 "decode": {"initial_context_tokens": crate::protocol::DECODE_INITIAL_CONTEXT_TOKENS},
                 "tokenization_timed": false, "sampling_timed": false, "timing_source": "runtime_samples_ns",
                 "warmup": if r.warmup == 0 { "disabled" } else { "runtime_native" },
+                "requested_warmup_repetitions":r.warmup, "timed_repetitions":r.reps,
                 "cooldown_enabled": false, "telemetry_available": false,
-                "execution_layout": "separate_prefill_and_decode_processes",
+                "execution_layout": "headline_then_prefill_processes",
+                "execution_order": execution_order,
+                "context_requests":context_requests,
+                "capacity_alignment":{"target_tokens":crate::protocol::HEADLINE_CONTEXT_CAPACITY,
+                    "applied":false,"reason":"User-provided stock llama-bench has no independent context capacity option; native workload capacity retained"},
                 "runtime_protocol": {"adapter": "llama-bench-json/1", "prefill_n_depth": 0,
                     "decode_n_depth": crate::protocol::DECODE_INITIAL_CONTEXT_TOKENS}},
             "runtime_configuration": settings
@@ -550,7 +590,12 @@ printf '[{"build_commit":"abc123","build_number":123,"model_type":"Qwen Q4","mod
             order.push(label.to_owned());
             json!({"method":"timed_fallback","target_reached":false,"timed_out":false,"waited_s":30.0,"sample_count":1})
         }).unwrap();
-        assert_eq!(order, vec!["pp128", "pp512", "tg128"]);
+        assert_eq!(order, vec!["pp512", "tg128", "pp128"]);
+        let (standard_rows, _) = run_unconditioned(&executable, &request).unwrap();
+        assert_eq!(
+            standard_rows, rows,
+            "standard and cooldown retain the same headline-first order"
+        );
         let normalized = normalize(&rows, &request).unwrap();
         assert_eq!(normalized.benchmark["metrics"]["pp512_t_s"], 3840.0);
         assert_eq!(telemetry["scope"], "separate_workload_processes");
@@ -602,6 +647,15 @@ printf '[{"build_commit":"abc123","build_number":123,"model_type":"Qwen Q4","mod
             json!(1)
         );
         assert!(!result.benchmark.to_string().contains("/private/models"));
+        assert_eq!(
+            result.benchmark["protocol"]["context_requests"]["tg128"]
+                ["requested_context_capacity_tokens"],
+            129
+        );
+        assert_eq!(
+            result.benchmark["protocol"]["capacity_alignment"]["applied"],
+            false
+        );
         assert!(result.benchmark.get("telemetry").is_none());
     }
     #[test]

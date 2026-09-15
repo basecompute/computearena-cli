@@ -68,7 +68,7 @@ fn telemetry_is_collected_for_the_child_summarized_and_signature_protected() {
     let mut report = f.signed();
     let telemetry = &report["benchmark"]["telemetry"];
     assert_eq!(telemetry["schema"], "computearena-telemetry/1");
-    let observed = &telemetry["workloads"]["prefill_sweep"];
+    let observed = &telemetry["workloads"]["pp512"];
     assert_eq!(observed["observer"]["requested_interval_ms"], 1000);
     assert!(
         observed["process_memory"]["statistics"]["sample_count"]
@@ -86,8 +86,8 @@ fn telemetry_is_collected_for_the_child_summarized_and_signature_protected() {
     if let Some(path) = std::env::var_os("COMPUTEARENA_TELEMETRY_TEST_REPORT") {
         fs::copy(&f.report, path).unwrap();
     }
-    report["benchmark"]["telemetry"]["workloads"]["prefill_sweep"]["observer"]
-        ["requested_interval_ms"] = json!(25);
+    report["benchmark"]["telemetry"]["workloads"]["pp512"]["observer"]["requested_interval_ms"] =
+        json!(25);
     fs::write(&f.report, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     failure(&f.verify(), "signature verification failed");
 }
@@ -414,7 +414,9 @@ impl Fixture {
         let descriptor = json!({"schema":"basert-benchmark-harness-descriptor/1",
             "runtime":{"name":"basert","version":"0.2.4"},"result_schema":"basert-benchmark-harness/1",
             "telemetry_schema":telemetry_schema,
-            "features":{"telemetry":true,"same_run_telemetry":native_same_run}});
+            "capacity_protocol_schema":"basert-throughput-protocol/2",
+            "features":{"telemetry":true,"same_run_telemetry":native_same_run,
+                "headline_context_capacity":result.pointer("/protocol/schema").and_then(Value::as_str)==Some("basert-throughput-protocol/2")}});
         let result_script = if self.runtime == "llama-cpp" {
             let rows = result.as_array().unwrap();
             let prefill: Value = rows
@@ -427,8 +429,25 @@ impl Fixture {
                 .filter(|row| row["n_gen"].as_u64().unwrap_or(0) > 0)
                 .cloned()
                 .collect();
+            // This fixture has PP128 and PP512. Keep their original row
+            // positions even when a test deliberately corrupts a token count.
+            let headline: Value = prefill
+                .as_array()
+                .unwrap()
+                .iter()
+                .skip(1)
+                .take(1)
+                .cloned()
+                .collect();
+            let remaining: Value = prefill
+                .as_array()
+                .unwrap()
+                .iter()
+                .take(1)
+                .cloned()
+                .collect();
             format!(
-                "tg=0\nwhile [ \"$#\" -gt 0 ]; do\ncase \"$1\" in\n-n) shift; tg=\"$1\";;\nesac\nshift\ndone\nif [ \"$tg\" = 0 ]; then\n/bin/cat <<'RESULT'\n{prefill}\nRESULT\nelse\n/bin/cat <<'RESULT'\n{decode}\nRESULT\nfi"
+                "tg=0\npp=0\nwhile [ \"$#\" -gt 0 ]; do\ncase \"$1\" in\n-n) shift; tg=\"$1\";;\n-p) shift; pp=\"$1\";;\nesac\nshift\ndone\nif [ \"$tg\" != 0 ]; then\n/bin/cat <<'RESULT'\n{decode}\nRESULT\nelif [ \"$pp\" = 512 ]; then\n/bin/cat <<'RESULT'\n{headline}\nRESULT\nelse\n/bin/cat <<'RESULT'\n{remaining}\nRESULT\nfi"
             )
         } else {
             format!("/bin/cat <<'RESULT'\n{result}\nRESULT")
@@ -523,7 +542,7 @@ fn runtimes_agree_on_samples_units_and_rates_without_faking_protocol_equivalence
     assert_eq!(b["benchmark"]["protocol"]["telemetry_available"], true);
     assert_eq!(
         b["benchmark"]["telemetry"]["scope"],
-        "separate_prefill_and_decode_processes"
+        "headline_then_prefill_processes"
     );
     assert!(b["benchmark"]["telemetry"].get("memory_replay").is_none());
     assert_eq!(
@@ -558,7 +577,20 @@ fn runtimes_agree_on_samples_units_and_rates_without_faking_protocol_equivalence
             .contains(fixture.dir.path().to_str().unwrap()));
         success(&fixture.verify());
         let args = fs::read_to_string(fixture.dir.path().join("args")).unwrap();
-        assert!(args.contains("\n128,512\n"));
+        if fixture.runtime == "basert" {
+            assert!(args.contains("\n128,512\n"));
+        } else {
+            let prompts: Vec<_> = args
+                .lines()
+                .collect::<Vec<_>>()
+                .windows(2)
+                .filter(|pair| pair[0] == "-p")
+                .map(|pair| pair[1])
+                .collect();
+            assert_eq!(prompts, ["512", "0", "128"]);
+            assert!(!args.contains("--ctx"));
+            assert!(!args.contains("-d\n4096\n"));
+        }
         assert!(args.contains(fixture.model.to_str().unwrap()));
         assert!(!args.contains("--cooldown"));
         assert!(!args.contains("--telemetry"));
@@ -589,6 +621,38 @@ fn basert_native_same_run_telemetry_is_selected_by_capability_not_version() {
     assert!(report["benchmark"]["telemetry"].get("adapter").is_none());
     let args = fs::read_to_string(f.dir.path().join("args")).unwrap();
     assert!(args.contains("--telemetry"));
+}
+
+#[test]
+fn headline_capable_basert_signs_new_metadata_without_changing_requested_repetitions() {
+    let f = Fixture::new("basert");
+    let mut result = f.result();
+    result["params"]["ctx"] = json!(4096);
+    result["protocol"] = json!({"schema":"basert-throughput-protocol/2","profile":"basert-bench-capacity/1",
+        "context_isolation":"headline_then_per_prefill","context_capacity_policy":"basert_bench_default",
+        "model_load_in_timing":false,"execution_layout":"headline_then_prefill_processes",
+        "execution_order":["pp512","tg128","pp128"],
+        "prefill":{"128":{"initial_context_tokens":0,"context_capacity_tokens":4096},
+            "512":{"initial_context_tokens":0,"context_capacity_tokens":4096}},
+        "decode":{"initial_context_tokens":1,"context_capacity_tokens":4096,"seed_prefill_in_timing":false},
+        "measurement":{"timed_repetitions":2,"requested_warmup_repetitions":3,
+            "warmup_policy":"fixed_repetitions","minimum_warmup_s":0,
+            "telemetry":"disabled","cooldown":false,"timing":"harness_existing_token_operations"}});
+    f.install(&result, "");
+    let signed = f.signed();
+    assert_eq!(
+        signed["benchmark"]["protocol"]["id"],
+        "computearena-throughput/3"
+    );
+    assert_eq!(signed["benchmark"]["raw_samples"], result["raw_samples"]);
+    let args = fs::read_to_string(f.dir.path().join("args")).unwrap();
+    assert!(args.contains("--headline-first"));
+    assert!(!args.contains("--isolated-workloads"));
+    assert!(args.contains("-r\n2\n-w\n3\n"));
+    success(&f.verify());
+    if let Some(path) = std::env::var_os("COMPUTEARENA_HEADLINE_TEST_REPORT") {
+        fs::copy(&f.report, path).unwrap();
+    }
 }
 
 #[test]
