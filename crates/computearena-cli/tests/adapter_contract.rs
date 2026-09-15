@@ -189,6 +189,64 @@ fn repeated_runs_have_unique_ids_but_keep_the_installation_identity() {
 }
 
 #[test]
+fn select_all_reports_deleted_failures_and_still_uploads_other_benchmarks() {
+    for statuses in [vec![409, 201, 200], vec![409]] {
+        let f = Fixture::new("llama-cpp");
+        let reports = f.dir.path().join("data/reports");
+        fs::create_dir_all(&reports).unwrap();
+        let originals: Vec<_> = (0..statuses.len())
+            .map(|index| {
+                let report = f.signed();
+                let path = reports.join(format!("saved-{index}.json"));
+                fs::rename(&f.report, &path).unwrap();
+                (path, report)
+            })
+            .collect();
+        let (url, received) = server(&f, statuses);
+        let mut child = f
+            .command()
+            .args(["--api-url", &url, "submit", "--yes"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"all\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        failure(&output, "1 previously deleted");
+        let printed = text(&output);
+        for hint in [
+            "Failed: previously deleted",
+            "Select all does not restore",
+            "Run a new benchmark",
+            "local files are unchanged",
+        ] {
+            assert!(printed.contains(hint), "missing {hint}: {printed}");
+        }
+        if originals.len() == 3 {
+            assert!(
+                printed.contains("1 uploaded, 1 already present"),
+                "{printed}"
+            );
+        } else {
+            assert!(
+                printed.contains("0 uploaded, 0 already present"),
+                "{printed}"
+            );
+        }
+        let attempted = received.join().unwrap();
+        assert_eq!(attempted.len(), originals.len());
+        for (path, report) in originals {
+            assert!(attempted.contains(&report));
+            assert_eq!(
+                serde_json::from_slice::<Value>(&fs::read(path).unwrap()).unwrap(),
+                report
+            );
+        }
+    }
+}
+
+#[test]
 fn systemic_submission_failure_stops_the_queue_but_report_rejection_does_not() {
     for status in [422, 429, 500] {
         let f = Fixture::new("basert");
@@ -823,9 +881,14 @@ fn server(f: &Fixture, statuses: Vec<u16>) -> (String, thread::JoinHandle<Vec<Va
                 data.extend_from_slice(&buf[..n]);
             }
             received.push(serde_json::from_slice(&data[offset..offset + length]).unwrap());
-            let body = json!({"id":"test-submission","runtime_provenance":{
+            let body = if status == 409 {
+                json!({"error":{"code":"submission_deleted","message":"Report deleted"}})
+                    .to_string()
+            } else {
+                json!({"id":"test-submission","runtime_provenance":{
                 "status":"mismatch","message":"Benchmark accepted. This binary differs from the registered release.",
-                "download_url":"https://github.com/ggml-org/llama.cpp/releases"}}).to_string();
+                "download_url":"https://github.com/ggml-org/llama.cpp/releases"}}).to_string()
+            };
             write!(stream,"HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
         }
         received

@@ -1,4 +1,6 @@
-use crate::api::{client as api_client, server_error as api_server_error};
+use crate::api::{
+    client as api_client, error_code as api_error_code, server_error as api_server_error,
+};
 use crate::auth::load_api_session;
 use crate::config::SUBMISSION_HTTP_TIMEOUT;
 use crate::model_identity::{verify_submission_model, SubmissionModelVerification};
@@ -15,6 +17,8 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
+
+pub(crate) const DELETED_SUBMISSION_NOTICE: &str = "Previously deleted reports will fail to submit.\nSelect all does not restore them. Other valid reports\nwill still be attempted. Local files stay unchanged.";
 
 #[derive(Debug)]
 pub(crate) struct PreparedSubmission {
@@ -42,6 +46,7 @@ enum SubmissionOutcomeKind {
     Submitted,
     Duplicate,
     Rejected,
+    PreviouslyDeleted,
     NotAttempted,
 }
 
@@ -254,6 +259,7 @@ pub(crate) fn submit_reports(
         if prompt_yes_no("Preview the JSON data before submitting?", true)? {
             print_submission_preview(ui, &preflight.ready)?;
         }
+        println!("{}", ui.neutral(DELETED_SUBMISSION_NOTICE));
         if !prompt_yes_no(
             &format!(
                 "Submit the {} valid benchmark(s) now?",
@@ -270,6 +276,8 @@ pub(crate) fn submit_reports(
                 ..SubmissionSummary::default()
             });
         }
+    } else {
+        println!("{}", ui.neutral(DELETED_SUBMISSION_NOTICE));
     }
 
     let endpoint = format!("{api_url}/submissions");
@@ -363,7 +371,13 @@ pub(crate) fn submit_reports(
                     eprintln!("{} {message}", ui.error("✗"));
                     outcomes.push(SubmissionOutcome {
                         label,
-                        kind: SubmissionOutcomeKind::Rejected,
+                        kind: if status == reqwest::StatusCode::CONFLICT
+                            && api_error_code(&body).as_deref() == Some("submission_deleted")
+                        {
+                            SubmissionOutcomeKind::PreviouslyDeleted
+                        } else {
+                            SubmissionOutcomeKind::Rejected
+                        },
                         detail: Some(message.clone()),
                     });
                     if should_stop_submission(status) {
@@ -413,13 +427,19 @@ pub(crate) fn submit_reports(
         .filter(|outcome| {
             matches!(
                 outcome.kind,
-                SubmissionOutcomeKind::Rejected | SubmissionOutcomeKind::NotAttempted
+                SubmissionOutcomeKind::Rejected
+                    | SubmissionOutcomeKind::PreviouslyDeleted
+                    | SubmissionOutcomeKind::NotAttempted
             )
         })
         .count();
     if failures > 0 {
+        let deleted = outcomes
+            .iter()
+            .filter(|outcome| outcome.kind == SubmissionOutcomeKind::PreviouslyDeleted)
+            .count();
         bail!(
-            "{failures} of {report_count} eligible benchmark(s) were not submitted; successful submissions remain saved"
+            "{submitted} uploaded, {duplicates} already present; {failures} of {report_count} eligible benchmark(s) were not submitted ({deleted} previously deleted). Successful uploads remain saved; local files are unchanged."
         );
     }
     println!(
@@ -603,6 +623,9 @@ fn print_submission_results(ui: TerminalUi, outcomes: &[SubmissionOutcome]) {
             SubmissionOutcomeKind::Submitted => (ui.success("✓"), "Submitted"),
             SubmissionOutcomeKind::Duplicate => (ui.neutral("="), "Already submitted"),
             SubmissionOutcomeKind::Rejected => (ui.error("✗"), "Rejected"),
+            SubmissionOutcomeKind::PreviouslyDeleted => {
+                (ui.error("✗"), "Failed: previously deleted")
+            }
             SubmissionOutcomeKind::NotAttempted => (ui.warning("—"), "Not attempted"),
         };
         println!("  {marker} {} — {status}", outcome.label);
