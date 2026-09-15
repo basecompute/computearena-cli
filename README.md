@@ -155,12 +155,16 @@ and piped input must use `--yes`. Details are in
 [docs/benchmark-profiles.md](docs/benchmark-profiles.md).
 
 Telemetry is automatic for both runtimes and needs no flag, credential, or
-sudo. ComputeArena observes the single process it launches for current BaseRT
-and llama.cpp builds: resident memory, operating-system temperature sensors,
-power state, and NVIDIA or ROCm device snapshots where those vendor tools exist.
-A future BaseRT harness can advertise native same-run telemetry, which the CLI
-will use without a CLI release or version-string rule. Coverage and limitations
-are in [docs/telemetry.md](docs/telemetry.md).
+sudo. ComputeArena observes the processes it launches: resident memory,
+operating-system temperature sensors, power state, memory pressure and swap,
+plus NVIDIA or ROCm device snapshots where those vendor tools exist. Signed
+environment boundaries also record the OS/kernel, CPU layout, host memory, and
+available GPU configuration; static macOS display configuration is cached so
+`system_profiler` is not rerun at every boundary. A BaseRT harness can
+advertise native same-run telemetry, which the CLI uses without a CLI release
+or version-string rule. Runtime-native detail is preferred when it is more
+accurate; portable host boundaries remain available for cross-runtime analysis.
+Coverage and limitations are in [docs/telemetry.md](docs/telemetry.md).
 
 ## Runtimes
 
@@ -214,10 +218,13 @@ reads its GGUF header only. The history lives in `recent-gguf.json` in the
 data directory, is never part of a report, and can be deleted to reset the
 list; a corrupt or unwritable history never blocks a benchmark.
 
-llama.cpp measurements carry their own protocol identifiers and record native
-warmup, zero context depth, and the exclusion of sampling and tokenization, so
-they are never presented as BaseRT numbers. The measurement contract is in
-[docs/runtime-adapters.md](docs/runtime-adapters.md).
+llama.cpp runs the PP sweep with zero initial context and TG128 with one
+untimed seed token in a separate process. Compatible BaseRT harnesses use the
+same runtime-neutral `computearena-throughput/2` contract and isolate each
+workload with the minimum required context capacity. Runtime-specific evidence,
+native warmup, and the exclusion of sampling and tokenization remain signed in
+the report; legacy harnesses are retained but explicitly marked non-comparable.
+The measurement contract is in [docs/runtime-adapters.md](docs/runtime-adapters.md).
 
 ## Reports and signatures
 
@@ -334,12 +341,15 @@ reports, sessions, and the signing key.
 - Report envelope: `computearena-benchmark/1`
 - BaseRT harness output: `basert-benchmark-harness/1`; the older
   `basert-harness/1` is still accepted by the server
-- llama.cpp measurements: `computearena-measurements/1`, executed as
-  `llama-bench-independent-pp-tg/1` or, with cooldown,
-  `llama-bench-conditioned-pp-tg/1`
+- llama.cpp measurements: `computearena-measurements/1`
+- Comparable throughput semantics: `computearena-throughput/2`, with native
+  evidence retained as `basert-throughput-protocol/1` or
+  `llama-bench-json/1`. Older BaseRT results use
+  `computearena-throughput-legacy/1` and are marked non-comparable.
 - Telemetry: `computearena-telemetry/1` for externally observed BaseRT and
   llama.cpp runs. A BaseRT harness advertising `features.same_run_telemetry`
   uses native `basert-telemetry/4` instead.
+- Host environment boundaries: `computearena-environment/1`
 - Signing: Ed25519 over `computearena-json-v1` canonical JSON
 
 ## Development

@@ -35,11 +35,11 @@ They do not run GPU workloads. See [telemetry.md](telemetry.md) for collector co
 | CLI UX | Runtime-scoped help, no nested runtime selectors, one-per-line runtime chooser skipped when a single runtime is installed, menu exit, common list/inspect/verify commands, NO_COLOR output, explicit install/capability guidance |
 | Discovery | PATH discovery, explicit executable path override, paths containing spaces, missing/incompatible executables, executable feedback on selection, ComputeArena-installed copies, BaseRT's default install location |
 | Installation | Plan shown before installing, local bundle unpacking, install records, replacement of earlier copies, refusal without a terminal or --yes, non-interactive runs pointing at install |
-| Runtime invocation | Requested PP sweep forwarded, separate PP/TG samples, llama.cpp depth zero and JSON output, no replay telemetry flag for current BaseRT, no default cooldown, native warmup disablement |
+| Runtime invocation | Requested PP sweep forwarded, separate PP/TG processes, llama.cpp PP depth zero and TG depth one, JSON output, no replay telemetry flag for current BaseRT, no default cooldown, native warmup disablement |
 | Result consistency | Identical raw measurements produce identical token/second metrics and units across adapters; bogus llama.cpp aggregate rates are ignored |
-| Protocol differences | Current BaseRT and llama.cpp use concurrent whole-run telemetry; future BaseRT native same-run telemetry is selected only by an advertised capability; llama.cpp conditioned runs use a distinct per-workload-process protocol |
+| Protocol compatibility | Isolated BaseRT metadata and llama.cpp normalize to computearena-throughput/2; legacy BaseRT remains readable but non-comparable; native same-run telemetry is selected only by an advertised capability |
 | Runtime failures | Nonzero exit, malformed JSON, executable mutation during a benchmark: no report signed |
-| Measurement validation | Missing workloads, token-count mismatches, repetition mismatches, invalid/unsafe durations, nonzero llama.cpp depth, inconsistent build identity |
+| Measurement validation | Missing workloads, token-count mismatches, repetition mismatches, invalid/unsafe durations, incorrect llama.cpp PP/TG depth, incompatible BaseRT context metadata, inconsistent build identity |
 | Binary identity | Signed SHA-256 equals the executable bytes; platform identity recorded; report remains verifiable after the executable is removed or upgraded |
 | Report integrity | Changes to runtime identity, digest, version, timing, rates, token sizes, model, timestamp, or run ID invalidate the signature |
 | Signature format | Unsigned/malformed reports, bad algorithm/canonicalization/key ID/signature rejected; whitespace and key-order changes accepted |

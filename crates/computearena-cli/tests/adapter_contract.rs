@@ -68,9 +68,10 @@ fn telemetry_is_collected_for_the_child_summarized_and_signature_protected() {
     let mut report = f.signed();
     let telemetry = &report["benchmark"]["telemetry"];
     assert_eq!(telemetry["schema"], "computearena-telemetry/1");
-    assert_eq!(telemetry["observer"]["requested_interval_ms"], 1000);
+    let observed = &telemetry["workloads"]["prefill_sweep"];
+    assert_eq!(observed["observer"]["requested_interval_ms"], 1000);
     assert!(
-        telemetry["process_memory"]["statistics"]["sample_count"]
+        observed["process_memory"]["statistics"]["sample_count"]
             .as_u64()
             .unwrap()
             >= 1
@@ -79,13 +80,14 @@ fn telemetry_is_collected_for_the_child_summarized_and_signature_protected() {
         report["benchmark"]["memory"]["process_peak_rss_mb"],
         telemetry["process_memory"]["statistics"]["peak"]
     );
-    assert_eq!(telemetry["energy"]["available"], false);
-    assert_eq!(telemetry["per_workload"]["available"], false);
+    assert_eq!(observed["energy"]["available"], false);
+    assert_eq!(observed["per_workload"]["available"], false);
     success(&f.verify());
     if let Some(path) = std::env::var_os("COMPUTEARENA_TELEMETRY_TEST_REPORT") {
         fs::copy(&f.report, path).unwrap();
     }
-    report["benchmark"]["telemetry"]["observer"]["requested_interval_ms"] = json!(25);
+    report["benchmark"]["telemetry"]["workloads"]["prefill_sweep"]["observer"]
+        ["requested_interval_ms"] = json!(25);
     fs::write(&f.report, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     failure(&f.verify(), "signature verification failed");
 }
@@ -393,7 +395,7 @@ impl Fixture {
             Value::Array([(128,0),(512,0),(0,128)].into_iter().map(|(pp,tg)| json!({
                 "build_commit":"abc123","build_number":123,"model_type":"Qwen3 Q4_K_M",
                 "model_filename":self.model,"model_size":24,"model_n_params":4000000000u64,
-                "n_prompt":pp,"n_gen":tg,"n_depth":0,"n_gpu_layers":0,"backends":"CPU",
+                "n_prompt":pp,"n_gen":tg,"n_depth":if pp == 0 { 1 } else { 0 },"n_gpu_layers":0,"backends":"CPU",
                 "cpu_info":"Test CPU","gpu_info":"","samples_ns":[100000000,200000000],
                 // Reported aggregates are deliberately bogus: native samples are authoritative.
                 "avg_ts":999999.0,"avg_ns":1
@@ -413,7 +415,25 @@ impl Fixture {
             "runtime":{"name":"basert","version":"0.2.4"},"result_schema":"basert-benchmark-harness/1",
             "telemetry_schema":telemetry_schema,
             "features":{"telemetry":true,"same_run_telemetry":native_same_run}});
-        let script = format!("#!/bin/sh\ncase \"$1\" in\n describe) printf '%s\\n' '{descriptor}';;\n --help) printf '%s\\n' '--n-prompt --n-gen --n-depth --repetitions --no-warmup json';;\n *) printf '%s\\n' \"$@\" > \"$ARENA_TEST_ARGS\"\n{before_result}\n/bin/cat <<'RESULT'\n{result}\nRESULT\n;;\nesac\n");
+        let result_script = if self.runtime == "llama-cpp" {
+            let rows = result.as_array().unwrap();
+            let prefill: Value = rows
+                .iter()
+                .filter(|row| row["n_prompt"].as_u64().unwrap_or(0) > 0)
+                .cloned()
+                .collect();
+            let decode: Value = rows
+                .iter()
+                .filter(|row| row["n_gen"].as_u64().unwrap_or(0) > 0)
+                .cloned()
+                .collect();
+            format!(
+                "tg=0\nwhile [ \"$#\" -gt 0 ]; do\ncase \"$1\" in\n-n) shift; tg=\"$1\";;\nesac\nshift\ndone\nif [ \"$tg\" = 0 ]; then\n/bin/cat <<'RESULT'\n{prefill}\nRESULT\nelse\n/bin/cat <<'RESULT'\n{decode}\nRESULT\nfi"
+            )
+        } else {
+            format!("/bin/cat <<'RESULT'\n{result}\nRESULT")
+        };
+        let script = format!("#!/bin/sh\ncase \"$1\" in\n describe) printf '%s\\n' '{descriptor}';;\n --help) printf '%s\\n' '--n-prompt --n-gen --n-depth --repetitions --no-warmup json';;\n *) printf '%s\\n' \"$@\" >> \"$ARENA_TEST_ARGS\"\n{before_result}\n{result_script}\n;;\nesac\n");
         fs::write(&self.executable, script).unwrap();
         fs::set_permissions(&self.executable, fs::Permissions::from_mode(0o755)).unwrap();
     }
@@ -499,11 +519,11 @@ fn runtimes_agree_on_samples_units_and_rates_without_faking_protocol_equivalence
     }
     assert_eq!(b["benchmark"]["metrics"]["pp512_t_s"], 3840.0);
     assert_eq!(b["benchmark"]["protocol"]["warmup"], "runtime_native");
-    assert_eq!(b["benchmark"]["params"]["decode_context_tokens"], 0);
+    assert_eq!(b["benchmark"]["params"]["decode_context_tokens"], 1);
     assert_eq!(b["benchmark"]["protocol"]["telemetry_available"], true);
     assert_eq!(
         b["benchmark"]["telemetry"]["scope"],
-        "whole_runtime_process"
+        "separate_prefill_and_decode_processes"
     );
     assert!(b["benchmark"]["telemetry"].get("memory_replay").is_none());
     assert_eq!(
@@ -544,6 +564,7 @@ fn runtimes_agree_on_samples_units_and_rates_without_faking_protocol_equivalence
         assert!(!args.contains("--telemetry"));
         if fixture.runtime == "llama-cpp" {
             assert!(args.contains("-d\n0\n"));
+            assert!(args.contains("-d\n1\n"));
             assert!(args.contains("-o\njson\n"));
         }
     }

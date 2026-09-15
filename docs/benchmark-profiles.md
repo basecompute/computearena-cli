@@ -26,6 +26,8 @@ belongs to the harness's multi-pass telemetry protocol. The wait adds 10 seconds
 A future harness can provide native per-workload conditioning together with native
 same-run telemetry. ComputeArena uses that path only when the descriptor advertises
 `features.same_run_telemetry: true` and `telemetry_schema: basert-telemetry/4`.
+Comparable cross-runtime results additionally require
+`features.isolated_workload_contexts: true`.
 
 ## llama.cpp cooldown semantics
 
@@ -33,7 +35,8 @@ llama-bench has no external pause hook between workload phases in a running swee
 ComputeArena launches each requested PP size with TG0 and the requested TG workload
 with PP0 in a **fresh process**. It waits before each launch, then loading and native
 warmup occur. This is not equivalent to BaseRT's one pre-suite wait or a reset immediately
-before a measured repetition. Standard mode still uses one process.
+before a measured repetition. Standard mode uses one PP-sweep process and one TG
+process so PP has zero initial context and TG has one untimed seed token.
 
 The controller uses a fixed set of initially readable CPU/GPU/die-labelled temperature
 sensors. It excludes battery/storage/ambient labels. The first stable window establishes
@@ -57,10 +60,11 @@ The CLI calculates these wait estimates from the selected sweep. There is no cal
 total runtime prediction yet. It says so instead of reusing BaseRT's replay-duration
 estimate, which would be incorrect for llama.cpp.
 
-Conditioned reports use `llama-bench-conditioned-pp-tg/1` with
-`execution_layout: one_process_per_workload`. The private backend must include support
-for this protocol before accepting those submissions. Existing standard reports still
-use `llama-bench-independent-pp-tg/1`. No database migration is needed.
+Both profiles normalize to `computearena-throughput/2`. Conditioned reports use
+`execution_layout: one_process_per_workload`; standard reports use
+`separate_prefill_and_decode_processes`. The runtime-specific protocol evidence and
+cooldown metadata remain signed. The private backend must accept the normalized
+protocol before these submissions are published. No database migration is required.
 
 ## Audit of remaining differences
 

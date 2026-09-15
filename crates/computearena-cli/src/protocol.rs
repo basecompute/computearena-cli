@@ -7,6 +7,9 @@ pub(crate) const TELEMETRY_SCHEMA: &str = "basert-telemetry/3";
 /// collection to it. Older replay-based harnesses remain on the external
 /// observer path.
 pub(crate) const BASERT_SAME_RUN_TELEMETRY_SCHEMA: &str = "basert-telemetry/4";
+pub(crate) const BASERT_ISOLATED_PROTOCOL_SCHEMA: &str = "basert-throughput-protocol/1";
+pub(crate) const THROUGHPUT_PROTOCOL_ID: &str = "computearena-throughput/2";
+pub(crate) const DECODE_INITIAL_CONTEXT_TOKENS: u64 = 1;
 pub(crate) const SIGNATURE_DOMAIN: &[u8] = b"computearena-benchmark/1\0";
 
 pub(crate) const SIGNATURE_ALGORITHM: &str = "ed25519";

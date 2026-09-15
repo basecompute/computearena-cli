@@ -1,5 +1,8 @@
 use super::{BenchmarkRequest, RuntimeAdapter, RuntimeOutput};
-use crate::protocol::BASERT_SAME_RUN_TELEMETRY_SCHEMA;
+use crate::protocol::{
+    BASERT_ISOLATED_PROTOCOL_SCHEMA, BASERT_SAME_RUN_TELEMETRY_SCHEMA,
+    DECODE_INITIAL_CONTEXT_TOKENS, THROUGHPUT_PROTOCOL_ID,
+};
 use crate::ui::TerminalUi;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -12,6 +15,13 @@ pub(crate) struct BaseRtAdapter;
 enum TelemetryMode {
     ExternalWholeProcess,
     NativeSameRun,
+}
+
+fn supports_isolated_workloads(descriptor: &Value) -> bool {
+    descriptor
+        .pointer("/features/isolated_workload_contexts")
+        .and_then(Value::as_bool)
+        == Some(true)
 }
 
 fn telemetry_mode(descriptor: &Value) -> Result<TelemetryMode> {
@@ -81,6 +91,7 @@ impl RuntimeAdapter for BaseRtAdapter {
     ) -> Result<RuntimeOutput> {
         let ui = TerminalUi::detect();
         let mode = telemetry_mode(descriptor)?;
+        let isolated_workloads = supports_isolated_workloads(descriptor);
         let suite_conditioning = if mode == TelemetryMode::ExternalWholeProcess && r.cooldown {
             let mut cooldown = crate::conditioning::Cooldown::new();
             Some(cooldown.prepare("BaseRT benchmark suite"))
@@ -97,6 +108,11 @@ impl RuntimeAdapter for BaseRtAdapter {
             .arg(r.reps.to_string())
             .arg("-w")
             .arg(r.warmup.to_string());
+        if isolated_workloads {
+            command.arg("--isolated-workloads");
+        }
+        let native_environment_before =
+            (mode == TelemetryMode::NativeSameRun).then(crate::telemetry::capture_environment);
         let (output, external_telemetry) = match mode {
             TelemetryMode::ExternalWholeProcess => {
                 println!("{}", ui.neutral("Telemetry: observing the BaseRT harness process and available device sensors (whole run, 1-second sampling; no telemetry replays)."));
@@ -119,6 +135,10 @@ impl RuntimeAdapter for BaseRtAdapter {
         if !output.status.success() {
             bail!("BaseRT benchmark exited with {}", output.status);
         }
+        let native_environment = native_environment_before.map(|before| {
+            json!({"schema":"computearena-environment/1","measurement_relation":"outside_runtime_execution",
+                "before":before,"after":crate::telemetry::capture_environment()})
+        });
         let mut benchmark: Value =
             serde_json::from_slice(&output.stdout).context("BaseRT returned invalid JSON")?;
         let expected_schema = match mode {
@@ -127,6 +147,10 @@ impl RuntimeAdapter for BaseRtAdapter {
         };
         crate::benchmark::validate_harness_result(&benchmark, expected_schema)?;
         validate_requested_workloads(&benchmark, r)?;
+        normalize_protocol(&mut benchmark, r, isolated_workloads)?;
+        if let Some(environment) = native_environment {
+            crate::telemetry::attach_environment(&mut benchmark, environment);
+        }
         if let Some(mut telemetry) = external_telemetry {
             let mut policy = if r.cooldown {
                 crate::conditioning::before_suite_policy()
@@ -160,6 +184,66 @@ impl RuntimeAdapter for BaseRtAdapter {
             model: crate::models::inspect_model(r.model)?,
         })
     }
+}
+
+fn normalize_protocol(
+    benchmark: &mut Value,
+    request: &BenchmarkRequest<'_>,
+    isolated_workloads: bool,
+) -> Result<()> {
+    let runtime_protocol = benchmark.get("protocol").cloned().unwrap_or(Value::Null);
+    benchmark["params"]["decode_context_tokens"] = json!(DECODE_INITIAL_CONTEXT_TOKENS);
+    if !isolated_workloads {
+        benchmark["protocol"] = json!({
+            "id":"computearena-throughput-legacy/1",
+            "comparable":false,
+            "reason":"The installed BaseRT harness does not advertise isolated workload contexts",
+            "context_isolation":"shared_sweep_context",
+            "decode":{"initial_context_tokens":DECODE_INITIAL_CONTEXT_TOKENS},
+            "runtime_protocol":runtime_protocol
+        });
+        return Ok(());
+    }
+
+    if runtime_protocol["schema"].as_str() != Some(BASERT_ISOLATED_PROTOCOL_SCHEMA)
+        || runtime_protocol["context_isolation"].as_str() != Some("per_workload")
+        || runtime_protocol["context_capacity_policy"].as_str() != Some("minimum_required")
+        || runtime_protocol["model_load_in_timing"].as_bool() != Some(false)
+    {
+        bail!("BaseRT advertised isolated contexts but returned incompatible protocol metadata");
+    }
+    for prompt in request.pp.split(',') {
+        let tokens = prompt.parse::<u64>()?;
+        let workload = &runtime_protocol["prefill"][prompt];
+        if workload["initial_context_tokens"].as_u64() != Some(0)
+            || workload["context_capacity_tokens"].as_u64() != Some(tokens)
+        {
+            bail!("BaseRT returned incompatible PP{tokens} context metadata");
+        }
+    }
+    if runtime_protocol["decode"]["initial_context_tokens"].as_u64()
+        != Some(DECODE_INITIAL_CONTEXT_TOKENS)
+        || runtime_protocol["decode"]["context_capacity_tokens"].as_u64()
+            != Some(u64::from(request.tg) + DECODE_INITIAL_CONTEXT_TOKENS)
+    {
+        bail!(
+            "BaseRT returned incompatible TG{} context metadata",
+            request.tg
+        );
+    }
+    benchmark["protocol"] = json!({
+        "id":THROUGHPUT_PROTOCOL_ID,
+        "comparable":true,
+        "context_isolation":"per_workload",
+        "context_capacity_policy":"minimum_required",
+        "model_load_in_timing":false,
+        "prefill":{"initial_context_tokens":0},
+        "decode":{"initial_context_tokens":DECODE_INITIAL_CONTEXT_TOKENS},
+        "tokenization_timed":false,
+        "sampling_timed":false,
+        "runtime_protocol":runtime_protocol
+    });
+    Ok(())
 }
 
 /// A compatible harness must also have completed the work the user requested.
@@ -244,5 +328,38 @@ mod tests {
         let descriptor = json!({"telemetry_schema":"basert-telemetry/999",
             "features":{"same_run_telemetry":true}});
         assert!(telemetry_mode(&descriptor).is_err());
+    }
+    #[test]
+    fn isolated_harness_metadata_normalizes_to_the_shared_protocol() {
+        let request = BenchmarkRequest {
+            model: Path::new("model.base"),
+            pp: "128,512",
+            tg: 128,
+            reps: 3,
+            warmup: 3,
+            cooldown: false,
+        };
+        let mut benchmark = json!({
+            "params":{},
+            "protocol":{
+                "schema":BASERT_ISOLATED_PROTOCOL_SCHEMA,
+                "context_isolation":"per_workload",
+                "context_capacity_policy":"minimum_required",
+                "model_load_in_timing":false,
+                "prefill":{
+                    "128":{"initial_context_tokens":0,"context_capacity_tokens":128},
+                    "512":{"initial_context_tokens":0,"context_capacity_tokens":512}
+                },
+                "decode":{"initial_context_tokens":1,"context_capacity_tokens":129}
+            }
+        });
+        normalize_protocol(&mut benchmark, &request, true).unwrap();
+        assert_eq!(benchmark["protocol"]["id"], THROUGHPUT_PROTOCOL_ID);
+        assert_eq!(benchmark["protocol"]["comparable"], true);
+        assert_eq!(benchmark["params"]["decode_context_tokens"], 1);
+        assert_eq!(
+            benchmark["protocol"]["runtime_protocol"]["decode"]["context_capacity_tokens"],
+            129
+        );
     }
 }

@@ -85,12 +85,12 @@ impl RuntimeAdapter for LlamaCppAdapter {
     ) -> Result<RuntimeOutput> {
         validate_model(r.model)?;
         let ui = TerminalUi::detect();
-        println!("{}", ui.neutral("Telemetry: observing process memory and available device sensors (whole run, 1-second sampling)."));
+        println!("{}", ui.neutral("Telemetry: observing each runtime process and available device sensors (1-second sampling)."));
         let (rows, telemetry) = if r.cooldown {
             let mut cooldown = crate::conditioning::Cooldown::new();
             run_conditioned(executable, r, |label| cooldown.prepare(label))?
         } else {
-            run_native(executable, r, r.pp, r.tg)?
+            run_unconditioned(executable, r)?
         };
         let mut result = normalize(&rows, r)?;
         ui.section("Benchmark results");
@@ -111,8 +111,7 @@ impl RuntimeAdapter for LlamaCppAdapter {
         );
         result.benchmark["protocol"]["telemetry_available"] =
             json!(telemetry.get("observer").is_some() || telemetry.get("workloads").is_some());
-        result.benchmark["protocol"]["measurement_observer"] =
-            json!("external_whole_process_sampler");
+        result.benchmark["protocol"]["measurement_observer"] = json!("external_process_sampler");
         if let Some(peak) = crate::telemetry::attach_whole_process(&mut result.benchmark, telemetry)
         {
             println!("{}", ui.neutral(format!("Telemetry: observed peak process memory {peak:.0} MiB (includes loading and warmup).")));
@@ -120,7 +119,6 @@ impl RuntimeAdapter for LlamaCppAdapter {
             println!("{}", ui.neutral("Telemetry: process memory unavailable; see sensor coverage in the saved report."));
         }
         if r.cooldown {
-            result.benchmark["protocol"]["id"] = json!("llama-bench-conditioned-pp-tg/1");
             result.benchmark["protocol"]["cooldown_enabled"] = json!(true);
             result.benchmark["protocol"]["execution_layout"] = json!("one_process_per_workload");
             result.benchmark["protocol"]["conditioning"] =
@@ -144,6 +142,7 @@ fn run_native(
     r: &BenchmarkRequest<'_>,
     pp: &str,
     tg: u32,
+    depth: u32,
 ) -> Result<(Value, Value)> {
     let mut command = Command::new(executable);
     command
@@ -151,7 +150,9 @@ fn run_native(
         .arg(r.model)
         .args(["-p", pp, "-n"])
         .arg(tg.to_string())
-        .args(["-d", "0", "-r"])
+        .arg("-d")
+        .arg(depth.to_string())
+        .arg("-r")
         .arg(r.reps.to_string())
         .args(["-o", "json"]);
     if r.warmup == 0 {
@@ -170,22 +171,111 @@ fn run_native(
     Ok((rows, telemetry))
 }
 
+fn aggregate_observations(
+    scope: &str,
+    ordered: Vec<(String, Value)>,
+    conditioning: Option<Map<String, Value>>,
+) -> Value {
+    let mut observations = Map::new();
+    let mut peak: Option<f64> = None;
+    let mut before = None;
+    let mut after = None;
+    for (label, mut telemetry) in ordered {
+        if before.is_none() {
+            before = telemetry.pointer("/boundaries/before").cloned();
+        }
+        after = telemetry.pointer("/boundaries/after").cloned();
+        if let Some(value) = telemetry
+            .pointer("/process_memory/statistics/peak")
+            .and_then(Value::as_f64)
+        {
+            peak = Some(peak.map_or(value, |current| current.max(value)));
+        }
+        telemetry["scope"] = json!("one_runtime_process");
+        telemetry["includes"] = json!([
+            "model_loading",
+            "warmup",
+            "requested_workloads_for_this_process",
+            "runtime_teardown"
+        ]);
+        observations.insert(label, telemetry);
+    }
+    let mut telemetry = json!({
+        "schema":"computearena-telemetry/1",
+        "coverage":"basic",
+        "scope":scope,
+        "measurement_relation":"concurrent_observer",
+        "workloads":observations,
+        "process_memory":{
+            "metric":"resident_set_size",
+            "unit":"MiB",
+            "statistics":{"available":peak.is_some(),"peak":peak},
+            "note":"Maximum observed peak across separate process windows including loading and warmup"
+        },
+        "boundaries":{
+            "schema":"computearena-environment/1",
+            "measurement_relation":"outside_runtime_execution",
+            "before":before,
+            "after":after
+        }
+    });
+    if let Some(conditioning) = conditioning {
+        telemetry["conditioning"] = crate::conditioning::policy();
+        telemetry["conditioning_workloads"] = Value::Object(conditioning);
+    }
+    telemetry
+}
+
+fn run_unconditioned(executable: &Path, r: &BenchmarkRequest<'_>) -> Result<(Value, Value)> {
+    let (prefill, prefill_telemetry) = run_native(executable, r, r.pp, 0, 0)?;
+    let (decode, decode_telemetry) = run_native(
+        executable,
+        r,
+        "0",
+        r.tg,
+        crate::protocol::DECODE_INITIAL_CONTEXT_TOKENS as u32,
+    )?;
+    let mut rows = prefill
+        .as_array()
+        .context("llama.cpp prefill output must be an array")?
+        .clone();
+    rows.extend(
+        decode
+            .as_array()
+            .context("llama.cpp decode output must be an array")?
+            .iter()
+            .cloned(),
+    );
+    let telemetry = aggregate_observations(
+        "separate_prefill_and_decode_processes",
+        vec![
+            ("prefill_sweep".into(), prefill_telemetry),
+            (format!("tg{}", r.tg), decode_telemetry),
+        ],
+        None,
+    );
+    Ok((Value::Array(rows), telemetry))
+}
+
 fn run_conditioned(
     executable: &Path,
     r: &BenchmarkRequest<'_>,
     mut prepare: impl FnMut(&str) -> Value,
 ) -> Result<(Value, Value)> {
-    let schedule: Vec<(u32, u32)> =
+    let schedule: Vec<(u32, u32, u32)> =
         r.pp.split(',')
-            .map(|v| v.parse::<u32>().map(|pp| (pp, 0)))
-            .chain(std::iter::once(Ok((0, r.tg))))
+            .map(|v| v.parse::<u32>().map(|pp| (pp, 0, 0)))
+            .chain(std::iter::once(Ok((
+                0,
+                r.tg,
+                crate::protocol::DECODE_INITIAL_CONTEXT_TOKENS as u32,
+            ))))
             .collect::<std::result::Result<_, _>>()?;
     let mut rows = Vec::new();
-    let mut observations = Map::new();
+    let mut observations = Vec::new();
     let mut conditioning = Map::new();
-    let mut peak: Option<f64> = None;
     let ui = TerminalUi::detect();
-    for (index, (pp, tg)) in schedule.iter().enumerate() {
+    for (index, (pp, tg, depth)) in schedule.iter().enumerate() {
         let label = if *pp > 0 {
             format!("pp{pp}")
         } else {
@@ -208,33 +298,27 @@ fn run_conditioned(
                 r.reps
             ))
         );
-        let (native, telemetry) = run_native(executable, r, &pp.to_string(), *tg)?;
+        let (native, telemetry) = run_native(executable, r, &pp.to_string(), *tg, *depth)?;
         let native = native
             .as_array()
             .context("llama.cpp benchmark output must be an array")?;
         if native.len() != 1
             || native[0]["n_prompt"].as_u64() != Some(u64::from(*pp))
             || native[0]["n_gen"].as_u64() != Some(u64::from(*tg))
+            || native[0]["n_depth"].as_u64() != Some(u64::from(*depth))
         {
             bail!("llama.cpp returned an unexpected workload for {label}; no report was signed");
         }
         rows.extend(native.iter().cloned());
-        if let Some(value) = telemetry
-            .pointer("/process_memory/statistics/peak")
-            .and_then(Value::as_f64)
-        {
-            peak = Some(peak.map_or(value, |p| p.max(value)));
-        }
-        observations.insert(label, telemetry);
+        observations.push((label, telemetry));
     }
     Ok((
         Value::Array(rows),
-        json!({"schema":"computearena-telemetry/1","coverage":"basic",
-        "scope":"separate_workload_processes","measurement_relation":"concurrent_observer",
-        "conditioning":crate::conditioning::policy(),"conditioning_workloads":conditioning,
-        "workloads":observations,"process_memory":{"metric":"resident_set_size","unit":"MiB",
-            "statistics":{"available":peak.is_some(),"peak":peak},
-            "note":"Maximum observed peak across separate process windows including loading and warmup"}}),
+        aggregate_observations(
+            "separate_workload_processes",
+            observations,
+            Some(conditioning),
+        ),
     ))
 }
 
@@ -331,12 +415,17 @@ pub(crate) fn normalize(value: &Value, r: &BenchmarkRequest<'_>) -> Result<Runti
                 bail!("llama.cpp changed {field} between workloads");
             }
         }
-        if row["n_depth"].as_u64() != Some(0) {
-            bail!("llama.cpp returned an unexpected context depth");
-        }
         let pp = row["n_prompt"].as_u64().context("missing n_prompt")?;
         let tg = row["n_gen"].as_u64().context("missing n_gen")?;
         let is_pp = pp > 0 && tg == 0;
+        let expected_depth = if is_pp {
+            0
+        } else {
+            crate::protocol::DECODE_INITIAL_CONTEXT_TOKENS
+        };
+        if row["n_depth"].as_u64() != Some(expected_depth) {
+            bail!("llama.cpp returned an unexpected context depth");
+        }
         if !(is_pp && expected.contains(&pp) || pp == 0 && tg == u64::from(r.tg)) {
             bail!("llama.cpp returned an unexpected workload PP{pp}/TG{tg}");
         }
@@ -411,12 +500,19 @@ pub(crate) fn normalize(value: &Value, r: &BenchmarkRequest<'_>) -> Result<Runti
         benchmark: json!({
             "schema": "computearena-measurements/1", "mode": "text",
             "runtime_version": format!("b{build} ({commit})"), "chip": chip, "backend": backend,
-            "params": {"pp": r.pp, "tg": r.tg, "reps": r.reps, "decode_context_tokens": 0},
+            "params": {"pp": r.pp, "tg": r.tg, "reps": r.reps,
+                "decode_context_tokens": crate::protocol::DECODE_INITIAL_CONTEXT_TOKENS},
             "metrics": metrics, "raw_samples": {"prefill": prefill, "decode": decode},
-            "protocol": {"id": "llama-bench-independent-pp-tg/1", "initial_context_tokens": 0,
+            "protocol": {"id": crate::protocol::THROUGHPUT_PROTOCOL_ID, "comparable": true,
+                "context_isolation": "per_workload", "context_capacity_policy": "minimum_required",
+                "model_load_in_timing": false, "prefill": {"initial_context_tokens": 0},
+                "decode": {"initial_context_tokens": crate::protocol::DECODE_INITIAL_CONTEXT_TOKENS},
                 "tokenization_timed": false, "sampling_timed": false, "timing_source": "runtime_samples_ns",
                 "warmup": if r.warmup == 0 { "disabled" } else { "runtime_native" },
-                "cooldown_enabled": false, "telemetry_available": false},
+                "cooldown_enabled": false, "telemetry_available": false,
+                "execution_layout": "separate_prefill_and_decode_processes",
+                "runtime_protocol": {"adapter": "llama-bench-json/1", "prefill_n_depth": 0,
+                    "decode_n_depth": crate::protocol::DECODE_INITIAL_CONTEXT_TOKENS}},
             "runtime_configuration": settings
         }),
     })
@@ -435,14 +531,16 @@ mod tests {
         std::fs::write(&executable, r#"#!/bin/sh
 pp=0
 tg=0
+depth=0
 while [ "$#" -gt 0 ]; do
 case "$1" in
 -p) shift; pp="$1";;
 -n) shift; tg="$1";;
+-d) shift; depth="$1";;
 esac
 shift
 done
-printf '[{"build_commit":"abc123","build_number":123,"model_type":"Qwen Q4","model_filename":"test.gguf","n_prompt":%s,"n_gen":%s,"n_depth":0,"n_gpu_layers":0,"cpu_info":"Test CPU","gpu_info":"","backends":"CPU","samples_ns":[100000000,200000000]}]' "$pp" "$tg"
+printf '[{"build_commit":"abc123","build_number":123,"model_type":"Qwen Q4","model_filename":"test.gguf","n_prompt":%s,"n_gen":%s,"n_depth":%s,"n_gpu_layers":0,"cpu_info":"Test CPU","gpu_info":"","backends":"CPU","samples_ns":[100000000,200000000]}]' "$pp" "$tg" "$depth"
 "#).unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut request = request();
@@ -488,6 +586,7 @@ printf '[{"build_commit":"abc123","build_number":123,"model_type":"Qwen Q4","mod
                     let mut row = base.clone();
                     row["n_prompt"] = json!(p);
                     row["n_gen"] = json!(g);
+                    row["n_depth"] = json!(if p == 0 { 1 } else { 0 });
                     row["samples_ns"] = json!([100000000, 200000000]);
                     row
                 })
@@ -500,7 +599,7 @@ printf '[{"build_commit":"abc123","build_number":123,"model_type":"Qwen Q4","mod
         assert_eq!(result.benchmark["metrics"]["pp128_t_s"], json!(960.0));
         assert_eq!(
             result.benchmark["params"]["decode_context_tokens"],
-            json!(0)
+            json!(1)
         );
         assert!(!result.benchmark.to_string().contains("/private/models"));
         assert!(result.benchmark.get("telemetry").is_none());

@@ -33,7 +33,7 @@ impl Sandbox {
     fn fake_runtime(&self, at: &Path) {
         let descriptor = json!({"schema":"basert-benchmark-harness-descriptor/1",
             "runtime":{"name":"basert","version":"0.2.4"},"result_schema":"basert-benchmark-harness/1"});
-        let rows: Vec<Value> = [(128, 0), (512, 0), (0, 128)]
+        let pp_rows: Vec<Value> = [(128, 0), (512, 0)]
             .into_iter()
             .map(|(pp, tg)| {
                 json!({"build_commit":"abc123","build_number":123,"model_type":"Qwen3 Q4_K_M",
@@ -42,9 +42,15 @@ impl Sandbox {
                     "cpu_info":"Test CPU","gpu_info":"","samples_ns":[100000000,200000000]})
             })
             .collect();
+        let tg_rows = vec![json!({"build_commit":"abc123","build_number":123,
+            "model_type":"Qwen3 Q4_K_M","model_filename":"model.gguf","model_size":24,
+            "model_n_params":4000000000u64,"n_prompt":0,"n_gen":128,"n_depth":1,
+            "n_gpu_layers":0,"backends":"CPU","cpu_info":"Test CPU","gpu_info":"",
+            "samples_ns":[100000000,200000000]})];
         let script = format!(
-            "#!/bin/sh\ncase \"$1\" in\n describe) printf '%s\\n' '{descriptor}';;\n --help) printf '%s\\n' '--n-prompt --n-gen --n-depth --repetitions --no-warmup json';;\n *) /bin/cat <<'RESULT'\n{}\nRESULT\n;;\nesac\n",
-            Value::Array(rows)
+            "#!/bin/sh\ncase \"$1\" in\n describe) printf '%s\\n' '{descriptor}';;\n --help) printf '%s\\n' '--n-prompt --n-gen --n-depth --repetitions --no-warmup json';;\n *) case \" $* \" in\n  *\" -d 1 \"*) printf '%s\\n' '{}' ;;\n  *) printf '%s\\n' '{}' ;;\n esac;;\nesac\n",
+            Value::Array(tg_rows),
+            Value::Array(pp_rows)
         );
         fs::create_dir_all(at.parent().unwrap()).unwrap();
         fs::write(at, script).unwrap();

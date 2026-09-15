@@ -14,7 +14,7 @@ fn llama_cpp_offline_run_signs_runtime_identity_and_remains_verifiable_after_upg
     header.extend_from_slice(&0_u64.to_le_bytes());
     fs::write(&model, header).unwrap();
 
-    let rows: Vec<Value> = [(128, 0), (512, 0), (0, 128)]
+    let pp_rows: Vec<Value> = [(128, 0), (512, 0)]
         .into_iter()
         .map(|(pp, tg)| {
             json!({
@@ -26,10 +26,19 @@ fn llama_cpp_offline_run_signs_runtime_identity_and_remains_verifiable_after_upg
             })
         })
         .collect();
+    let tg_rows = vec![json!({
+        "build_commit":"abc123", "build_number":123, "model_type":"Qwen3 Q4_K_M",
+        "model_filename":model, "model_size":24, "model_n_params":4000000000u64,
+        "n_prompt":0, "n_gen":128, "n_depth":1, "n_gpu_layers":99,
+        "gpu_info":"Apple M5 Pro", "cpu_info":"Apple M5 Pro", "backends":"Metal",
+        "samples_ns":[100000000,200000000]
+    })];
+
     let executable = dir.path().join("llama-bench");
     fs::write(&executable, format!(
-        "#!/bin/sh\nif [ \"$1\" = --help ]; then\nprintf '%s\\n' '--n-prompt --n-gen --n-depth --repetitions --no-warmup json'\nelse\ncat <<'JSON'\n{}\nJSON\nfi\n",
-        serde_json::to_string(&rows).unwrap()
+        "#!/bin/sh\nif [ \"$1\" = --help ]; then\nprintf '%s\\n' '--n-prompt --n-gen --n-depth --repetitions --no-warmup json'\nelse\ncase \" $* \" in\n  *\" -d 1 \"*) printf '%s\\n' '{}' ;;\n  *) printf '%s\\n' '{}' ;;\nesac\nfi\n",
+        serde_json::to_string(&tg_rows).unwrap(),
+        serde_json::to_string(&pp_rows).unwrap()
     )).unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
     let report = dir.path().join("report.json");
