@@ -897,6 +897,7 @@ mod tests {
 
     #[test]
     fn submission_stops_only_for_systemic_http_errors() {
+        assert!(!should_stop_submission(reqwest::StatusCode::CONFLICT));
         assert!(!should_stop_submission(reqwest::StatusCode::BAD_REQUEST));
         assert!(!should_stop_submission(
             reqwest::StatusCode::UNPROCESSABLE_ENTITY

@@ -544,6 +544,11 @@ impl App {
             "The fields above will be publicly accessible on ComputeArena. Local file paths are not sent."
                 .to_string(),
         );
+        lines.extend(
+            crate::submission::DELETED_SUBMISSION_NOTICE
+                .lines()
+                .map(str::to_string),
+        );
         self.screens.push(Screen::Preview {
             lines,
             scroll: 0,
@@ -1453,7 +1458,9 @@ mod tests {
         app.activate().unwrap();
         assert!(matches!(
             app.screen(),
-            Screen::Preview { reports, .. } if *reports == vec![report.clone()]
+            Screen::Preview { reports, lines, .. } if *reports == vec![report.clone()]
+                && lines.iter().any(|line| line.contains("Previously deleted reports will fail"))
+                && lines.iter().any(|line| line.contains("Select all does not restore them"))
         ));
         // The picker that started the run is gone: Esc lands on the menu.
         assert!(matches!(

@@ -300,7 +300,14 @@ refused.
 The server compares the signed runtime checksum with its catalogue of official
 builds. An unrecognized or custom build is still accepted and shown with
 download guidance; only a report whose signature does not verify is rejected.
-Submitting the same report again succeeds rather than failing.
+Submitting a report that is still published succeeds as an existing duplicate.
+If you deleted it on the website, re-submitting that saved report fails instead,
+including through **Select all**. The CLI labels it **Failed: previously deleted**
+and continues attempting the other valid reports. Successful uploads remain
+saved; the final summary counts the failures and the command exits nonzero.
+Local files are unchanged. You can rerun the same model with the same settings
+and submit the newly generated report as a separate benchmark. There is no need
+to choose a different configuration.
 
 The client talks to `https://computearena.ai/api/v1`. `--api-url` or
 `COMPUTEARENA_API_URL` point it at another deployment, such as a local
