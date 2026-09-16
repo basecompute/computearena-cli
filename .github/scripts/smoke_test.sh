@@ -67,20 +67,40 @@ cli list >/dev/null || fail "list failed on an empty data directory"
 
 # 4. Offline benchmark round-trip against a stub llama-bench. The stub answers
 #    --help with the feature flags the adapter probes for and otherwise prints
-#    canned rows for the requested pp/tg sweep, exactly as tests/runtime_flow.rs
-#    does. The "model" is a GGUF header: magic, version 3, zero counts.
+#    one row per requested workload. Decode starts with one seed token; the
+#    headline PP512/TG128 pair must run before the remaining PP128 sweep.
+#    The "model" is a GGUF header: magic, version 3, zero counts.
 MODEL="$WORK/Qwen3-4B.gguf"
 { printf 'GGUF\003'; head -c 19 /dev/zero; } > "$MODEL"
-ROWS="$(printf '[{"build_commit":"abc123","build_number":123,"model_type":"Qwen3 Q4_K_M","model_filename":"%s","model_size":24,"model_n_params":4000000000,"n_prompt":128,"n_gen":0,"n_depth":0,"n_gpu_layers":99,"gpu_info":"Apple M5 Pro","cpu_info":"Apple M5 Pro","backends":"Metal","samples_ns":[100000000,200000000]},{"build_commit":"abc123","build_number":123,"model_type":"Qwen3 Q4_K_M","model_filename":"%s","model_size":24,"model_n_params":4000000000,"n_prompt":512,"n_gen":0,"n_depth":0,"n_gpu_layers":99,"gpu_info":"Apple M5 Pro","cpu_info":"Apple M5 Pro","backends":"Metal","samples_ns":[100000000,200000000]},{"build_commit":"abc123","build_number":123,"model_type":"Qwen3 Q4_K_M","model_filename":"%s","model_size":24,"model_n_params":4000000000,"n_prompt":0,"n_gen":128,"n_depth":0,"n_gpu_layers":99,"gpu_info":"Apple M5 Pro","cpu_info":"Apple M5 Pro","backends":"Metal","samples_ns":[100000000,200000000]}]' "$MODEL" "$MODEL" "$MODEL")"
 STUB="$WORK/llama-bench"
-{
-  printf '#!/bin/sh\n'
-  printf 'if [ "$1" = --help ]; then\n'
-  printf "  printf '%%s\\\\n' '--n-prompt --n-gen --n-depth --repetitions --no-warmup json'\n"
-  printf 'else\n'
-  printf "  cat <<'JSON'\n%s\nJSON\n" "$ROWS"
-  printf 'fi\n'
-} > "$STUB"
+cat > "$STUB" <<'SH'
+#!/bin/sh
+set -eu
+if [ "${1:-}" = --help ]; then
+  printf '%s\n' '--n-prompt --n-gen --n-depth --repetitions --no-warmup json'
+  exit 0
+fi
+pp= tg= depth= reps= format= model=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -m) model="$2"; shift 2 ;;
+    -p) pp="$2"; shift 2 ;;
+    -n) tg="$2"; shift 2 ;;
+    -d) depth="$2"; shift 2 ;;
+    -r) reps="$2"; shift 2 ;;
+    -o) format="$2"; shift 2 ;;
+    --no-warmup) shift ;;
+    *) printf 'Unexpected fixture argument: %s\n' "$1" >&2; exit 2 ;;
+  esac
+done
+[ -f "$model" ] && [ "$reps" = 2 ] && [ "$format" = json ] || exit 2
+case "$pp:$tg:$depth" in
+  512:0:0|0:128:1|128:0:0) ;;
+  *) printf 'Unexpected fixture workload: %s\n' "$pp:$tg:$depth" >&2; exit 2 ;;
+esac
+printf '%s\n' "$pp:$tg:$depth" >> "$0.calls"
+printf '[{"build_commit":"abc123","build_number":123,"model_type":"Qwen3 Q4_K_M","model_filename":"Qwen3-4B.gguf","model_size":24,"model_n_params":4000000000,"n_prompt":%s,"n_gen":%s,"n_depth":%s,"n_gpu_layers":99,"gpu_info":"Apple M5 Pro","cpu_info":"Apple M5 Pro","backends":"Metal","samples_ns":[100000000,200000000]}]\n' "$pp" "$tg" "$depth"
+SH
 chmod 0755 "$STUB"
 
 REPORT="$WORK/report.json"
@@ -88,6 +108,9 @@ if ! cli llama-cpp --runtime-path "$STUB" run "$MODEL" --pp 128,512 --reps 2 --y
   cat "$WORK/run.log" >&2
   fail "offline llama-cpp benchmark run failed"
 fi
+EXPECTED_CALLS="$(printf '%s\n' '512:0:0' '0:128:1' '128:0:0')"
+[ "$(cat "$STUB.calls")" = "$EXPECTED_CALLS" ] || fail "expected PP512, TG128 (depth 1), then PP128, exactly once each"
+say "headline-first workload order and decode seed depth verified"
 [ -f "$REPORT" ] || fail "run did not write $REPORT"
 grep -q '"name": *"llama-cpp"' "$REPORT" || fail "report does not record the llama-cpp runtime"
 grep -q "\"computearena_version\": *\"$EXPECTED\"" "$REPORT" || fail "report does not record computearena_version $EXPECTED"
