@@ -181,7 +181,7 @@ pub(crate) fn benchmark_details(
             }
             rows.push((
                 "Context",
-                "Independent PP and TG tests; initial context depth 0".to_string(),
+                "Headline PP512/TG first when requested, before the larger PP sweep. PP starts empty; TG starts with one untimed seed token. Stock llama-bench controls reserved capacity; no runtime modifications.".to_string(),
             ));
             rows.push((
                 "Telemetry",

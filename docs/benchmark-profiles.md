@@ -26,6 +26,11 @@ belongs to the harness's multi-pass telemetry protocol. The wait adds 10 seconds
 A future harness can provide native per-workload conditioning together with native
 same-run telemetry. ComputeArena uses that path only when the descriptor advertises
 `features.same_run_telemetry: true` and `telemetry_schema: basert-telemetry/4`.
+`features.headline_context_capacity: true` plus the supported capacity schema
+enables `--headline-first`: PP512/TG128 at 4K reservation before the larger sweep.
+The native harness's warmup, repetition counts, telemetry and optional cooldown
+remain unchanged. Older `isolated_workload_contexts` support and legacy paths
+remain available and are identified in each report.
 
 ## llama.cpp cooldown semantics
 
@@ -33,7 +38,16 @@ llama-bench has no external pause hook between workload phases in a running swee
 ComputeArena launches each requested PP size with TG0 and the requested TG workload
 with PP0 in a **fresh process**. It waits before each launch, then loading and native
 warmup occur. This is not equivalent to BaseRT's one pre-suite wait or a reset immediately
-before a measured repetition. Standard mode still uses one process.
+before a measured repetition. Both modes run the headline PP512, then TG128,
+then remaining PP sizes. Standard mode groups the remaining PP sizes into one
+process. PP starts empty; TG has one untimed seed token. Custom sweeps without
+PP512 use the first requested PP size as headline.
+
+The user's unmodified llama-bench controls reservation. Native context requests
+are PP+TG+depth; there is no independent 4K capacity flag. The signed report
+explicitly records that the 4K target was not applied. `-d 4096` is never used
+as a substitute because it would add actual history. Warmup and timers are
+unchanged; no fork or replacement llama.cpp build is required.
 
 The controller uses a fixed set of initially readable CPU/GPU/die-labelled temperature
 sensors. It excludes battery/storage/ambient labels. The first stable window establishes
@@ -57,10 +71,12 @@ The CLI calculates these wait estimates from the selected sweep. There is no cal
 total runtime prediction yet. It says so instead of reusing BaseRT's replay-duration
 estimate, which would be incorrect for llama.cpp.
 
-Conditioned reports use `llama-bench-conditioned-pp-tg/1` with
-`execution_layout: one_process_per_workload`. The private backend must include support
-for this protocol before accepting those submissions. Existing standard reports still
-use `llama-bench-independent-pp-tg/1`. No database migration is needed.
+llama.cpp profiles normalize to `computearena-throughput/2`. Conditioned reports use
+`execution_layout: one_process_per_workload`; new standard reports use
+`headline_then_prefill_processes`. BaseRT's new capacity profile uses `/3`.
+The runtime-specific protocol evidence and
+cooldown metadata remain signed. The private backend must accept the normalized
+protocol before these submissions are published. No database migration is required.
 
 ## Audit of remaining differences
 

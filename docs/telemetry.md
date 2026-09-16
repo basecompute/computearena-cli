@@ -22,30 +22,42 @@ therefore record `computearena-telemetry/1` under `benchmark.telemetry`:
 - Observer timing: requested interval, attempts, missed deadlines, elapsed window,
   and time spent reading sensors. Aggregate storage is bounded (up to 128 temperature
   sensors), rather than accumulating an unlimited time series.
+- Signed before/after `computearena-environment/1` boundaries: OS family,
+  architecture, version and kernel; logical/physical CPU count; total and
+  available host memory; swap use; macOS memory pressure or Linux PSI;
+  normalized power/performance mode; and available accelerator configuration.
+  Apple GPU name/core count and Metal capability come from `system_profiler`;
+  that static configuration is cached once per CLI process. Dynamic memory,
+  pressure, swap and power fields are refreshed at each boundary.
 
 ## Measurement boundaries
 
 The worker is initialized before launching the runtime and samples every second until
-it exits. For a standard BaseRT or llama.cpp run it covers model loading, runtime
-warmup, the entire PP/TG sweep, and teardown. These are **concurrently observed
-whole-run measurements**, not per-PP diagnostic results. One-second sampling can miss
-short peaks or a very short-lived process.
+it exits. A legacy BaseRT suite is one process. Standard llama.cpp uses one PP-sweep
+process plus one TG process; thermally controlled llama.cpp uses one process per
+workload. Each observation covers that process's model loading, native warmup,
+measured work, and teardown. These are **concurrently observed process-window
+measurements**, not runtime allocator counters. One-second sampling can miss short
+peaks or a very short-lived process.
 
 The existing `benchmark.memory.process_peak_rss_mb` compatibility field carries the
 observed peak alongside its scope, units, and caveat, so existing CLI/backend memory
 summaries can consume it. It is not a process-lifetime kernel high-water mark.
 Detailed temperature and power data remain in the signed telemetry object.
 
-Vendor tools run only outside the runtime process window. Each invocation has a
+Vendor tools and other slow environment probes run only outside a runtime process
+window. Static macOS GPU configuration is cached. Every command invocation has a
 two-second timeout, a 64-KiB output cap checked while running, and is killed/reaped
 on timeout. Temporary output files are removed automatically. The worker owns its
 OS sensor handles and is stopped/joined on completion or failure.
 
 Energy, runtime allocator/KV-cache queries, and per-workload attribution are explicitly
 unavailable in the external-observer path. Power snapshots are not energy measurements,
-and a whole-run sensor reading is not a per-token metric. Optional llama.cpp cooldown
-groups telemetry by isolated workload process, still including loading/warmup. Current
-BaseRT cooldown performs one external wait before the suite. See benchmark-profiles.md.
+and a process-window sensor reading is not a per-token metric. llama.cpp groups
+telemetry by the PP/TG process layout, still including loading and warmup. Current
+BaseRT cooldown performs one external wait before the suite. Native BaseRT fields
+remain available when its harness reports them from the recorded runs. See
+benchmark-profiles.md.
 
 ## BaseRT capability transition
 
@@ -57,11 +69,16 @@ Runtime selection is capability-based, not tied to a BaseRT version string:
   `telemetry_schema: basert-telemetry/4` selects the native `--telemetry` path.
 - Advertising native same-run telemetry with an unknown or missing schema fails
   closed instead of silently changing measurement semantics.
+- `features.isolated_workload_contexts: true` selects `--isolated-workloads`.
+  The CLI validates the returned `basert-throughput-protocol/1` capacities and
+  initial-context metadata before marking the result comparable. Missing support
+  retains the legacy report but marks its normalized protocol non-comparable.
 
-The future native schema may contain energy, KV-cache, allocator, and per-workload
-data, but only if those values are collected during the same runs that produce the
-signed throughput samples. This descriptor contract lets a new BaseRT release plug
-in without requiring a corresponding ComputeArena release.
+
+The native schema may contain energy, KV-cache, allocator, and per-workload data,
+but only when those values are collected during the same runs that produce the
+signed throughput samples. These descriptor contracts let a BaseRT release plug in
+without requiring a corresponding ComputeArena release.
 
 ## Overhead and validation
 

@@ -166,7 +166,7 @@ impl Sampler {
                         eprintln!(
                             "{}",
                             crate::ui::TerminalUi::detect().neutral(format!(
-                                "Benchmark running — {}s elapsed; {memory} (whole run)",
+                                "Benchmark running — {}s elapsed; {memory} (runtime process)",
                                 started.elapsed().as_secs()
                             ))
                         );
@@ -231,13 +231,32 @@ fn unavailable(reason: &str) -> Value {
 /// Attach runtime-neutral whole-process telemetry and retain the compatibility
 /// memory field consumed by existing local summaries and the web projection.
 /// Detailed scope and limitations remain on the telemetry object.
+pub(crate) fn capture_environment() -> Value {
+    snapshots::capture()
+}
+
+pub(crate) fn attach_environment(benchmark: &mut Value, environment: Value) {
+    benchmark["environment"] = environment;
+}
+
 pub(crate) fn attach_whole_process(benchmark: &mut Value, telemetry: Value) -> Option<f64> {
+    if let Some(environment) = telemetry.get("boundaries").cloned() {
+        attach_environment(benchmark, environment);
+    }
+    let memory_scope = if telemetry["scope"]
+        .as_str()
+        .is_some_and(|scope| scope.starts_with("separate_"))
+    {
+        "all_runtime_processes"
+    } else {
+        "whole_runtime_process"
+    };
     let peak = telemetry
         .pointer("/process_memory/statistics/peak")
         .and_then(Value::as_f64);
     if let Some(peak) = peak {
         benchmark["memory"] = json!({"process_peak_rss_mb":peak,
-            "measurement_relation":"concurrent_observer","scope":"whole_runtime_process",
+            "measurement_relation":"concurrent_observer","scope":memory_scope,
             "unit":"MiB","note":"Observed sampled peak, including loading and warmup; not a kernel high-water mark"});
     }
     benchmark["telemetry"] = telemetry;
@@ -264,7 +283,8 @@ pub(crate) fn run_observed(command: &mut Command) -> Result<(Output, Value)> {
         Ok(sampler) => sampler.finish(),
         Err(error) => unavailable(&format!("Could not start telemetry worker: {error}")),
     };
-    telemetry["boundaries"] = json!({"measurement_relation":"outside_runtime_execution",
+    telemetry["boundaries"] = json!({"schema":"computearena-environment/1",
+        "measurement_relation":"outside_runtime_execution",
         "before":before,"after":snapshots::capture()});
     Ok((output?, telemetry))
 }

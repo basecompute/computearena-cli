@@ -155,12 +155,16 @@ and piped input must use `--yes`. Details are in
 [docs/benchmark-profiles.md](docs/benchmark-profiles.md).
 
 Telemetry is automatic for both runtimes and needs no flag, credential, or
-sudo. ComputeArena observes the single process it launches for current BaseRT
-and llama.cpp builds: resident memory, operating-system temperature sensors,
-power state, and NVIDIA or ROCm device snapshots where those vendor tools exist.
-A future BaseRT harness can advertise native same-run telemetry, which the CLI
-will use without a CLI release or version-string rule. Coverage and limitations
-are in [docs/telemetry.md](docs/telemetry.md).
+sudo. ComputeArena observes the processes it launches: resident memory,
+operating-system temperature sensors, power state, memory pressure and swap,
+plus NVIDIA or ROCm device snapshots where those vendor tools exist. Signed
+environment boundaries also record the OS/kernel, CPU layout, host memory, and
+available GPU configuration; static macOS display configuration is cached so
+`system_profiler` is not rerun at every boundary. A BaseRT harness can
+advertise native same-run telemetry, which the CLI uses without a CLI release
+or version-string rule. Runtime-native detail is preferred when it is more
+accurate; portable host boundaries remain available for cross-runtime analysis.
+Coverage and limitations are in [docs/telemetry.md](docs/telemetry.md).
 
 ## Runtimes
 
@@ -214,10 +218,19 @@ reads its GGUF header only. The history lives in `recent-gguf.json` in the
 data directory, is never part of a report, and can be deleted to reset the
 list; a corrupt or unwritable history never blocks a benchmark.
 
-llama.cpp measurements carry their own protocol identifiers and record native
-warmup, zero context depth, and the exclusion of sampling and tokenization, so
-they are never presented as BaseRT numbers. The measurement contract is in
-[docs/runtime-adapters.md](docs/runtime-adapters.md).
+The standard headline is PP512 followed by TG128 **before** the remaining PP
+sweep. PP starts empty; TG starts with one untimed seed token. A capable BaseRT
+harness reserves 4K for the headline (`computearena-throughput/3`), without
+changing its existing warmup, repetitions, timing or telemetry. Older harnesses
+retain their existing invocation and recorded protocol.
+
+ComputeArena uses the user's unmodified llama-bench build. Its native capacity
+is retained: stock llama-bench has no independent 4K reservation option, and
+`-d 4096` would add real history instead. This difference, actual workload order,
+warmup and context requests are signed in the JSON. There is no claim of exact
+cross-runtime equivalence. Existing reports remain verifiable and submittable;
+protocol differences are not a new leaderboard filter.
+The measurement contract is in [docs/runtime-adapters.md](docs/runtime-adapters.md).
 
 ## Reports and signatures
 
@@ -341,12 +354,19 @@ reports, sessions, and the signing key.
 - Report envelope: `computearena-benchmark/1`
 - BaseRT harness output: `basert-benchmark-harness/1`; the older
   `basert-harness/1` is still accepted by the server
-- llama.cpp measurements: `computearena-measurements/1`, executed as
-  `llama-bench-independent-pp-tg/1` or, with cooldown,
-  `llama-bench-conditioned-pp-tg/1`
+- llama.cpp measurements: `computearena-measurements/1`
+- Comparable throughput semantics: `computearena-throughput/2`, with native
+  evidence retained as `basert-throughput-protocol/1` or
+  `llama-bench-json/1`. Older BaseRT results use
+  `computearena-throughput-legacy/1` and are marked non-comparable.
+- Headline-first BaseRT capacity: `computearena-throughput/3`, native evidence
+  `basert-throughput-protocol/2` / `basert-bench-capacity/1`. The historical
+  `comparable` metadata is not a guarantee of identical measured performance
+  and does not exclude older reports from the website.
 - Telemetry: `computearena-telemetry/1` for externally observed BaseRT and
   llama.cpp runs. A BaseRT harness advertising `features.same_run_telemetry`
   uses native `basert-telemetry/4` instead.
+- Host environment boundaries: `computearena-environment/1`
 - Signing: Ed25519 over `computearena-json-v1` canonical JSON
 
 ## Development

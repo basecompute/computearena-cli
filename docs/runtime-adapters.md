@@ -3,8 +3,10 @@
 ComputeArena owns menus, authentication, signing, report storage, and submission.
 RuntimeAdapter implementations own executable discovery, capabilities, model selection,
 benchmark execution, and translation into the shared raw sample/metric structure.
-BaseRT keeps its native harness schema; llama.cpp uses computearena-measurements/1.
-Both retain the computearena-benchmark/1 signed envelope, so old reports remain readable.
+BaseRT keeps its native harness evidence; llama.cpp uses computearena-measurements/1.
+Adapters retain versioned timing/context semantics in their protocol metadata while
+retaining their runtime-specific evidence. Both retain the computearena-benchmark/1
+signed envelope, so old reports remain readable.
 
 ## Commands
 
@@ -37,24 +39,36 @@ Both retain the computearena-benchmark/1 signed envelope, so old reports remain 
 All adapters store positive per-repetition token counts and elapsed nanoseconds.
 The server recomputes arithmetic mean throughput from these samples.
 llama.cpp must return every requested independent PP/TG workload exactly once,
-with the expected repetition count and zero initial context depth. Mixed model,
-build, device, and runtime settings in one run are rejected.
+with the expected repetition count. PP runs with `n_depth=0`; TG runs in a
+separate process with `n_prompt=0` and `n_depth=1`, creating one untimed seed
+token before timed generation. Mixed model, build, device, and runtime settings
+in one report are rejected.
 Build identity comes from llama-bench JSON's build_number and build_commit.
 Capability probing uses --help because --version is not implemented consistently.
 
 The initial llama.cpp adapter uses native warmup and records it as runtime_native.
 --warmup 0 disables it; any positive value enables native warmup, not that number
-of repetitions. The plan states this before execution. Automatic external telemetry
-is collected over the whole process (see telemetry.md). Optional cooldown runs each
-workload in a fresh process using llama-bench-conditioned-pp-tg/1 (see benchmark-profiles.md).
-Native effective settings are preserved.
+of repetitions. The plan states this before execution. Standard mode uses a PP512
+process, then a TG process, then a remaining-PP-sweep process; optional cooldown uses one fresh process per
+workload (see benchmark-profiles.md). Automatic external telemetry is collected
+for each process and native effective settings are preserved.
 No equivalence between BaseRT and GGUF quantization names is assumed. Both adapters emit
 the runtime-neutral `computearena-model/1` identity described in model-identity.md.
 
-The PP/TG counts alone do not establish equivalent timing semantics. llama.cpp
-records a distinct protocol ID and its exclusion of sampling/tokenization.
-Consumers must retain runtime, quantization, context depth, and protocol when
-comparing results. Existing BaseRT measurements are not retroactively relabelled.
+The PP/TG counts alone do not establish equivalent timing semantics. BaseRT's
+new `features.headline_context_capacity` selects `--headline-first`: 4K reserved
+capacity for PP512/TG128 first, then the remaining PP sweep. It produces
+`computearena-throughput/3` with nested `basert-throughput-protocol/2` evidence.
+Only capacity and order change, not the harness's warmup or timed operations.
+Older isolated harnesses still use `/2`; legacy harnesses retain their old path.
+
+llama.cpp remains `/2` with additional order and context-request evidence. Its
+unmodified native capacity request is PP+TG+initial-depth, not forced to 4K.
+Physical allocation padding is not inferred. No patched runtime, extra depth,
+or unsupported flag is introduced. Both runtimes run the requested headline
+first when supported, and use their existing native warmup/timing policies.
+Consumers retain runtime, quantization, protocol and signed runtime evidence.
+Existing measurements are not retroactively relabelled or excluded from rankings.
 
 ## Binary provenance
 
