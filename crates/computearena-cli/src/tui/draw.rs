@@ -215,6 +215,9 @@ fn footer(frame: &mut Frame, area: Rect, app: &App) {
         Screen::HubModels { .. } => "↑/↓ move · Enter list files · Esc back",
         Screen::HubFiles { .. } => "↑/↓ move · Enter download · Esc back",
         Screen::BaseRtModels { .. } => "type to filter · ↑/↓ move · Enter download · Esc back",
+        Screen::Menu { .. } if app.update_offered() => {
+            "↑/↓ move · Enter select · u update BaseRT · Esc back · Ctrl+C quit"
+        }
         _ => "↑/↓ move · Enter select · Esc back · Ctrl+C quit",
     };
     let status = if app.status.is_empty() {
@@ -245,7 +248,7 @@ fn body(frame: &mut Frame, area: Rect, app: &mut App) {
             instructions,
             cursor,
         } => setup_screen(frame, area, problem, instructions, *cursor),
-        Screen::Menu { cursor } => menu_screen(frame, area, *cursor),
+        Screen::Menu { cursor } => menu_screen(frame, area, *cursor, app.basert_advice()),
         Screen::Models {
             rows,
             filter,
@@ -371,13 +374,106 @@ fn setup_screen(
     render_list(frame, areas[1], "What next", items, cursor);
 }
 
-fn menu_screen(frame: &mut Frame, area: Rect, cursor: usize) {
+/// Greedy word wrapping, done here rather than by the widget so the panel
+/// can be given exactly the rows its text needs.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(8);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let needed = line.chars().count() + usize::from(!line.is_empty()) + word.chars().count();
+        if needed > width && !line.is_empty() {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+/// The notice above the menu: everything when there is room for it and the
+/// whole menu, otherwise just what it is and what to press.
+fn basert_notice(
+    advice: &crate::basert_updates::Advice,
+    width: usize,
+    rows_to_spare: usize,
+) -> Vec<Line<'static>> {
+    let action = if advice.installable {
+        "Press u to update BaseRT now.".to_string()
+    } else {
+        advice.action.clone()
+    };
+    let mut summary = wrap_words(&advice.summary, width.saturating_sub(2)).into_iter();
+    let mut lines = vec![Line::from(vec![
+        Span::styled("! ", Style::default().fg(danger())),
+        Span::styled(
+            summary.next().unwrap_or_default(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+    ])];
+    lines.extend(summary.map(|rest| {
+        Line::from(Span::styled(
+            format!("  {rest}"),
+            Style::default().add_modifier(Modifier::BOLD),
+        ))
+    }));
+    let plain = |text: &str| -> Vec<Line<'static>> {
+        wrap_words(text, width)
+            .into_iter()
+            .map(|line| Line::from(Span::styled(line, Style::default().fg(neutral()))))
+            .collect()
+    };
+    let consequence = advice.consequence.as_deref().map(plain).unwrap_or_default();
+    let action = plain(&action);
+    if lines.len() + consequence.len() + action.len() <= rows_to_spare {
+        lines.extend(consequence);
+    }
+    lines.extend(action);
+    lines
+}
+
+fn menu_screen(
+    frame: &mut Frame,
+    area: Rect,
+    cursor: usize,
+    advice: Option<crate::basert_updates::Advice>,
+) {
     let items = MENU_ITEMS
         .iter()
         .enumerate()
         .map(|(index, (label, detail))| item(*label, *detail, index == cursor))
         .collect();
-    render_list(frame, area, "ComputeArena", items, cursor);
+    let Some(advice) = advice else {
+        render_list(frame, area, "ComputeArena", items, cursor);
+        return;
+    };
+
+    // Above the menu rather than in the status line, which the next key
+    // clears: this stays true until BaseRT is updated.
+    let whole_menu = MENU_ITEMS.len() * 2 + 2;
+    let rows_to_spare = usize::from(area.height).saturating_sub(whole_menu + 2);
+    let lines = basert_notice(
+        &advice,
+        usize::from(area.width.saturating_sub(2)),
+        rows_to_spare,
+    );
+    let height = lines.len() as u16 + 2;
+    // A terminal too short for even the short form keeps its menu.
+    if area.height < height + 6 {
+        render_list(frame, area, "ComputeArena", items, cursor);
+        return;
+    }
+    let areas = Layout::vertical([Constraint::Length(height), Constraint::Min(6)]).split(area);
+    frame.render_widget(
+        Paragraph::new(lines).block(focus_panel("BaseRT", false)),
+        areas[0],
+    );
+    render_list(frame, areas[1], "ComputeArena", items, cursor);
 }
 
 fn models_screen(frame: &mut Frame, area: Rect, rows: &[ModelRow], filter: &str, cursor: usize) {
@@ -534,13 +630,19 @@ fn reports_screen(
         .zip(marks)
         .enumerate()
         .map(|(index, (row, marked))| {
-            let tick = match (mode, marked, row.valid) {
+            let tick = match (mode, marked, row.submittable()) {
                 (ReportMode::Submit, true, _) => "[x] ",
                 (ReportMode::Submit, false, true) => "[ ] ",
                 (ReportMode::Submit, false, false) => "[-] ",
                 (ReportMode::Verify, _, _) => "",
             };
-            let status = if row.valid { "VALID" } else { "INVALID" };
+            let status = if row.submittable() {
+                "VALID"
+            } else if row.valid {
+                "LOCAL ONLY"
+            } else {
+                "INVALID"
+            };
             item(
                 format!("{tick}{}  [{status}]", row.label),
                 row.detail.clone(),

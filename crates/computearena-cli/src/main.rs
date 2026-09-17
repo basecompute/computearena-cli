@@ -3,6 +3,7 @@ mod api;
 use adapters::{BenchmarkRequest, Runtime};
 mod auth;
 mod basert_models;
+mod basert_updates;
 mod benchmark;
 mod conditioning;
 mod config;
@@ -14,6 +15,7 @@ mod recent_gguf;
 mod reports;
 mod runtimes;
 mod submission;
+mod sweep;
 mod telemetry;
 mod theme;
 #[cfg(unix)]
@@ -116,10 +118,11 @@ enum Action {
     Run {
         /// Local model file (.base for BaseRT, .gguf for llama.cpp).
         model: Option<PathBuf>,
-        /// Comma-separated prefill token counts.
+        /// Comma-separated prefill token counts. Only a run that includes
+        /// every default size can be submitted; anything less is local only.
         #[arg(long, default_value = DEFAULT_PREFILL_TOKENS)]
         pp: String,
-        /// Decode token count per repetition.
+        /// Decode token count per repetition. Only the default can be submitted.
         #[arg(long, default_value_t = DEFAULT_DECODE_TOKENS)]
         tg: u32,
         /// Recorded repetitions.
@@ -222,6 +225,13 @@ fn run() -> Result<()> {
 /// get it onto ComputeArena: the command to run, and the sign-in it needs.
 fn print_submission_hint(paths: &Paths, api_url: &str, report: &std::path::Path) -> Result<()> {
     let ui = TerminalUi::detect();
+    if let Some(gap) = read_report(report)
+        .ok()
+        .and_then(|value| sweep::report_gap(&value))
+    {
+        println!("{} {}", ui.neutral("Local only:"), gap.submission_blocker());
+        return Ok(());
+    }
     let submit = format!("computearena submit {}", report.display());
     match load_api_session(paths, api_url)? {
         Some(session) => println!(
@@ -360,9 +370,21 @@ fn execute(
                     None => return Ok(()),
                 },
             };
+            let chosen_by_flag = harness.is_some();
             let (harness, model) =
                 benchmark::identify_benchmark_paths(runtime, harness, &model, paths)?;
             benchmark::print_resolved_paths(runtime, &harness)?;
+            // Before the plan: an older BaseRT decides what the report will
+            // say, and updating it takes less time than the run does.
+            let mut basert_notice = if runtime == Runtime::Basert {
+                let source = runtimes::source_of(runtime, chosen_by_flag, paths)?;
+                Some(basert_updates::RunNotice::start(paths, &harness, source))
+            } else {
+                None
+            };
+            if let Some(notice) = basert_notice.as_mut() {
+                notice.before_run(TerminalUi::detect());
+            }
             let Some(cooldown_enabled) = runtime.adapter().confirm(
                 &BenchmarkRequest {
                     model: &model,
@@ -391,6 +413,9 @@ fn execute(
                 output,
             )?;
             print_submission_hint(paths, api_url, &report)?;
+            if let Some(notice) = basert_notice.as_mut() {
+                notice.after_run(TerminalUi::detect());
+            }
             Ok(())
         }
         Action::List { json } => list_reports(paths, json),
@@ -726,14 +751,23 @@ mod tests {
             "benchmark": {
                 "schema": HARNESS_SCHEMA,
                 "mode": "text",
-                "raw_samples": {"prefill": {"128": []}, "decode": []}
+                "raw_samples": {
+                    "prefill": {
+                        "128": [], "256": [], "512": [], "1024": [],
+                        "2048": [], "4096": [], "8192": [], "16384": []
+                    },
+                    "decode": [{"generated_tokens": 128, "elapsed_ns": 1}]
+                }
             }
         })
     }
 
     fn signed_sample_report() -> Value {
+        sign_sample(sample_report())
+    }
+
+    fn sign_sample(mut report: Value) -> Value {
         let key = SigningKey::generate(&mut OsRng);
-        let mut report = sample_report();
         let public = key.verifying_key().to_bytes();
         report["installation"] = json!({
             "key_id": sha256_hex(&public),
@@ -800,17 +834,25 @@ mod tests {
         let valid_path = temporary.path().join("valid.json");
         let tampered_path = temporary.path().join("tampered.json");
         let malformed_path = temporary.path().join("malformed.json");
+        let partial_path = temporary.path().join("partial.json");
         let valid = signed_sample_report();
         let mut tampered = valid.clone();
         tampered["model"]["size_bytes"] = json!(2);
+        // A correctly signed PP2048-only run: nothing is wrong with it, and it
+        // still cannot be submitted.
+        let mut partial = sample_report();
+        partial["benchmark"]["raw_samples"]["prefill"] = json!({"2048": []});
+        let partial = sign_sample(partial);
         fs::write(&valid_path, serde_json::to_vec(&valid).unwrap()).unwrap();
         fs::write(&tampered_path, serde_json::to_vec(&tampered).unwrap()).unwrap();
         fs::write(&malformed_path, b"{not-json").unwrap();
+        fs::write(&partial_path, serde_json::to_vec(&partial).unwrap()).unwrap();
 
         let preflight = preflight_submissions(&[
             valid_path.clone(),
             tampered_path.clone(),
             malformed_path.clone(),
+            partial_path.clone(),
         ]);
 
         assert_eq!(preflight.ready.len(), 1);
@@ -822,6 +864,12 @@ mod tests {
             .contains("signature verification failed"));
         assert_eq!(preflight.invalid[1].path, malformed_path);
         assert!(preflight.invalid[1].reason.starts_with("Invalid JSON:"));
+        assert_eq!(preflight.local_only.len(), 1);
+        assert_eq!(preflight.local_only[0].path, partial_path);
+        assert_eq!(
+            preflight.local_only[0].reason,
+            "Partial run, not submittable: it is missing PP128, PP256, PP512, PP1024, PP4096, PP8192 and PP16384. ComputeArena accepts only runs with the full default sweep (PP128 to PP16384 and TG128). Run the benchmark again without --pp and --tg to get a submittable report."
+        );
     }
 
     #[test]
@@ -897,6 +945,7 @@ mod tests {
 
     #[test]
     fn submission_stops_only_for_systemic_http_errors() {
+        assert!(!should_stop_submission(reqwest::StatusCode::CONFLICT));
         assert!(!should_stop_submission(reqwest::StatusCode::BAD_REQUEST));
         assert!(!should_stop_submission(
             reqwest::StatusCode::UNPROCESSABLE_ENTITY

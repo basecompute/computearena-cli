@@ -68,9 +68,10 @@ fn telemetry_is_collected_for_the_child_summarized_and_signature_protected() {
     let mut report = f.signed();
     let telemetry = &report["benchmark"]["telemetry"];
     assert_eq!(telemetry["schema"], "computearena-telemetry/1");
-    assert_eq!(telemetry["observer"]["requested_interval_ms"], 1000);
+    let observed = &telemetry["workloads"]["pp512"];
+    assert_eq!(observed["observer"]["requested_interval_ms"], 1000);
     assert!(
-        telemetry["process_memory"]["statistics"]["sample_count"]
+        observed["process_memory"]["statistics"]["sample_count"]
             .as_u64()
             .unwrap()
             >= 1
@@ -79,13 +80,14 @@ fn telemetry_is_collected_for_the_child_summarized_and_signature_protected() {
         report["benchmark"]["memory"]["process_peak_rss_mb"],
         telemetry["process_memory"]["statistics"]["peak"]
     );
-    assert_eq!(telemetry["energy"]["available"], false);
-    assert_eq!(telemetry["per_workload"]["available"], false);
+    assert_eq!(observed["energy"]["available"], false);
+    assert_eq!(observed["per_workload"]["available"], false);
     success(&f.verify());
     if let Some(path) = std::env::var_os("COMPUTEARENA_TELEMETRY_TEST_REPORT") {
         fs::copy(&f.report, path).unwrap();
     }
-    report["benchmark"]["telemetry"]["observer"]["requested_interval_ms"] = json!(25);
+    report["benchmark"]["telemetry"]["workloads"]["pp512"]["observer"]["requested_interval_ms"] =
+        json!(25);
     fs::write(&f.report, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     failure(&f.verify(), "signature verification failed");
 }
@@ -189,9 +191,68 @@ fn repeated_runs_have_unique_ids_but_keep_the_installation_identity() {
 }
 
 #[test]
+fn select_all_reports_deleted_failures_and_still_uploads_other_benchmarks() {
+    for statuses in [vec![409, 201, 200], vec![409]] {
+        let f = Fixture::full_sweep("llama-cpp");
+        let reports = f.dir.path().join("data/reports");
+        fs::create_dir_all(&reports).unwrap();
+        let originals: Vec<_> = (0..statuses.len())
+            .map(|index| {
+                let report = f.signed();
+                let path = reports.join(format!("saved-{index}.json"));
+                fs::rename(&f.report, &path).unwrap();
+                (path, report)
+            })
+            .collect();
+        let (url, received) = server(&f, statuses);
+        let mut child = f
+            .command()
+            .args(["--api-url", &url, "submit", "--yes"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"all\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        failure(&output, "1 previously deleted");
+        let printed = text(&output);
+        for hint in [
+            "Failed: previously deleted",
+            "Select all does not restore",
+            "rerun the same model with the same settings",
+            "newly generated report as a separate benchmark",
+            "local files are unchanged",
+        ] {
+            assert!(printed.contains(hint), "missing {hint}: {printed}");
+        }
+        if originals.len() == 3 {
+            assert!(
+                printed.contains("1 uploaded, 1 already present"),
+                "{printed}"
+            );
+        } else {
+            assert!(
+                printed.contains("0 uploaded, 0 already present"),
+                "{printed}"
+            );
+        }
+        let attempted = received.join().unwrap();
+        assert_eq!(attempted.len(), originals.len());
+        for (path, report) in originals {
+            assert!(attempted.contains(&report));
+            assert_eq!(
+                serde_json::from_slice::<Value>(&fs::read(path).unwrap()).unwrap(),
+                report
+            );
+        }
+    }
+}
+
+#[test]
 fn systemic_submission_failure_stops_the_queue_but_report_rejection_does_not() {
     for status in [422, 429, 500] {
-        let f = Fixture::new("basert");
+        let f = Fixture::full_sweep("basert");
         let first = f.signed();
         let first_path = f.dir.path().join("first.json");
         fs::rename(&f.report, &first_path).unwrap();
@@ -327,16 +388,37 @@ use std::time::{Duration, Instant};
 
 const RUNTIMES: [&str; 2] = ["basert", "llama-cpp"];
 
+/// The default sweep. ComputeArena accepts only runs that contain all of it.
+const DEFAULT_SWEEP: [u64; 8] = [128, 256, 512, 1024, 2048, 4096, 8192, 16384];
+
 struct Fixture {
     dir: tempfile::TempDir,
     runtime: &'static str,
     executable: PathBuf,
     model: PathBuf,
     report: PathBuf,
+    /// Prefill sizes the fake runtime measures.
+    sizes: Vec<u64>,
 }
 
 impl Fixture {
+    /// A short custom sweep (PP128 and PP512): quick to reason about in
+    /// protocol tests, and a local-only run as far as submission goes.
     fn new(runtime: &'static str) -> Self {
+        Self::with_sizes(runtime, &[128, 512])
+    }
+
+    /// The full default sweep, run without `--pp` and `--tg` exactly as the
+    /// CLI tells people to: the only kind of report that can be submitted.
+    fn full_sweep(runtime: &'static str) -> Self {
+        Self::with_sizes(runtime, &DEFAULT_SWEEP)
+    }
+
+    fn is_default_sweep(&self) -> bool {
+        self.sizes == DEFAULT_SWEEP
+    }
+
+    fn with_sizes(runtime: &'static str, sizes: &[u64]) -> Self {
         // Spaces exercise command argument handling rather than shell interpolation.
         let dir = tempfile::Builder::new()
             .prefix("arena contract ")
@@ -375,6 +457,7 @@ impl Fixture {
             executable,
             model,
             report,
+            sizes: sizes.to_vec(),
         };
         fixture.install(&fixture.result(), "");
         fixture
@@ -382,18 +465,35 @@ impl Fixture {
 
     fn result(&self) -> Value {
         if self.runtime == "basert" {
+            let pp = self
+                .sizes
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            // Every workload takes 100 ms and then 200 ms, so its mean rate is
+            // 7.5 tokens per token of workload: PP128 is 960 tok/s, PP512 3840.
+            let mut metrics = serde_json::Map::new();
+            let mut prefill = serde_json::Map::new();
+            for size in &self.sizes {
+                metrics.insert(format!("pp{size}_t_s"), json!(*size as f64 * 7.5));
+                prefill.insert(
+                    size.to_string(),
+                    json!([{"tokens":size,"elapsed_ns":100000000},{"tokens":size,"elapsed_ns":200000000}]),
+                );
+            }
+            metrics.insert("decode_t_s".into(), json!(960.0));
             json!({"schema":"basert-benchmark-harness/1","mode":"text","runtime_version":"0.2.4",
-                "chip":"Test CPU","backend":"CPU","params":{"pp":"128,512","tg":128,"reps":2},
-                "metrics":{"pp128_t_s":960.0,"pp512_t_s":3840.0,"decode_t_s":960.0},
-                "raw_samples":{"prefill":{
-                    "128":[{"tokens":128,"elapsed_ns":100000000},{"tokens":128,"elapsed_ns":200000000}],
-                    "512":[{"tokens":512,"elapsed_ns":100000000},{"tokens":512,"elapsed_ns":200000000}]},
+                "chip":"Test CPU","backend":"CPU","params":{"pp":pp,"tg":128,"reps":2},
+                "metrics":metrics,
+                "raw_samples":{"prefill":prefill,
                     "decode":[{"generated_tokens":128,"elapsed_ns":100000000},{"generated_tokens":128,"elapsed_ns":200000000}]}})
         } else {
-            Value::Array([(128,0),(512,0),(0,128)].into_iter().map(|(pp,tg)| json!({
+            let workloads = self.sizes.iter().map(|pp| (*pp, 0)).chain([(0, 128)]);
+            Value::Array(workloads.map(|(pp,tg)| json!({
                 "build_commit":"abc123","build_number":123,"model_type":"Qwen3 Q4_K_M",
                 "model_filename":self.model,"model_size":24,"model_n_params":4000000000u64,
-                "n_prompt":pp,"n_gen":tg,"n_depth":0,"n_gpu_layers":0,"backends":"CPU",
+                "n_prompt":pp,"n_gen":tg,"n_depth":if pp == 0 { 1 } else { 0 },"n_gpu_layers":0,"backends":"CPU",
                 "cpu_info":"Test CPU","gpu_info":"","samples_ns":[100000000,200000000],
                 // Reported aggregates are deliberately bogus: native samples are authoritative.
                 "avg_ts":999999.0,"avg_ns":1
@@ -412,8 +512,50 @@ impl Fixture {
         let descriptor = json!({"schema":"basert-benchmark-harness-descriptor/1",
             "runtime":{"name":"basert","version":"0.2.4"},"result_schema":"basert-benchmark-harness/1",
             "telemetry_schema":telemetry_schema,
-            "features":{"telemetry":true,"same_run_telemetry":native_same_run}});
-        let script = format!("#!/bin/sh\ncase \"$1\" in\n describe) printf '%s\\n' '{descriptor}';;\n --help) printf '%s\\n' '--n-prompt --n-gen --n-depth --repetitions --no-warmup json';;\n *) printf '%s\\n' \"$@\" > \"$ARENA_TEST_ARGS\"\n{before_result}\n/bin/cat <<'RESULT'\n{result}\nRESULT\n;;\nesac\n");
+            "capacity_protocol_schema":"basert-throughput-protocol/2",
+            "features":{"telemetry":true,"same_run_telemetry":native_same_run,
+                "headline_context_capacity":result.pointer("/protocol/schema").and_then(Value::as_str)==Some("basert-throughput-protocol/2")}});
+        let result_script = if self.runtime == "llama-cpp" {
+            let rows = result.as_array().unwrap();
+            let prefill: Value = rows
+                .iter()
+                .filter(|row| row["n_prompt"].as_u64().unwrap_or(0) > 0)
+                .cloned()
+                .collect();
+            let decode: Value = rows
+                .iter()
+                .filter(|row| row["n_gen"].as_u64().unwrap_or(0) > 0)
+                .cloned()
+                .collect();
+            // The headline workload (PP512) runs first and on its own; the
+            // other sizes follow in one sweep. Rows are chosen by the position
+            // the fixture gave them, so they keep their place even when a test
+            // deliberately corrupts a token count.
+            let headline_index = self.sizes.iter().position(|size| *size == 512).unwrap_or(0);
+            let headline_size = self.sizes[headline_index];
+            let headline: Value = prefill
+                .as_array()
+                .unwrap()
+                .iter()
+                .skip(headline_index)
+                .take(1)
+                .cloned()
+                .collect();
+            let remaining: Value = prefill
+                .as_array()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != headline_index)
+                .map(|(_, row)| row.clone())
+                .collect();
+            format!(
+                "tg=0\npp=0\nwhile [ \"$#\" -gt 0 ]; do\ncase \"$1\" in\n-n) shift; tg=\"$1\";;\n-p) shift; pp=\"$1\";;\nesac\nshift\ndone\nif [ \"$tg\" != 0 ]; then\n/bin/cat <<'RESULT'\n{decode}\nRESULT\nelif [ \"$pp\" = {headline_size} ]; then\n/bin/cat <<'RESULT'\n{headline}\nRESULT\nelse\n/bin/cat <<'RESULT'\n{remaining}\nRESULT\nfi"
+            )
+        } else {
+            format!("/bin/cat <<'RESULT'\n{result}\nRESULT")
+        };
+        let script = format!("#!/bin/sh\ncase \"$1\" in\n describe) printf '%s\\n' '{descriptor}';;\n --help) printf '%s\\n' '--n-prompt --n-gen --n-depth --repetitions --no-warmup json';;\n *) printf '%s\\n' \"$@\" >> \"$ARENA_TEST_ARGS\"\n{before_result}\n{result_script}\n;;\nesac\n");
         fs::write(&self.executable, script).unwrap();
         fs::set_permissions(&self.executable, fs::Permissions::from_mode(0o755)).unwrap();
     }
@@ -429,22 +571,74 @@ impl Fixture {
             .args(["--data-dir"])
             .arg(self.dir.path().join("data"))
             .env("COMPUTEARENA_API_URL", "http://127.0.0.1:1/api/v1")
+            // No test may ask GitHub which BaseRT is newest: the lookup is
+            // pointed at a closed port unless a test serves its own answer.
+            .env(
+                "COMPUTEARENA_BASERT_RELEASE_API",
+                "http://127.0.0.1:1/latest",
+            )
             .stdin(Stdio::null());
         cmd
     }
 
     fn run(&self, extra: &[&str]) -> Output {
-        self.command()
-            .arg(self.runtime)
-            .arg("run")
-            .arg(&self.model)
-            .args([
-                "--pp", "128,512", "--tg", "128", "--reps", "2", "--yes", "--output",
-            ])
-            .arg(&self.report)
-            .args(extra)
-            .output()
+        self.run_command(extra).output().unwrap()
+    }
+
+    /// What the last BaseRT release lookup is remembered to have found.
+    fn remember_latest_basert(&self, version: &str) {
+        let data = self.dir.path().join("data");
+        fs::create_dir_all(&data).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
+            .as_secs();
+        fs::write(
+            data.join("basert-update-check.json"),
+            serde_json::to_vec(&json!({
+                "checkedAtUnixSeconds": now,
+                "latestVersion": version,
+                "releaseUrl": "https://example.test/release"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// A BaseRT harness that advertises the headline-first protocol.
+    fn install_headline_capable(&self) {
+        let mut result = self.result();
+        result["params"]["ctx"] = json!(4096);
+        result["protocol"] = json!({"schema":"basert-throughput-protocol/2","profile":"basert-bench-capacity/1",
+            "context_isolation":"headline_then_per_prefill","context_capacity_policy":"basert_bench_default",
+            "model_load_in_timing":false,"execution_layout":"headline_then_prefill_processes",
+            "execution_order":["pp512","tg128","pp128"],
+            "prefill":{"128":{"initial_context_tokens":0,"context_capacity_tokens":4096},
+                "512":{"initial_context_tokens":0,"context_capacity_tokens":4096}},
+            "decode":{"initial_context_tokens":1,"context_capacity_tokens":4096,"seed_prefill_in_timing":false},
+            "measurement":{"timed_repetitions":2,"requested_warmup_repetitions":3,
+                "warmup_policy":"fixed_repetitions","minimum_warmup_s":0,
+                "telemetry":"disabled","cooldown":false,"timing":"harness_existing_token_operations"}});
+        self.install(&result, "");
+    }
+
+    fn run_command(&self, extra: &[&str]) -> Command {
+        let mut command = self.command();
+        command.arg(self.runtime).arg("run").arg(&self.model);
+        if !self.is_default_sweep() {
+            let pp = self
+                .sizes
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            command.args(["--pp", &pp, "--tg", "128"]);
+        }
+        command
+            .args(["--reps", "2", "--yes", "--output"])
+            .arg(&self.report)
+            .args(extra);
+        command
     }
 
     fn signed(&self) -> Value {
@@ -499,11 +693,11 @@ fn runtimes_agree_on_samples_units_and_rates_without_faking_protocol_equivalence
     }
     assert_eq!(b["benchmark"]["metrics"]["pp512_t_s"], 3840.0);
     assert_eq!(b["benchmark"]["protocol"]["warmup"], "runtime_native");
-    assert_eq!(b["benchmark"]["params"]["decode_context_tokens"], 0);
+    assert_eq!(b["benchmark"]["params"]["decode_context_tokens"], 1);
     assert_eq!(b["benchmark"]["protocol"]["telemetry_available"], true);
     assert_eq!(
         b["benchmark"]["telemetry"]["scope"],
-        "whole_runtime_process"
+        "headline_then_prefill_processes"
     );
     assert!(b["benchmark"]["telemetry"].get("memory_replay").is_none());
     assert_eq!(
@@ -538,12 +732,26 @@ fn runtimes_agree_on_samples_units_and_rates_without_faking_protocol_equivalence
             .contains(fixture.dir.path().to_str().unwrap()));
         success(&fixture.verify());
         let args = fs::read_to_string(fixture.dir.path().join("args")).unwrap();
-        assert!(args.contains("\n128,512\n"));
+        if fixture.runtime == "basert" {
+            assert!(args.contains("\n128,512\n"));
+        } else {
+            let prompts: Vec<_> = args
+                .lines()
+                .collect::<Vec<_>>()
+                .windows(2)
+                .filter(|pair| pair[0] == "-p")
+                .map(|pair| pair[1])
+                .collect();
+            assert_eq!(prompts, ["512", "0", "128"]);
+            assert!(!args.contains("--ctx"));
+            assert!(!args.contains("-d\n4096\n"));
+        }
         assert!(args.contains(fixture.model.to_str().unwrap()));
         assert!(!args.contains("--cooldown"));
         assert!(!args.contains("--telemetry"));
         if fixture.runtime == "llama-cpp" {
             assert!(args.contains("-d\n0\n"));
+            assert!(args.contains("-d\n1\n"));
             assert!(args.contains("-o\njson\n"));
         }
     }
@@ -568,6 +776,27 @@ fn basert_native_same_run_telemetry_is_selected_by_capability_not_version() {
     assert!(report["benchmark"]["telemetry"].get("adapter").is_none());
     let args = fs::read_to_string(f.dir.path().join("args")).unwrap();
     assert!(args.contains("--telemetry"));
+}
+
+#[test]
+fn headline_capable_basert_signs_new_metadata_without_changing_requested_repetitions() {
+    let f = Fixture::new("basert");
+    f.install_headline_capable();
+    let result = f.result();
+    let signed = f.signed();
+    assert_eq!(
+        signed["benchmark"]["protocol"]["id"],
+        "computearena-throughput/3"
+    );
+    assert_eq!(signed["benchmark"]["raw_samples"], result["raw_samples"]);
+    let args = fs::read_to_string(f.dir.path().join("args")).unwrap();
+    assert!(args.contains("--headline-first"));
+    assert!(!args.contains("--isolated-workloads"));
+    assert!(args.contains("-r\n2\n-w\n3\n"));
+    success(&f.verify());
+    if let Some(path) = std::env::var_os("COMPUTEARENA_HEADLINE_TEST_REPORT") {
+        fs::copy(&f.report, path).unwrap();
+    }
 }
 
 #[test]
@@ -823,9 +1052,14 @@ fn server(f: &Fixture, statuses: Vec<u16>) -> (String, thread::JoinHandle<Vec<Va
                 data.extend_from_slice(&buf[..n]);
             }
             received.push(serde_json::from_slice(&data[offset..offset + length]).unwrap());
-            let body = json!({"id":"test-submission","runtime_provenance":{
+            let body = if status == 409 {
+                json!({"error":{"code":"submission_deleted","message":"Report deleted"}})
+                    .to_string()
+            } else {
+                json!({"id":"test-submission","runtime_provenance":{
                 "status":"mismatch","message":"Benchmark accepted. This binary differs from the registered release.",
-                "download_url":"https://github.com/ggml-org/llama.cpp/releases"}}).to_string();
+                "download_url":"https://github.com/ggml-org/llama.cpp/releases"}}).to_string()
+            };
             write!(stream,"HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
         }
         received
@@ -836,7 +1070,7 @@ fn server(f: &Fixture, statuses: Vec<u16>) -> (String, thread::JoinHandle<Vec<Va
 #[test]
 fn checksum_mismatch_is_informational_and_duplicate_submission_is_not_an_error() {
     for runtime in RUNTIMES {
-        let f = Fixture::new(runtime);
+        let f = Fixture::full_sweep(runtime);
         let report = f.signed();
         let (url, received) = server(&f, vec![201, 200]);
         for message in ["Benchmark submitted", "Already submitted"] {
@@ -860,7 +1094,7 @@ fn checksum_mismatch_is_informational_and_duplicate_submission_is_not_an_error()
 
 #[test]
 fn mixed_batch_requires_explicit_skip_and_uploads_only_the_valid_report() {
-    let f = Fixture::new("llama-cpp");
+    let f = Fixture::full_sweep("llama-cpp");
     let valid = f.signed();
     let invalid = f.dir.path().join("tampered.json");
     let mut changed = valid.clone();
@@ -1022,8 +1256,391 @@ fn failed_benchmarks_and_basert_runs_do_not_create_gguf_history() {
 }
 
 #[test]
-fn offline_report_cannot_be_uploaded_without_login() {
+fn the_default_sweep_is_submittable_and_says_how_to_submit() {
+    for runtime in RUNTIMES {
+        let f = Fixture::full_sweep(runtime);
+        let output = f.run(&[]);
+        success(&output);
+        let printed = text(&output);
+        assert!(!printed.contains("local-only run"), "{printed}");
+        assert!(!printed.contains("Local only:"), "{printed}");
+        assert!(printed.contains("computearena submit"), "{printed}");
+        let report: Value = serde_json::from_slice(&fs::read(&f.report).unwrap()).unwrap();
+        let measured: Vec<u64> = report["benchmark"]["raw_samples"]["prefill"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|size| size.parse().unwrap())
+            .collect();
+        for size in DEFAULT_SWEEP {
+            assert!(
+                measured.contains(&size),
+                "PP{size} missing from {measured:?}"
+            );
+        }
+        success(&f.verify());
+    }
+}
+
+#[test]
+fn a_custom_sweep_is_a_local_only_run_and_says_so_before_and_after_it_runs() {
+    for runtime in RUNTIMES {
+        let f = Fixture::new(runtime);
+        let output = f.run(&[]);
+        success(&output);
+        let printed = text(&output);
+        let missing = "it is missing PP256, PP1024, PP2048, PP4096, PP8192 and PP16384";
+        // In the plan, before the run starts: what it will lack, and how to
+        // get a submittable one.
+        let notice = printed
+            .find("This will be a local-only run.")
+            .expect(&printed);
+        assert!(
+            printed.find("Benchmark plan").unwrap() < notice,
+            "{printed}"
+        );
+        assert!(
+            notice < printed.find("Running the benchmark").unwrap(),
+            "{printed}"
+        );
+        assert!(
+            printed.contains("Local only: a partial run cannot be submitted"),
+            "{printed}"
+        );
+        assert!(printed.contains(missing), "{printed}");
+        assert!(printed.contains("PP128 to PP16384 and TG128"), "{printed}");
+        assert!(printed.contains("Omit --pp and --tg"), "{printed}");
+        // After the run: no invitation to submit a report that would be refused.
+        assert!(
+            printed.contains("Local only: Partial run, not submittable:"),
+            "{printed}"
+        );
+        assert!(!printed.contains("computearena submit"), "{printed}");
+        // The report itself is a good signed report.
+        success(&f.verify());
+    }
+}
+
+#[test]
+fn partial_runs_are_refused_at_submission_with_what_is_missing_and_how_to_fix_it() {
+    for runtime in RUNTIMES {
+        let f = Fixture::new(runtime);
+        let original = f.signed();
+        let (url, received) = server(&f, vec![]);
+        let output = f
+            .command()
+            .args(["--api-url", &url, "submit", "--yes"])
+            .arg(&f.report)
+            .output()
+            .unwrap();
+        failure(
+            &output,
+            "nothing was uploaded: the selected benchmark is a partial run",
+        );
+        let printed = text(&output);
+        for expected in [
+            "Partial runs (valid reports, local only)",
+            "Partial run, not submittable: it is missing PP256, PP1024, PP2048, PP4096, PP8192 and PP16384",
+            "ComputeArena accepts only runs with the full default sweep (PP128 to PP16384 and TG128)",
+            "Run the benchmark again without --pp and --tg",
+        ] {
+            assert!(printed.contains(expected), "missing {expected:?}: {printed}");
+        }
+        // Refused before login is even asked for, and never sent.
+        assert!(!printed.contains("Login is required"), "{printed}");
+        assert!(!printed.contains("Submitting report"), "{printed}");
+        assert!(!printed.contains("Invalid reports:"), "{printed}");
+        assert!(received.join().unwrap().is_empty());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(&f.report).unwrap()).unwrap(),
+            original
+        );
+        success(&f.verify());
+    }
+}
+
+#[test]
+fn a_partial_run_in_a_batch_is_left_local_while_complete_runs_upload() {
+    let partial = Fixture::new("llama-cpp");
+    partial.signed();
+    let f = Fixture::full_sweep("llama-cpp");
+    let complete = f.signed();
+    let partial_path = f.dir.path().join("partial.json");
+    fs::copy(&partial.report, &partial_path).unwrap();
+
+    // Non-interactive and not told to skip: nothing is sent.
+    let output = f
+        .command()
+        .args(["submit", "--yes"])
+        .arg(&f.report)
+        .arg(&partial_path)
+        .output()
+        .unwrap();
+    failure(&output, "1 of the selected benchmarks is a partial run");
+    assert!(!text(&output).contains("Submitting report"));
+
+    let (url, received) = server(&f, vec![201]);
+    let output = f
+        .command()
+        .args(["--api-url", &url, "submit", "--yes", "--skip-invalid"])
+        .arg(&f.report)
+        .arg(&partial_path)
+        .output()
+        .unwrap();
+    success(&output);
+    let printed = text(&output);
+    assert!(
+        printed.contains("Partial run, not submittable"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("1 partial run(s) were not uploaded and stay local"),
+        "{printed}"
+    );
+    assert_eq!(received.join().unwrap(), vec![complete]);
+}
+
+#[test]
+fn saved_report_lists_mark_partial_runs_as_local_only() {
     let f = Fixture::new("basert");
+    success(&f.run(&[]));
+    let reports = f.dir.path().join("data/reports");
+    fs::create_dir_all(&reports).unwrap();
+    fs::copy(&f.report, reports.join("partial.json")).unwrap();
+    let listed = f.command().args(["list"]).output().unwrap();
+    success(&listed);
+    let printed = text(&listed);
+    assert!(printed.contains("LOCAL ONLY"), "{printed}");
+    assert!(
+        printed.contains("Partial run, not submittable"),
+        "{printed}"
+    );
+    let json = f.command().args(["list", "--json"]).output().unwrap();
+    success(&json);
+    let summaries: Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(summaries[0]["status"], "valid");
+    assert_eq!(summaries[0]["submittable"], false);
+    assert!(summaries[0]["submission_blocker"]
+        .as_str()
+        .unwrap()
+        .starts_with("Partial run, not submittable"));
+}
+
+/// Serves one "latest release" answer the way GitHub does, on a loopback port.
+fn release_feed(tag: &str) -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/latest", listener.local_addr().unwrap());
+    let body = json!({"tag_name": tag, "html_url": "https://example.test/release"}).to_string();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut buffer).unwrap();
+            assert!(read > 0);
+            request.extend_from_slice(&buffer[..read]);
+        }
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    });
+    (url, handle)
+}
+
+/// How the advice ends depends on whether BaseRT publishes a bundle for the
+/// machine running the tests; both endings are correct.
+fn names_a_way_to_update(printed: &str) -> bool {
+    printed.contains("Update with `computearena basert install`")
+        || printed.contains("No prebuilt BaseRT is published for this platform")
+}
+
+#[test]
+fn an_older_basert_is_named_before_the_plan_with_what_it_signs_and_how_to_update() {
+    let f = Fixture::new("basert");
+    let output = f.run(&[]);
+    success(&output);
+    let printed = text(&output);
+    let summary = "BaseRT 0.2.4 predates the current benchmark protocol.";
+    let notice = printed.find(summary).expect(&printed);
+    assert!(
+        notice < printed.find("Benchmark plan").unwrap(),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("signed as computearena-throughput-legacy/1, marked not comparable"),
+        "{printed}"
+    );
+    // Offline, the release to move to is the first one with the protocol.
+    assert!(
+        printed.contains("BaseRT 0.2.5 or newer measures PP512 and TG128 first"),
+        "{printed}"
+    );
+    assert!(names_a_way_to_update(&printed), "{printed}");
+    // Said once: the end of the run does not repeat it.
+    assert_eq!(printed.matches(summary).count(), 1, "{printed}");
+    // It is advice, not a gate: the report is signed as before.
+    let report: Value = serde_json::from_slice(&fs::read(&f.report).unwrap()).unwrap();
+    assert_eq!(
+        report["benchmark"]["protocol"]["id"],
+        "computearena-throughput-legacy/1"
+    );
+    success(&f.verify());
+
+    // With the newest release known, the advice names it.
+    let f = Fixture::new("basert");
+    f.remember_latest_basert("0.2.6");
+    let printed = text(&f.run(&[]));
+    assert!(
+        printed.contains("BaseRT 0.2.6 measures PP512 and TG128 first"),
+        "{printed}"
+    );
+
+    // llama.cpp has nothing to do with any of this.
+    let llama = Fixture::new("llama-cpp");
+    llama.remember_latest_basert("9.9.9");
+    let printed = text(&llama.run(&[]));
+    assert!(!printed.contains("BaseRT"), "{printed}");
+}
+
+#[test]
+fn a_current_basert_is_told_about_a_newer_release_and_nothing_else() {
+    let f = Fixture::new("basert");
+    f.install_headline_capable();
+    f.remember_latest_basert("0.2.4");
+    let output = f.run(&[]);
+    success(&output);
+    let printed = text(&output);
+    assert!(!printed.contains("is available"), "{printed}");
+    assert!(!printed.contains("predates"), "{printed}");
+
+    fs::remove_file(&f.report).unwrap();
+    f.remember_latest_basert("9.9.9");
+    let output = f.run(&[]);
+    success(&output);
+    let printed = text(&output);
+    let notice = printed
+        .find("BaseRT 9.9.9 is available (installed: 0.2.4).")
+        .expect(&printed);
+    assert!(
+        notice < printed.find("Benchmark plan").unwrap(),
+        "{printed}"
+    );
+    assert!(!printed.contains("predates"), "{printed}");
+    assert!(names_a_way_to_update(&printed), "{printed}");
+
+    // A harness named by hand is not something an install would replace.
+    fs::remove_file(&f.report).unwrap();
+    let output = f
+        .run_command(&["--runtime-path", f.executable.to_str().unwrap()])
+        .output()
+        .unwrap();
+    success(&output);
+    let printed = text(&output);
+    assert!(
+        printed.contains("This harness was chosen with --runtime-path"),
+        "{printed}"
+    );
+}
+
+#[test]
+fn the_release_lookup_runs_beside_the_benchmark_and_is_remembered() {
+    let f = Fixture::new("basert");
+    f.install_headline_capable();
+    let (feed, served) = release_feed("v9.9.9");
+    let output = f
+        .run_command(&[])
+        .env("COMPUTEARENA_BASERT_RELEASE_API", &feed)
+        .output()
+        .unwrap();
+    success(&output);
+    served.join().unwrap();
+    let printed = text(&output);
+    // Whether the answer arrived before the plan or during the run, it is
+    // said exactly once.
+    assert_eq!(
+        printed
+            .matches("BaseRT 9.9.9 is available (installed: 0.2.4).")
+            .count(),
+        1,
+        "{printed}"
+    );
+    let remembered: Value = serde_json::from_slice(
+        &fs::read(f.dir.path().join("data/basert-update-check.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(remembered["latestVersion"], "9.9.9");
+
+    // The next run answers from that, without a lookup: the feed is gone.
+    fs::remove_file(&f.report).unwrap();
+    let output = f
+        .run_command(&[])
+        .env("COMPUTEARENA_BASERT_RELEASE_API", &feed)
+        .output()
+        .unwrap();
+    success(&output);
+    let printed = text(&output);
+    let notice = printed
+        .find("BaseRT 9.9.9 is available (installed: 0.2.4).")
+        .expect(&printed);
+    assert!(
+        notice < printed.find("Benchmark plan").unwrap(),
+        "{printed}"
+    );
+}
+
+#[test]
+fn an_unreachable_release_feed_never_delays_or_fails_a_run() {
+    let f = Fixture::new("basert");
+    f.install_headline_capable();
+    let started = Instant::now();
+    let output = f.run(&[]);
+    success(&output);
+    assert!(started.elapsed() < Duration::from_secs(20));
+    let printed = text(&output);
+    assert!(!printed.contains("is available"), "{printed}");
+    assert!(!f.dir.path().join("data/basert-update-check.json").exists());
+}
+
+#[test]
+fn the_printed_session_names_an_older_basert_when_it_finds_it() {
+    let f = Fixture::new("basert");
+    f.remember_latest_basert("0.2.6");
+    let mut child = f
+        .command()
+        .arg("basert")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"6\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+    success(&output);
+    let printed = text(&output);
+    let found = printed.find("Found BaseRT 0.2.4").expect(&printed);
+    let notice = printed
+        .find("BaseRT 0.2.4 predates the current benchmark protocol.")
+        .expect(&printed);
+    assert!(found < notice, "{printed}");
+    assert!(
+        notice < printed.find("Run benchmarks").unwrap(),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("BaseRT 0.2.6 measures PP512 and TG128 first"),
+        "{printed}"
+    );
+}
+
+#[test]
+fn offline_report_cannot_be_uploaded_without_login() {
+    let f = Fixture::full_sweep("basert");
     let original = f.signed();
     let output = f
         .command()

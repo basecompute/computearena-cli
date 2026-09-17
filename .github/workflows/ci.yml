@@ -24,3 +24,14 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace --all-targets
       - run: cargo build --workspace --release
+      - name: Smoke test the packaged binary (offline)
+        # Exercise the same fixture as staging/release on every PR, so protocol
+        # changes cannot pass unit tests while breaking the release smoke test.
+        shell: bash
+        run: |
+          PKGID="$(cargo pkgid --locked -p computearena-cli)"
+          VERSION="${PKGID##*#}"
+          VERSION="${VERSION##*@}"
+          SMOKE_DIR="$(mktemp -d)"
+          .github/scripts/package.sh target/release/computearena "computearena-smoke-${VERSION}" "$SMOKE_DIR"
+          sh .github/scripts/smoke_test.sh "$SMOKE_DIR/computearena-smoke-${VERSION}.tar.gz" "$VERSION"

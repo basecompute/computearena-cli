@@ -42,6 +42,11 @@ pub(crate) fn error_code(body: &str) -> Option<String> {
 /// retire an old client by returning HTTP 426 (or the matching error code)
 /// without making older clients fail with an unexplained generic status.
 pub(crate) fn server_error(status: reqwest::StatusCode, body: &str) -> String {
+    if status == reqwest::StatusCode::CONFLICT
+        && error_code(body).as_deref() == Some("submission_deleted")
+    {
+        return "This benchmark was previously deleted from ComputeArena. This saved report cannot be submitted again, including through Select all. You can rerun the same model with the same settings and submit the newly generated report as a separate benchmark. Your local report is unchanged.".to_string();
+    }
     let message =
         error_message(body).unwrap_or_else(|| format!("server returned HTTP {}", status.as_u16()));
     let upgrade_required = status == reqwest::StatusCode::UPGRADE_REQUIRED
@@ -91,6 +96,26 @@ mod tests {
         assert_eq!(
             server_error(reqwest::StatusCode::BAD_REQUEST, body),
             "Invalid report"
+        );
+    }
+
+    #[test]
+    fn deleted_reports_explain_why_select_all_cannot_restore_them() {
+        for body in [
+            r#"{"error":{"code":"submission_deleted"}}"#,
+            r#"{"error":{"code":"submission_deleted","message":"Report deleted"}}"#,
+        ] {
+            let message = server_error(reqwest::StatusCode::CONFLICT, body);
+            assert!(message.contains("previously deleted"));
+            assert!(message.contains("Select all"));
+            assert!(message.contains("rerun the same model with the same settings"));
+            assert!(message.contains("newly generated report as a separate benchmark"));
+            assert!(message.contains("local report is unchanged"));
+        }
+        let body = r#"{"error":{"code":"submission_conflict","message":"Different report"}}"#;
+        assert_eq!(
+            server_error(reqwest::StatusCode::CONFLICT, body),
+            "Different report"
         );
     }
 }

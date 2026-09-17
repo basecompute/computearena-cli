@@ -146,6 +146,12 @@ computearena basert run model.base --pp 512,2048 --tg 128 --reps 5
 computearena llama-cpp run model.gguf --yes --output ./report.json
 ```
 
+Only a run with the full default sweep (PP128 to PP16384 and TG128) can be
+submitted, so every model and chip is comparable at every size. A custom `--pp`
+or `--tg` still produces a valid signed report for local use: the client says
+it will be local only before the run starts, shows such reports as `LOCAL ONLY`
+in its lists, and leaves them out of a submission with what is missing.
+
 Two profiles are offered before a run starts. Standard runs without an external
 cooldown wait. With the currently released BaseRT harness, thermally controlled
 (`--cooldown`) waits once before the complete harness run; llama.cpp waits before
@@ -155,12 +161,16 @@ and piped input must use `--yes`. Details are in
 [docs/benchmark-profiles.md](docs/benchmark-profiles.md).
 
 Telemetry is automatic for both runtimes and needs no flag, credential, or
-sudo. ComputeArena observes the single process it launches for current BaseRT
-and llama.cpp builds: resident memory, operating-system temperature sensors,
-power state, and NVIDIA or ROCm device snapshots where those vendor tools exist.
-A future BaseRT harness can advertise native same-run telemetry, which the CLI
-will use without a CLI release or version-string rule. Coverage and limitations
-are in [docs/telemetry.md](docs/telemetry.md).
+sudo. ComputeArena observes the processes it launches: resident memory,
+operating-system temperature sensors, power state, memory pressure and swap,
+plus NVIDIA or ROCm device snapshots where those vendor tools exist. Signed
+environment boundaries also record the OS/kernel, CPU layout, host memory, and
+available GPU configuration; static macOS display configuration is cached so
+`system_profiler` is not rerun at every boundary. A BaseRT harness can
+advertise native same-run telemetry, which the CLI uses without a CLI release
+or version-string rule. Runtime-native detail is preferred when it is more
+accurate; portable host boundaries remain available for cross-runtime analysis.
+Coverage and limitations are in [docs/telemetry.md](docs/telemetry.md).
 
 ## Runtimes
 
@@ -204,6 +214,21 @@ of `--runtime-path`. BaseRT 0.2.4 and newer can also start this client with
 BaseRT remains responsible for choosing a compatible backend artifact,
 downloading split files, conversion, and writing `hub.json` provenance.
 
+ComputeArena says when the BaseRT it found is worth updating, and never
+refuses to run an older one. A harness that does not advertise the
+headline-first protocol (BaseRT 0.2.4 and older) is named before the benchmark
+plan, with what its report will be signed as; this needs no network, because
+the harness describes itself. A newer BaseRT release is mentioned the same way.
+That lookup asks GitHub for BaseRT's latest release in the background, keeps
+the answer for 24 hours in `basert-update-check.json`, and never delays or
+fails a run; when it has not answered before a benchmark starts, the notice
+follows the run instead. `computearena basert install` installs the latest
+release where the official installer does, and the full-screen interface
+offers the same with `u` on its menu, asking for a second press before it
+replaces anything. A harness chosen with `--runtime-path` or
+`COMPUTEARENA_BASERT_HARNESS` is yours to update, and on platforms without a
+prebuilt BaseRT the notice points at the release to build from instead.
+
 ### llama.cpp
 
 The adapter asks for a GGUF file rather than scanning the disk, and lists the
@@ -214,10 +239,19 @@ reads its GGUF header only. The history lives in `recent-gguf.json` in the
 data directory, is never part of a report, and can be deleted to reset the
 list; a corrupt or unwritable history never blocks a benchmark.
 
-llama.cpp measurements carry their own protocol identifiers and record native
-warmup, zero context depth, and the exclusion of sampling and tokenization, so
-they are never presented as BaseRT numbers. The measurement contract is in
-[docs/runtime-adapters.md](docs/runtime-adapters.md).
+The standard headline is PP512 followed by TG128 **before** the remaining PP
+sweep. PP starts empty; TG starts with one untimed seed token. A capable BaseRT
+harness reserves 4K for the headline (`computearena-throughput/3`), without
+changing its existing warmup, repetitions, timing or telemetry. Older harnesses
+retain their existing invocation and recorded protocol.
+
+ComputeArena uses the user's unmodified llama-bench build. Its native capacity
+is retained: stock llama-bench has no independent 4K reservation option, and
+`-d 4096` would add real history instead. This difference, actual workload order,
+warmup and context requests are signed in the JSON. There is no claim of exact
+cross-runtime equivalence. Existing reports remain verifiable and submittable;
+protocol differences are not a new leaderboard filter.
+The measurement contract is in [docs/runtime-adapters.md](docs/runtime-adapters.md).
 
 ## Reports and signatures
 
@@ -300,7 +334,14 @@ refused.
 The server compares the signed runtime checksum with its catalogue of official
 builds. An unrecognized or custom build is still accepted and shown with
 download guidance; only a report whose signature does not verify is rejected.
-Submitting the same report again succeeds rather than failing.
+Submitting a report that is still published succeeds as an existing duplicate.
+If you deleted it on the website, re-submitting that saved report fails instead,
+including through **Select all**. The CLI labels it **Failed: previously deleted**
+and continues attempting the other valid reports. Successful uploads remain
+saved; the final summary counts the failures and the command exits nonzero.
+Local files are unchanged. You can rerun the same model with the same settings
+and submit the newly generated report as a separate benchmark. There is no need
+to choose a different configuration.
 
 The client talks to `https://computearena.ai/api/v1`. `--api-url` or
 `COMPUTEARENA_API_URL` point it at another deployment, such as a local
@@ -320,6 +361,7 @@ minimumClientVersion for an actionable upgrade message.
 | `COMPUTEARENA_API_URL` | API base URL, same as `--api-url` |
 | `COMPUTEARENA_BASERT_HARNESS` | Path to `basert-benchmark-harness`, same as `--runtime-path` for BaseRT |
 | `BASERT_INSTALL_DIR` | Where BaseRT is looked for and installed; `~/.basert` by default |
+| `COMPUTEARENA_BASERT_RELEASE_API` | Where BaseRT's latest release is looked up, for mirrors and tests; GitHub's API for `basecompute/baseRT` by default. Only a version number is read from the answer |
 | `BASERT_MODELS_DIR` | Where installed BaseRT models are listed from; BaseRT's own model cache by default |
 | `CUDA_VISIBLE_DEVICES` | Respected by the CUDA chip fallback; a mask leaves the chip unresolved |
 | `NO_COLOR` | Plain output |
@@ -334,12 +376,19 @@ reports, sessions, and the signing key.
 - Report envelope: `computearena-benchmark/1`
 - BaseRT harness output: `basert-benchmark-harness/1`; the older
   `basert-harness/1` is still accepted by the server
-- llama.cpp measurements: `computearena-measurements/1`, executed as
-  `llama-bench-independent-pp-tg/1` or, with cooldown,
-  `llama-bench-conditioned-pp-tg/1`
+- llama.cpp measurements: `computearena-measurements/1`
+- Comparable throughput semantics: `computearena-throughput/2`, with native
+  evidence retained as `basert-throughput-protocol/1` or
+  `llama-bench-json/1`. Older BaseRT results use
+  `computearena-throughput-legacy/1` and are marked non-comparable.
+- Headline-first BaseRT capacity: `computearena-throughput/3`, native evidence
+  `basert-throughput-protocol/2` / `basert-bench-capacity/1`. The historical
+  `comparable` metadata is not a guarantee of identical measured performance
+  and does not exclude older reports from the website.
 - Telemetry: `computearena-telemetry/1` for externally observed BaseRT and
   llama.cpp runs. A BaseRT harness advertising `features.same_run_telemetry`
   uses native `basert-telemetry/4` instead.
+- Host environment boundaries: `computearena-environment/1`
 - Signing: Ed25519 over `computearena-json-v1` canonical JSON
 
 ## Development

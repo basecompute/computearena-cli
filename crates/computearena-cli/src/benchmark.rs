@@ -70,7 +70,7 @@ pub(crate) fn plan_rows(
         .map(|n| format!("PP{n}"))
         .collect::<Vec<_>>()
         .join(", ");
-    Ok(vec![
+    let mut rows = vec![
         ("Runtime", runtime.adapter().display_name().to_string()),
         // The resolved, absolute path: the plan's job is to say exactly which
         // file will be read, so this is never shortened.
@@ -82,7 +82,19 @@ pub(crate) fn plan_rows(
             "Output",
             "Signed JSON report saved locally\nNothing is uploaded automatically".to_string(),
         ),
-    ])
+    ];
+    // Only a custom sweep gets this row: the default plan stays as short as
+    // it was, and a run that cannot be uploaded says so where it is decided.
+    if crate::sweep::requested_gap(r.pp, r.tg).is_some() {
+        rows.push((
+            "Submission",
+            format!(
+                "Local only: a partial run cannot be submitted\nComputeArena accepts the full default sweep ({})",
+                crate::sweep::required_summary()
+            ),
+        ));
+    }
+    Ok(rows)
 }
 
 pub(crate) const LOAD_WARNING: [&str; 2] = [
@@ -100,6 +112,12 @@ pub(crate) fn print_benchmark_plan(runtime: Runtime, r: &BenchmarkRequest<'_>) -
     println!();
     println!("{} {}", ui.warning("!"), LOAD_WARNING[0]);
     println!("  {}", LOAD_WARNING[1]);
+    // Last thing before the run is confirmed: a custom sweep can take as long
+    // as the default one, and its report cannot be uploaded.
+    if let Some(gap) = crate::sweep::requested_gap(r.pp, r.tg) {
+        println!();
+        crate::sweep::print_local_only_notice(ui, &gap);
+    }
     Ok(())
 }
 
@@ -181,7 +199,7 @@ pub(crate) fn benchmark_details(
             }
             rows.push((
                 "Context",
-                "Independent PP and TG tests; initial context depth 0".to_string(),
+                "Headline PP512/TG first when requested, before the larger PP sweep. PP starts empty; TG starts with one untimed seed token. Stock llama-bench controls reserved capacity; no runtime modifications.".to_string(),
             ));
             rows.push((
                 "Telemetry",

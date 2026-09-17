@@ -1,4 +1,6 @@
-use crate::api::{client as api_client, server_error as api_server_error};
+use crate::api::{
+    client as api_client, error_code as api_error_code, server_error as api_server_error,
+};
 use crate::auth::load_api_session;
 use crate::config::SUBMISSION_HTTP_TIMEOUT;
 use crate::model_identity::{verify_submission_model, SubmissionModelVerification};
@@ -15,6 +17,8 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
+
+pub(crate) const DELETED_SUBMISSION_NOTICE: &str = "Previously deleted reports will fail to submit.\nSelect all does not restore them. Other valid reports\nwill still be attempted. Local files stay unchanged.\nYou can rerun the same model with the same settings,\nthen submit the newly generated report as a separate\nbenchmark.";
 
 #[derive(Debug)]
 pub(crate) struct PreparedSubmission {
@@ -35,6 +39,9 @@ pub(crate) struct InvalidSubmission {
 pub(crate) struct SubmissionPreflight {
     pub(crate) ready: Vec<PreparedSubmission>,
     pub(crate) invalid: Vec<InvalidSubmission>,
+    /// Valid reports ComputeArena does not accept: partial runs. They are kept
+    /// apart from the invalid ones because nothing is wrong with them.
+    pub(crate) local_only: Vec<InvalidSubmission>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,6 +49,7 @@ enum SubmissionOutcomeKind {
     Submitted,
     Duplicate,
     Rejected,
+    PreviouslyDeleted,
     NotAttempted,
 }
 
@@ -59,6 +67,8 @@ pub(crate) struct SubmissionSummary {
     pub(crate) duplicates: usize,
     /// Reports left out because they failed the preflight checks.
     pub(crate) skipped: usize,
+    /// Partial runs left out: valid, but only the full default sweep is accepted.
+    pub(crate) local_only: usize,
 }
 
 impl SubmissionSummary {
@@ -69,6 +79,13 @@ impl SubmissionSummary {
         }
         if self.skipped > 0 {
             parts.push(format!("{} skipped as invalid", self.skipped));
+        }
+        if self.local_only > 0 {
+            parts.push(format!(
+                "{} partial run(s) kept local: only the full default sweep ({}) is accepted",
+                self.local_only,
+                crate::sweep::required_summary()
+            ));
         }
         parts.join("; ")
     }
@@ -105,8 +122,10 @@ pub(crate) fn select_reports_for_submission(
     let items: Vec<MenuItem> = reports
         .iter()
         .map(|report| {
-            let status = if report["status"].as_str() == Some("valid") {
+            let status = if report["submittable"].as_bool() == Some(true) {
                 ui.success("VALID")
+            } else if report["status"].as_str() == Some("valid") {
+                ui.warning("LOCAL ONLY")
             } else {
                 ui.error("INVALID")
             };
@@ -122,11 +141,12 @@ pub(crate) fn select_reports_for_submission(
             ))
         })
         .collect();
-    // Valid benchmarks start ticked: submitting everything submittable is the
-    // usual intent, so most people only press Enter.
+    // Submittable benchmarks start ticked: submitting everything that can be
+    // is the usual intent, so most people only press Enter. A partial run is
+    // valid but local only, and says why if it is chosen anyway.
     let preselected: Vec<bool> = reports
         .iter()
-        .map(|report| report["status"].as_str() == Some("valid"))
+        .map(|report| report["submittable"].as_bool() == Some(true))
         .collect();
 
     let indexes = match choose_many(ui, "Benchmarks to submit: ", &items, &preselected)? {
@@ -221,9 +241,35 @@ pub(crate) fn submit_reports(
     }
     print_submission_preflight(ui, &preflight);
 
+    if preflight.ready.is_empty() && preflight.invalid.is_empty() {
+        bail!(
+            "nothing was uploaded: {}. ComputeArena accepts only runs with the full default sweep ({}). Run the benchmark again without --pp and --tg to get a submittable report; the saved reports are unchanged and stay valid for local use.",
+            if preflight.local_only.len() == 1 {
+                "the selected benchmark is a partial run".to_string()
+            } else {
+                format!(
+                    "all {} selected benchmarks are partial runs",
+                    preflight.local_only.len()
+                )
+            },
+            crate::sweep::required_summary()
+        );
+    }
     if assume_yes && !skip_invalid && !preflight.invalid.is_empty() {
         bail!(
             "refusing a partial non-interactive submission; review the invalid reports or pass --yes --skip-invalid"
+        );
+    }
+    if assume_yes && !skip_invalid && !preflight.local_only.is_empty() {
+        bail!(
+            "refusing to upload only part of the selection: {} of the selected benchmarks {} and cannot be submitted (see above). Pass --yes --skip-invalid to upload the other {}, or run them again without --pp and --tg.",
+            preflight.local_only.len(),
+            if preflight.local_only.len() == 1 {
+                "is a partial run"
+            } else {
+                "are partial runs"
+            },
+            preflight.ready.len()
         );
     }
     if preflight.ready.is_empty() {
@@ -254,6 +300,7 @@ pub(crate) fn submit_reports(
         if prompt_yes_no("Preview the JSON data before submitting?", true)? {
             print_submission_preview(ui, &preflight.ready)?;
         }
+        println!("{}", ui.neutral(DELETED_SUBMISSION_NOTICE));
         if !prompt_yes_no(
             &format!(
                 "Submit the {} valid benchmark(s) now?",
@@ -267,15 +314,19 @@ pub(crate) fn submit_reports(
             );
             return Ok(SubmissionSummary {
                 skipped: preflight.invalid.len(),
+                local_only: preflight.local_only.len(),
                 ..SubmissionSummary::default()
             });
         }
+    } else {
+        println!("{}", ui.neutral(DELETED_SUBMISSION_NOTICE));
     }
 
     let endpoint = format!("{api_url}/submissions");
     let client = api_client(SUBMISSION_HTTP_TIMEOUT)?;
     let report_count = preflight.ready.len();
     let skipped = preflight.invalid.len();
+    let local_only = preflight.local_only.len();
     let mut outcomes = Vec::with_capacity(report_count);
     let mut queue = preflight.ready.into_iter().enumerate();
     while let Some((index, report)) = queue.next() {
@@ -363,7 +414,13 @@ pub(crate) fn submit_reports(
                     eprintln!("{} {message}", ui.error("✗"));
                     outcomes.push(SubmissionOutcome {
                         label,
-                        kind: SubmissionOutcomeKind::Rejected,
+                        kind: if status == reqwest::StatusCode::CONFLICT
+                            && api_error_code(&body).as_deref() == Some("submission_deleted")
+                        {
+                            SubmissionOutcomeKind::PreviouslyDeleted
+                        } else {
+                            SubmissionOutcomeKind::Rejected
+                        },
                         detail: Some(message.clone()),
                     });
                     if should_stop_submission(status) {
@@ -413,23 +470,37 @@ pub(crate) fn submit_reports(
         .filter(|outcome| {
             matches!(
                 outcome.kind,
-                SubmissionOutcomeKind::Rejected | SubmissionOutcomeKind::NotAttempted
+                SubmissionOutcomeKind::Rejected
+                    | SubmissionOutcomeKind::PreviouslyDeleted
+                    | SubmissionOutcomeKind::NotAttempted
             )
         })
         .count();
     if failures > 0 {
+        let deleted = outcomes
+            .iter()
+            .filter(|outcome| outcome.kind == SubmissionOutcomeKind::PreviouslyDeleted)
+            .count();
         bail!(
-            "{failures} of {report_count} eligible benchmark(s) were not submitted; successful submissions remain saved"
+            "{submitted} uploaded, {duplicates} already present; {failures} of {report_count} eligible benchmark(s) were not submitted ({deleted} previously deleted). Successful uploads remain saved; local files are unchanged."
         );
     }
     println!(
         "{} Submission complete: {submitted} uploaded, {duplicates} already present.",
         ui.success("✓"),
     );
+    if local_only > 0 {
+        println!(
+            "{} {local_only} partial run(s) were not uploaded and stay local: only the full default sweep ({}) is accepted.",
+            ui.warning("!"),
+            crate::sweep::required_summary()
+        );
+    }
     Ok(SubmissionSummary {
         submitted,
         duplicates,
         skipped,
+        local_only,
     })
 }
 
@@ -463,6 +534,16 @@ pub(crate) fn preflight_submissions(reports: &[PathBuf]) -> SubmissionPreflight 
                 path: path.clone(),
                 label: submission_label(&value, path),
                 reason: error.to_string(),
+            });
+            continue;
+        }
+        // A partial run is a valid report that the server refuses; saying so
+        // here, with what is missing, beats a rejection after the upload.
+        if let Some(gap) = crate::sweep::report_gap(&value) {
+            preflight.local_only.push(InvalidSubmission {
+                path: path.clone(),
+                label: submission_label(&value, path),
+                reason: gap.submission_blocker(),
             });
             continue;
         }
@@ -549,12 +630,34 @@ fn print_submission_preflight(ui: TerminalUi, preflight: &SubmissionPreflight) {
         ui.neutral("— will not be uploaded")
     );
 
+    println!(
+        "  {:<22} {}  {}",
+        "Partial runs",
+        if preflight.local_only.is_empty() {
+            ui.neutral(0)
+        } else {
+            ui.warning(preflight.local_only.len())
+        },
+        ui.neutral("— local only, will not be uploaded")
+    );
+
     if !preflight.invalid.is_empty() {
         println!("\n{} Invalid reports:", ui.warning("!"));
         for invalid in &preflight.invalid {
             println!("  {} {}", ui.error("✗"), invalid.label);
             println!("    {}", ui.neutral(&invalid.reason));
             println!("    {}", ui.muted(invalid.path.display()));
+        }
+    }
+    if !preflight.local_only.is_empty() {
+        println!(
+            "\n{} Partial runs (valid reports, local only):",
+            ui.warning("!")
+        );
+        for partial in &preflight.local_only {
+            println!("  {} {}", ui.warning("✗"), partial.label);
+            println!("    {}", ui.neutral(&partial.reason));
+            println!("    {}", ui.muted(partial.path.display()));
         }
     }
     println!();
@@ -603,6 +706,9 @@ fn print_submission_results(ui: TerminalUi, outcomes: &[SubmissionOutcome]) {
             SubmissionOutcomeKind::Submitted => (ui.success("✓"), "Submitted"),
             SubmissionOutcomeKind::Duplicate => (ui.neutral("="), "Already submitted"),
             SubmissionOutcomeKind::Rejected => (ui.error("✗"), "Rejected"),
+            SubmissionOutcomeKind::PreviouslyDeleted => {
+                (ui.error("✗"), "Failed: previously deleted")
+            }
             SubmissionOutcomeKind::NotAttempted => (ui.warning("—"), "Not attempted"),
         };
         println!("  {marker} {} — {status}", outcome.label);
