@@ -193,7 +193,7 @@ fn repeated_runs_have_unique_ids_but_keep_the_installation_identity() {
 #[test]
 fn select_all_reports_deleted_failures_and_still_uploads_other_benchmarks() {
     for statuses in [vec![409, 201, 200], vec![409]] {
-        let f = Fixture::new("llama-cpp");
+        let f = Fixture::full_sweep("llama-cpp");
         let reports = f.dir.path().join("data/reports");
         fs::create_dir_all(&reports).unwrap();
         let originals: Vec<_> = (0..statuses.len())
@@ -252,7 +252,7 @@ fn select_all_reports_deleted_failures_and_still_uploads_other_benchmarks() {
 #[test]
 fn systemic_submission_failure_stops_the_queue_but_report_rejection_does_not() {
     for status in [422, 429, 500] {
-        let f = Fixture::new("basert");
+        let f = Fixture::full_sweep("basert");
         let first = f.signed();
         let first_path = f.dir.path().join("first.json");
         fs::rename(&f.report, &first_path).unwrap();
@@ -388,16 +388,37 @@ use std::time::{Duration, Instant};
 
 const RUNTIMES: [&str; 2] = ["basert", "llama-cpp"];
 
+/// The default sweep. ComputeArena accepts only runs that contain all of it.
+const DEFAULT_SWEEP: [u64; 8] = [128, 256, 512, 1024, 2048, 4096, 8192, 16384];
+
 struct Fixture {
     dir: tempfile::TempDir,
     runtime: &'static str,
     executable: PathBuf,
     model: PathBuf,
     report: PathBuf,
+    /// Prefill sizes the fake runtime measures.
+    sizes: Vec<u64>,
 }
 
 impl Fixture {
+    /// A short custom sweep (PP128 and PP512): quick to reason about in
+    /// protocol tests, and a local-only run as far as submission goes.
     fn new(runtime: &'static str) -> Self {
+        Self::with_sizes(runtime, &[128, 512])
+    }
+
+    /// The full default sweep, run without `--pp` and `--tg` exactly as the
+    /// CLI tells people to: the only kind of report that can be submitted.
+    fn full_sweep(runtime: &'static str) -> Self {
+        Self::with_sizes(runtime, &DEFAULT_SWEEP)
+    }
+
+    fn is_default_sweep(&self) -> bool {
+        self.sizes == DEFAULT_SWEEP
+    }
+
+    fn with_sizes(runtime: &'static str, sizes: &[u64]) -> Self {
         // Spaces exercise command argument handling rather than shell interpolation.
         let dir = tempfile::Builder::new()
             .prefix("arena contract ")
@@ -436,6 +457,7 @@ impl Fixture {
             executable,
             model,
             report,
+            sizes: sizes.to_vec(),
         };
         fixture.install(&fixture.result(), "");
         fixture
@@ -443,15 +465,32 @@ impl Fixture {
 
     fn result(&self) -> Value {
         if self.runtime == "basert" {
+            let pp = self
+                .sizes
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            // Every workload takes 100 ms and then 200 ms, so its mean rate is
+            // 7.5 tokens per token of workload: PP128 is 960 tok/s, PP512 3840.
+            let mut metrics = serde_json::Map::new();
+            let mut prefill = serde_json::Map::new();
+            for size in &self.sizes {
+                metrics.insert(format!("pp{size}_t_s"), json!(*size as f64 * 7.5));
+                prefill.insert(
+                    size.to_string(),
+                    json!([{"tokens":size,"elapsed_ns":100000000},{"tokens":size,"elapsed_ns":200000000}]),
+                );
+            }
+            metrics.insert("decode_t_s".into(), json!(960.0));
             json!({"schema":"basert-benchmark-harness/1","mode":"text","runtime_version":"0.2.4",
-                "chip":"Test CPU","backend":"CPU","params":{"pp":"128,512","tg":128,"reps":2},
-                "metrics":{"pp128_t_s":960.0,"pp512_t_s":3840.0,"decode_t_s":960.0},
-                "raw_samples":{"prefill":{
-                    "128":[{"tokens":128,"elapsed_ns":100000000},{"tokens":128,"elapsed_ns":200000000}],
-                    "512":[{"tokens":512,"elapsed_ns":100000000},{"tokens":512,"elapsed_ns":200000000}]},
+                "chip":"Test CPU","backend":"CPU","params":{"pp":pp,"tg":128,"reps":2},
+                "metrics":metrics,
+                "raw_samples":{"prefill":prefill,
                     "decode":[{"generated_tokens":128,"elapsed_ns":100000000},{"generated_tokens":128,"elapsed_ns":200000000}]}})
         } else {
-            Value::Array([(128,0),(512,0),(0,128)].into_iter().map(|(pp,tg)| json!({
+            let workloads = self.sizes.iter().map(|pp| (*pp, 0)).chain([(0, 128)]);
+            Value::Array(workloads.map(|(pp,tg)| json!({
                 "build_commit":"abc123","build_number":123,"model_type":"Qwen3 Q4_K_M",
                 "model_filename":self.model,"model_size":24,"model_n_params":4000000000u64,
                 "n_prompt":pp,"n_gen":tg,"n_depth":if pp == 0 { 1 } else { 0 },"n_gpu_layers":0,"backends":"CPU",
@@ -488,13 +527,17 @@ impl Fixture {
                 .filter(|row| row["n_gen"].as_u64().unwrap_or(0) > 0)
                 .cloned()
                 .collect();
-            // This fixture has PP128 and PP512. Keep their original row
-            // positions even when a test deliberately corrupts a token count.
+            // The headline workload (PP512) runs first and on its own; the
+            // other sizes follow in one sweep. Rows are chosen by the position
+            // the fixture gave them, so they keep their place even when a test
+            // deliberately corrupts a token count.
+            let headline_index = self.sizes.iter().position(|size| *size == 512).unwrap_or(0);
+            let headline_size = self.sizes[headline_index];
             let headline: Value = prefill
                 .as_array()
                 .unwrap()
                 .iter()
-                .skip(1)
+                .skip(headline_index)
                 .take(1)
                 .cloned()
                 .collect();
@@ -502,11 +545,12 @@ impl Fixture {
                 .as_array()
                 .unwrap()
                 .iter()
-                .take(1)
-                .cloned()
+                .enumerate()
+                .filter(|(index, _)| *index != headline_index)
+                .map(|(_, row)| row.clone())
                 .collect();
             format!(
-                "tg=0\npp=0\nwhile [ \"$#\" -gt 0 ]; do\ncase \"$1\" in\n-n) shift; tg=\"$1\";;\n-p) shift; pp=\"$1\";;\nesac\nshift\ndone\nif [ \"$tg\" != 0 ]; then\n/bin/cat <<'RESULT'\n{decode}\nRESULT\nelif [ \"$pp\" = 512 ]; then\n/bin/cat <<'RESULT'\n{headline}\nRESULT\nelse\n/bin/cat <<'RESULT'\n{remaining}\nRESULT\nfi"
+                "tg=0\npp=0\nwhile [ \"$#\" -gt 0 ]; do\ncase \"$1\" in\n-n) shift; tg=\"$1\";;\n-p) shift; pp=\"$1\";;\nesac\nshift\ndone\nif [ \"$tg\" != 0 ]; then\n/bin/cat <<'RESULT'\n{decode}\nRESULT\nelif [ \"$pp\" = {headline_size} ]; then\n/bin/cat <<'RESULT'\n{headline}\nRESULT\nelse\n/bin/cat <<'RESULT'\n{remaining}\nRESULT\nfi"
             )
         } else {
             format!("/bin/cat <<'RESULT'\n{result}\nRESULT")
@@ -532,13 +576,19 @@ impl Fixture {
     }
 
     fn run(&self, extra: &[&str]) -> Output {
-        self.command()
-            .arg(self.runtime)
-            .arg("run")
-            .arg(&self.model)
-            .args([
-                "--pp", "128,512", "--tg", "128", "--reps", "2", "--yes", "--output",
-            ])
+        let mut command = self.command();
+        command.arg(self.runtime).arg("run").arg(&self.model);
+        if !self.is_default_sweep() {
+            let pp = self
+                .sizes
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            command.args(["--pp", &pp, "--tg", "128"]);
+        }
+        command
+            .args(["--reps", "2", "--yes", "--output"])
             .arg(&self.report)
             .args(extra)
             .output()
@@ -985,7 +1035,7 @@ fn server(f: &Fixture, statuses: Vec<u16>) -> (String, thread::JoinHandle<Vec<Va
 #[test]
 fn checksum_mismatch_is_informational_and_duplicate_submission_is_not_an_error() {
     for runtime in RUNTIMES {
-        let f = Fixture::new(runtime);
+        let f = Fixture::full_sweep(runtime);
         let report = f.signed();
         let (url, received) = server(&f, vec![201, 200]);
         for message in ["Benchmark submitted", "Already submitted"] {
@@ -1009,7 +1059,7 @@ fn checksum_mismatch_is_informational_and_duplicate_submission_is_not_an_error()
 
 #[test]
 fn mixed_batch_requires_explicit_skip_and_uploads_only_the_valid_report() {
-    let f = Fixture::new("llama-cpp");
+    let f = Fixture::full_sweep("llama-cpp");
     let valid = f.signed();
     let invalid = f.dir.path().join("tampered.json");
     let mut changed = valid.clone();
@@ -1171,8 +1221,179 @@ fn failed_benchmarks_and_basert_runs_do_not_create_gguf_history() {
 }
 
 #[test]
-fn offline_report_cannot_be_uploaded_without_login() {
+fn the_default_sweep_is_submittable_and_says_how_to_submit() {
+    for runtime in RUNTIMES {
+        let f = Fixture::full_sweep(runtime);
+        let output = f.run(&[]);
+        success(&output);
+        let printed = text(&output);
+        assert!(!printed.contains("local-only run"), "{printed}");
+        assert!(!printed.contains("Local only:"), "{printed}");
+        assert!(printed.contains("computearena submit"), "{printed}");
+        let report: Value = serde_json::from_slice(&fs::read(&f.report).unwrap()).unwrap();
+        let measured: Vec<u64> = report["benchmark"]["raw_samples"]["prefill"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|size| size.parse().unwrap())
+            .collect();
+        for size in DEFAULT_SWEEP {
+            assert!(
+                measured.contains(&size),
+                "PP{size} missing from {measured:?}"
+            );
+        }
+        success(&f.verify());
+    }
+}
+
+#[test]
+fn a_custom_sweep_is_a_local_only_run_and_says_so_before_and_after_it_runs() {
+    for runtime in RUNTIMES {
+        let f = Fixture::new(runtime);
+        let output = f.run(&[]);
+        success(&output);
+        let printed = text(&output);
+        let missing = "it is missing PP256, PP1024, PP2048, PP4096, PP8192 and PP16384";
+        // In the plan, before the run starts: what it will lack, and how to
+        // get a submittable one.
+        let notice = printed
+            .find("This will be a local-only run.")
+            .expect(&printed);
+        assert!(
+            printed.find("Benchmark plan").unwrap() < notice,
+            "{printed}"
+        );
+        assert!(
+            notice < printed.find("Running the benchmark").unwrap(),
+            "{printed}"
+        );
+        assert!(
+            printed.contains("Local only: a partial run cannot be submitted"),
+            "{printed}"
+        );
+        assert!(printed.contains(missing), "{printed}");
+        assert!(printed.contains("PP128 to PP16384 and TG128"), "{printed}");
+        assert!(printed.contains("Omit --pp and --tg"), "{printed}");
+        // After the run: no invitation to submit a report that would be refused.
+        assert!(
+            printed.contains("Local only: Partial run, not submittable:"),
+            "{printed}"
+        );
+        assert!(!printed.contains("computearena submit"), "{printed}");
+        // The report itself is a good signed report.
+        success(&f.verify());
+    }
+}
+
+#[test]
+fn partial_runs_are_refused_at_submission_with_what_is_missing_and_how_to_fix_it() {
+    for runtime in RUNTIMES {
+        let f = Fixture::new(runtime);
+        let original = f.signed();
+        let (url, received) = server(&f, vec![]);
+        let output = f
+            .command()
+            .args(["--api-url", &url, "submit", "--yes"])
+            .arg(&f.report)
+            .output()
+            .unwrap();
+        failure(
+            &output,
+            "nothing was uploaded: the selected benchmark is a partial run",
+        );
+        let printed = text(&output);
+        for expected in [
+            "Partial runs (valid reports, local only)",
+            "Partial run, not submittable: it is missing PP256, PP1024, PP2048, PP4096, PP8192 and PP16384",
+            "ComputeArena accepts only runs with the full default sweep (PP128 to PP16384 and TG128)",
+            "Run the benchmark again without --pp and --tg",
+        ] {
+            assert!(printed.contains(expected), "missing {expected:?}: {printed}");
+        }
+        // Refused before login is even asked for, and never sent.
+        assert!(!printed.contains("Login is required"), "{printed}");
+        assert!(!printed.contains("Submitting report"), "{printed}");
+        assert!(!printed.contains("Invalid reports:"), "{printed}");
+        assert!(received.join().unwrap().is_empty());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(&f.report).unwrap()).unwrap(),
+            original
+        );
+        success(&f.verify());
+    }
+}
+
+#[test]
+fn a_partial_run_in_a_batch_is_left_local_while_complete_runs_upload() {
+    let partial = Fixture::new("llama-cpp");
+    partial.signed();
+    let f = Fixture::full_sweep("llama-cpp");
+    let complete = f.signed();
+    let partial_path = f.dir.path().join("partial.json");
+    fs::copy(&partial.report, &partial_path).unwrap();
+
+    // Non-interactive and not told to skip: nothing is sent.
+    let output = f
+        .command()
+        .args(["submit", "--yes"])
+        .arg(&f.report)
+        .arg(&partial_path)
+        .output()
+        .unwrap();
+    failure(&output, "1 of the selected benchmarks is a partial run");
+    assert!(!text(&output).contains("Submitting report"));
+
+    let (url, received) = server(&f, vec![201]);
+    let output = f
+        .command()
+        .args(["--api-url", &url, "submit", "--yes", "--skip-invalid"])
+        .arg(&f.report)
+        .arg(&partial_path)
+        .output()
+        .unwrap();
+    success(&output);
+    let printed = text(&output);
+    assert!(
+        printed.contains("Partial run, not submittable"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("1 partial run(s) were not uploaded and stay local"),
+        "{printed}"
+    );
+    assert_eq!(received.join().unwrap(), vec![complete]);
+}
+
+#[test]
+fn saved_report_lists_mark_partial_runs_as_local_only() {
     let f = Fixture::new("basert");
+    success(&f.run(&[]));
+    let reports = f.dir.path().join("data/reports");
+    fs::create_dir_all(&reports).unwrap();
+    fs::copy(&f.report, reports.join("partial.json")).unwrap();
+    let listed = f.command().args(["list"]).output().unwrap();
+    success(&listed);
+    let printed = text(&listed);
+    assert!(printed.contains("LOCAL ONLY"), "{printed}");
+    assert!(
+        printed.contains("Partial run, not submittable"),
+        "{printed}"
+    );
+    let json = f.command().args(["list", "--json"]).output().unwrap();
+    success(&json);
+    let summaries: Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(summaries[0]["status"], "valid");
+    assert_eq!(summaries[0]["submittable"], false);
+    assert!(summaries[0]["submission_blocker"]
+        .as_str()
+        .unwrap()
+        .starts_with("Partial run, not submittable"));
+}
+
+#[test]
+fn offline_report_cannot_be_uploaded_without_login() {
+    let f = Fixture::full_sweep("basert");
     let original = f.signed();
     let output = f
         .command()

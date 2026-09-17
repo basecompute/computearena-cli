@@ -534,13 +534,19 @@ fn reports_screen(
         .zip(marks)
         .enumerate()
         .map(|(index, (row, marked))| {
-            let tick = match (mode, marked, row.valid) {
+            let tick = match (mode, marked, row.submittable()) {
                 (ReportMode::Submit, true, _) => "[x] ",
                 (ReportMode::Submit, false, true) => "[ ] ",
                 (ReportMode::Submit, false, false) => "[-] ",
                 (ReportMode::Verify, _, _) => "",
             };
-            let status = if row.valid { "VALID" } else { "INVALID" };
+            let status = if row.submittable() {
+                "VALID"
+            } else if row.valid {
+                "LOCAL ONLY"
+            } else {
+                "INVALID"
+            };
             item(
                 format!("{tick}{}  [{status}]", row.label),
                 row.detail.clone(),

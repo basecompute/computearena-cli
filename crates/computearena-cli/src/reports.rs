@@ -337,8 +337,10 @@ pub(crate) fn list_reports(paths: &Paths, as_json: bool) -> Result<()> {
     // `--json` keeps the newest-first order machines and the pickers use.
     for (index, report) in reports.iter().rev().enumerate() {
         let status = report["status"].as_str().unwrap_or("invalid");
-        let status_label = if status == "valid" {
+        let status_label = if report["submittable"].as_bool() == Some(true) {
             ui.success("VALID")
+        } else if status == "valid" {
+            ui.warning("LOCAL ONLY")
         } else {
             ui.error("INVALID")
         };
@@ -368,6 +370,9 @@ pub(crate) fn list_reports(paths: &Paths, as_json: bool) -> Result<()> {
                 .as_str()
                 .unwrap_or("unknown quantization")
         );
+        if let Some(blocker) = report["submission_blocker"].as_str() {
+            println!("     {}", ui.warning(blocker));
+        }
 
         println!("     Throughput:");
         let prefill = report["prefill"].as_array().cloned().unwrap_or_default();
@@ -436,6 +441,12 @@ pub(crate) fn report_summaries(paths: &Paths) -> Result<Vec<Value>> {
                     Ok(_) => "valid".to_string(),
                     Err(error) => format!("invalid: {error}"),
                 };
+                // Valid and submittable are different things: a partial run
+                // verifies, but only the full default sweep is accepted.
+                let submission_blocker = (status == "valid")
+                    .then(|| crate::sweep::report_gap(&value))
+                    .flatten()
+                    .map(|gap| gap.submission_blocker());
                 let (model_id, variant) = model_identity_for_report(&value);
                 let model = match variant.as_deref() {
                     Some(variant) => format!("{model_id} ({variant})"),
@@ -469,6 +480,8 @@ pub(crate) fn report_summaries(paths: &Paths) -> Result<Vec<Value>> {
                     "decode": decode,
                     "peak_memory_mb": peak_memory_for_report(&value),
                     "ending_temperature_c": value.pointer("/benchmark/thermal/die_end_c").and_then(Value::as_f64),
+                    "submittable": status == "valid" && submission_blocker.is_none(),
+                    "submission_blocker": submission_blocker,
                     "status": status,
                     "path": path
                 }));
