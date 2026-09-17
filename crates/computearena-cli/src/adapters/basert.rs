@@ -288,6 +288,10 @@ fn normalize_headline_protocol(
     {
         bail!("BaseRT returned incompatible headline capacity/order metadata");
     }
+    // Each prefill runs at its own capacity, so the flat `params.ctx` names
+    // the largest one the sweep used (BaseRT 0.2.5): 16384 for the default
+    // sweep, not the headline's 4096.
+    let mut sweep_capacity = capacity;
     for prompt in request.pp.split(',') {
         let tokens = prompt.parse::<u64>()?;
         let expected = if tokens == headline {
@@ -295,6 +299,7 @@ fn normalize_headline_protocol(
         } else {
             tokens.max(HEADLINE_CONTEXT_CAPACITY)
         };
+        sweep_capacity = sweep_capacity.max(expected);
         if runtime["prefill"][prompt]["initial_context_tokens"] != 0
             || runtime["prefill"][prompt]["context_capacity_tokens"].as_u64() != Some(expected)
         {
@@ -306,7 +311,7 @@ fn normalize_headline_protocol(
         || runtime["decode"]["seed_prefill_in_timing"] != false
         || runtime["measurement"]["timed_repetitions"] != request.reps
         || runtime["measurement"]["requested_warmup_repetitions"] != request.warmup
-        || benchmark["params"]["ctx"] != capacity
+        || benchmark["params"]["ctx"] != sweep_capacity
     {
         bail!("BaseRT returned incompatible headline measurement metadata");
     }
@@ -443,6 +448,71 @@ mod tests {
                 "{pointer}"
             );
         }
+    }
+
+    /// What the BaseRT 0.2.5 harness returns for the default sweep: every
+    /// prefill at its own capacity, and `params.ctx` naming the largest.
+    fn default_sweep_report(ctx: u64) -> Value {
+        let pp = crate::config::DEFAULT_PREFILL_TOKENS;
+        let prefill: serde_json::Map<String, Value> = pp
+            .split(',')
+            .map(|size| {
+                let tokens: u64 = size.parse().unwrap();
+                let capacity = if size == "512" {
+                    4096
+                } else {
+                    tokens.max(4096)
+                };
+                (
+                    size.to_string(),
+                    json!({"initial_context_tokens":0,"context_capacity_tokens":capacity}),
+                )
+            })
+            .collect();
+        json!({"params":{"ctx":ctx},"protocol":{
+            "schema":"basert-throughput-protocol/2","profile":"basert-bench-capacity/1",
+            "context_isolation":"headline_then_per_prefill","context_capacity_policy":"basert_bench_default",
+            "model_load_in_timing":false,"execution_layout":"headline_then_prefill_processes",
+            "execution_order":crate::protocol::headline_order(pp, 128),
+            "prefill":prefill,
+            "decode":{"initial_context_tokens":1,"context_capacity_tokens":4096,"seed_prefill_in_timing":false},
+            "measurement":{"timed_repetitions":3,"requested_warmup_repetitions":3}
+        }})
+    }
+
+    #[test]
+    fn the_default_sweep_reports_its_largest_capacity_as_ctx() {
+        let request = BenchmarkRequest {
+            model: Path::new("test.base"),
+            pp: crate::config::DEFAULT_PREFILL_TOKENS,
+            tg: 128,
+            reps: 3,
+            warmup: 3,
+            cooldown: false,
+        };
+        // BaseRT 0.2.5 publishes the 16384 the PP16384 workload ran at.
+        let mut report = default_sweep_report(16384);
+        normalize_protocol(&mut report, &request, true, true).unwrap();
+        assert_eq!(
+            report["protocol"]["id"],
+            crate::protocol::HEADLINE_PROTOCOL_ID
+        );
+        assert_eq!(report["params"]["ctx"], 16384);
+        // The decode capacity is still the headline's.
+        assert_eq!(
+            report["protocol"]["decode"]["context_capacity_tokens"],
+            4096
+        );
+
+        // Pre-release harnesses that published the headline's capacity
+        // instead misdescribe the sweep and are not signed.
+        let error = normalize_protocol(&mut default_sweep_report(4096), &request, true, true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("incompatible headline measurement metadata"),
+            "{error}"
+        );
     }
 
     #[test]
