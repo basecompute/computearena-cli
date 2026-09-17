@@ -2,7 +2,7 @@ use crate::config::PRIVATE_FILE_MODE;
 use crate::protocol::{
     REPORT_SCHEMA, SIGNATURE_ALGORITHM, SIGNATURE_CANONICALIZATION, SIGNATURE_DOMAIN,
 };
-use crate::ui::{finish_activity, start_activity, TerminalUi};
+use crate::ui::{finish_activity, notice, start_activity, TerminalUi};
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -66,11 +66,11 @@ pub(crate) fn default_root(base: &Path) -> PathBuf {
     let legacy = base.join("basert").join("computearena");
     if current.exists() {
         if legacy.is_dir() && !is_empty_dir(&legacy) {
-            eprintln!(
+            notice(format!(
                 "Note: data from an older ComputeArena remains at {} and is not used; the data directory is {}.",
                 legacy.display(),
                 current.display()
-            );
+            ));
         }
         return current;
     }
@@ -84,11 +84,11 @@ pub(crate) fn default_root(base: &Path) -> PathBuf {
             if let Some(parent) = legacy.parent() {
                 let _ = fs::remove_dir(parent);
             }
-            eprintln!(
+            notice(format!(
                 "Moved ComputeArena data from {} to {}.",
                 legacy.display(),
                 current.display()
-            );
+            ));
             current
         }
         Err(error) => {
