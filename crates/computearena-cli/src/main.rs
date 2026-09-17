@@ -3,6 +3,7 @@ mod api;
 use adapters::{BenchmarkRequest, Runtime};
 mod auth;
 mod basert_models;
+mod basert_updates;
 mod benchmark;
 mod conditioning;
 mod config;
@@ -369,9 +370,21 @@ fn execute(
                     None => return Ok(()),
                 },
             };
+            let chosen_by_flag = harness.is_some();
             let (harness, model) =
                 benchmark::identify_benchmark_paths(runtime, harness, &model, paths)?;
             benchmark::print_resolved_paths(runtime, &harness)?;
+            // Before the plan: an older BaseRT decides what the report will
+            // say, and updating it takes less time than the run does.
+            let mut basert_notice = if runtime == Runtime::Basert {
+                let source = runtimes::source_of(runtime, chosen_by_flag, paths)?;
+                Some(basert_updates::RunNotice::start(paths, &harness, source))
+            } else {
+                None
+            };
+            if let Some(notice) = basert_notice.as_mut() {
+                notice.before_run(TerminalUi::detect());
+            }
             let Some(cooldown_enabled) = runtime.adapter().confirm(
                 &BenchmarkRequest {
                     model: &model,
@@ -400,6 +413,9 @@ fn execute(
                 output,
             )?;
             print_submission_hint(paths, api_url, &report)?;
+            if let Some(notice) = basert_notice.as_mut() {
+                notice.after_run(TerminalUi::detect());
+            }
             Ok(())
         }
         Action::List { json } => list_reports(paths, json),

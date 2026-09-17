@@ -90,6 +90,11 @@ impl Sandbox {
             .env("NO_PROXY", "*")
             .env("BASERT_INSTALL_DIR", self.path().join("basert-home"))
             .env("COMPUTEARENA_API_URL", "http://127.0.0.1:1/api/v1")
+            // Tests never ask GitHub which BaseRT release is newest.
+            .env(
+                "COMPUTEARENA_BASERT_RELEASE_API",
+                "http://127.0.0.1:1/latest",
+            )
             .arg("--data-dir")
             .arg(self.path().join("data"));
         cmd

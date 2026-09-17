@@ -214,6 +214,21 @@ of `--runtime-path`. BaseRT 0.2.4 and newer can also start this client with
 BaseRT remains responsible for choosing a compatible backend artifact,
 downloading split files, conversion, and writing `hub.json` provenance.
 
+ComputeArena says when the BaseRT it found is worth updating, and never
+refuses to run an older one. A harness that does not advertise the
+headline-first protocol (BaseRT 0.2.4 and older) is named before the benchmark
+plan, with what its report will be signed as; this needs no network, because
+the harness describes itself. A newer BaseRT release is mentioned the same way.
+That lookup asks GitHub for BaseRT's latest release in the background, keeps
+the answer for 24 hours in `basert-update-check.json`, and never delays or
+fails a run; when it has not answered before a benchmark starts, the notice
+follows the run instead. `computearena basert install` installs the latest
+release where the official installer does, and the full-screen interface
+offers the same with `u` on its menu, asking for a second press before it
+replaces anything. A harness chosen with `--runtime-path` or
+`COMPUTEARENA_BASERT_HARNESS` is yours to update, and on platforms without a
+prebuilt BaseRT the notice points at the release to build from instead.
+
 ### llama.cpp
 
 The adapter asks for a GGUF file rather than scanning the disk, and lists the
@@ -346,6 +361,7 @@ minimumClientVersion for an actionable upgrade message.
 | `COMPUTEARENA_API_URL` | API base URL, same as `--api-url` |
 | `COMPUTEARENA_BASERT_HARNESS` | Path to `basert-benchmark-harness`, same as `--runtime-path` for BaseRT |
 | `BASERT_INSTALL_DIR` | Where BaseRT is looked for and installed; `~/.basert` by default |
+| `COMPUTEARENA_BASERT_RELEASE_API` | Where BaseRT's latest release is looked up, for mirrors and tests; GitHub's API for `basecompute/baseRT` by default. Only a version number is read from the answer |
 | `BASERT_MODELS_DIR` | Where installed BaseRT models are listed from; BaseRT's own model cache by default |
 | `CUDA_VISIBLE_DEVICES` | Respected by the CUDA chip fallback; a mask leaves the chip unresolved |
 | `NO_COLOR` | Plain output |

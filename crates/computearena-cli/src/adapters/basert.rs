@@ -17,14 +17,14 @@ enum TelemetryMode {
     NativeSameRun,
 }
 
-fn supports_isolated_workloads(descriptor: &Value) -> bool {
+pub(crate) fn supports_isolated_workloads(descriptor: &Value) -> bool {
     descriptor
         .pointer("/features/isolated_workload_contexts")
         .and_then(Value::as_bool)
         == Some(true)
 }
 
-fn supports_headline_capacity(descriptor: &Value) -> Result<bool> {
+pub(crate) fn supports_headline_capacity(descriptor: &Value) -> Result<bool> {
     let supported = descriptor
         .pointer("/features/headline_context_capacity")
         .and_then(Value::as_bool)
