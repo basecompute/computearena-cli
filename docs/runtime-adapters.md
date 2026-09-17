@@ -70,6 +70,33 @@ first when supported, and use their existing native warmup/timing policies.
 Consumers retain runtime, quantization, protocol and signed runtime evidence.
 Existing measurements are not retroactively relabelled or excluded from rankings.
 
+## ik_llama.cpp builds
+
+The llama.cpp adapter also drives the llama-bench of ik_llama.cpp, recognised at the
+--help probe by `-gp <pp,tg>` and `--warmup <0|1>`. There is no separate runtime
+selector: both projects name their executable llama-bench, so the one that was found
+is identified rather than guessed. The workloads, order, processes and samples_ns
+timing are unchanged; only their spelling differs:
+
+| | llama.cpp | ik_llama.cpp |
+| --- | --- | --- |
+| TG from one untimed seed token | `-p 0 -n 128 -d 1` | `-p 0 -n 0 -gp 1,128`; the row must be labelled `tg128@pp1` |
+| PP from an empty context | `-d 0` | always (no depth option) |
+| Disable warmup | `--no-warmup` | `-w 0` |
+| Backend | `backends` | first of the `cuda`, `vulkan`, `metal`, `sycl` flags, else CPU |
+
+ik rows are translated into llama.cpp's fields before the shared validation, and
+ik's own settings (`mla_attn`, `fused_moe`, `ser`, ...) are kept in
+runtime_configuration. ik names the GPU for CUDA and SYCL builds only, and the CPU on
+Linux only. An unnamed device is reported as `unknown` and resolved by the shared host
+lookup before signing (Apple silicon through sysctl, recorded in chip_detection); where
+that lookup declines to guess, as for Vulkan, the chip stays unresolved. A ROCm build
+reports the `cuda` flag and is recorded as CUDA.
+
+The report's runtime name stays `llama-cpp`. The signed descriptor carries
+`dialect: "ik_llama.cpp"` and runtime_version reads `ik_llama.cpp b<build> (<commit>)`,
+so the server can tell the two apart.
+
 ## Binary provenance
 
 Hash the selected executable before execution and check it again afterward.

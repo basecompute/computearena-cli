@@ -35,7 +35,7 @@ They do not run GPU workloads. See [telemetry.md](telemetry.md) for collector co
 | CLI UX | Runtime-scoped help, no nested runtime selectors, one-per-line runtime chooser skipped when a single runtime is installed, menu exit, common list/inspect/verify commands, NO_COLOR output, explicit install/capability guidance |
 | Discovery | PATH discovery, explicit executable path override, paths containing spaces, missing/incompatible executables, executable feedback on selection, ComputeArena-installed copies, BaseRT's default install location |
 | Installation | Plan shown before installing, local bundle unpacking, install records, replacement of earlier copies, refusal without a terminal or --yes, non-interactive runs pointing at install |
-| Runtime invocation | Requested PP sweep forwarded, separate PP/TG processes, llama.cpp PP depth zero and TG depth one, JSON output, no replay telemetry flag for current BaseRT, no default cooldown, native warmup disablement |
+| Runtime invocation | Requested PP sweep forwarded, separate PP/TG processes, llama.cpp PP depth zero and TG depth one (`-gp 1,128` for an ik_llama.cpp build), JSON output, no replay telemetry flag for current BaseRT, no default cooldown, native warmup disablement |
 | Result consistency | Identical raw measurements produce identical token/second metrics and units across adapters; bogus llama.cpp aggregate rates are ignored |
 | Protocol compatibility | Isolated BaseRT metadata and llama.cpp normalize to computearena-throughput/2; legacy BaseRT remains readable but non-comparable; native same-run telemetry is selected only by an advertised capability |
 | Runtime failures | Nonzero exit, malformed JSON, executable mutation during a benchmark: no report signed |

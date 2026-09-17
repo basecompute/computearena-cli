@@ -253,6 +253,11 @@ cross-runtime equivalence. Existing reports remain verifiable and submittable;
 protocol differences are not a new leaderboard filter.
 The measurement contract is in [docs/runtime-adapters.md](docs/runtime-adapters.md).
 
+A llama-bench built from [ik_llama.cpp](https://github.com/ikawrakow/ik_llama.cpp)
+works the same way: point `--runtime-path` at it, or put it on `PATH`. The
+client recognises the fork from its `--help`, runs the same workloads with
+ik's own flags, and names the fork in the signed report.
+
 ## Reports and signatures
 
 Reports live in the data directory: `~/Library/Application Support/computearena`
