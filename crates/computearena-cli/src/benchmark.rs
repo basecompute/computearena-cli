@@ -87,7 +87,7 @@ pub(crate) fn plan_rows(
         rows.push((
             "Options",
             format!(
-                "{}\nPassed to llama-bench; the settings it reports back are signed",
+                "{}\nPassed to llama-bench and signed in the report",
                 r.runtime_args.join(" ")
             ),
         ));

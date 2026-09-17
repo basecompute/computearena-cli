@@ -184,6 +184,11 @@ impl RuntimeAdapter for LlamaCppAdapter {
                     .unwrap_or_default()
             );
             result.benchmark["runtime_version"] = json!(version);
+            result.benchmark["protocol"]["runtime_protocol"]["dialect"] = json!(IK_LLAMA_CPP);
+        }
+        if !r.runtime_args.is_empty() {
+            result.benchmark["protocol"]["runtime_protocol"]["extra_arguments"] =
+                json!(r.runtime_args);
         }
         ui.section("Benchmark results");
         for pp in r.pp.split(',') {

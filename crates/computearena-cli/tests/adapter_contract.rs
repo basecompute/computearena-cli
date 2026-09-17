@@ -1747,7 +1747,7 @@ fn an_ik_llama_cpp_build_runs_the_same_protocol_and_is_named_in_the_signed_repor
 }
 
 #[test]
-fn options_after_a_double_dash_reach_llama_bench() {
+fn options_after_a_double_dash_reach_llama_bench_and_are_signed() {
     let f = Fixture::new("llama-cpp");
     let mut command = f.run_command(&[]);
     command.args(["--", "-sm", "graph", "-ts", "1/1/1/1"]);
@@ -1760,6 +1760,11 @@ fn options_after_a_double_dash_reach_llama_bench() {
         args.matches("-sm\ngraph\n-ts\n1/1/1/1\n").count(),
         3,
         "{args}"
+    );
+    let report: Value = serde_json::from_slice(&fs::read(&f.report).unwrap()).unwrap();
+    assert_eq!(
+        report["benchmark"]["protocol"]["runtime_protocol"]["extra_arguments"],
+        json!(["-sm", "graph", "-ts", "1/1/1/1"])
     );
     success(&f.verify());
 

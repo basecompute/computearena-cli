@@ -150,8 +150,8 @@ computearena llama-cpp run model.gguf -- -sm graph -ts 1/1/1/1
 Anything after `--` goes to llama-bench as it is, for settings such as a
 multi-GPU split, flash attention or the KV cache type. The options that define
 the measurement (model, workloads, repetitions, warmup, output format) stay
-ComputeArena's and are refused there. The settings llama-bench reports back
-are part of the signed report, as for any run.
+ComputeArena's and are refused there. The passed options and the settings
+llama-bench reports back are both part of the signed report.
 
 Only a run with the full default sweep (PP128 to PP16384 and TG128) can be
 submitted, so every model and chip is comparable at every size. A custom `--pp`
