@@ -78,6 +78,14 @@ pub(crate) struct Located {
     pub(crate) source: Source,
 }
 
+/// How the executable a command is about to run was chosen.
+pub(crate) fn source_of(runtime: Runtime, chosen_by_flag: bool, paths: &Paths) -> Result<Source> {
+    if chosen_by_flag {
+        return Ok(Source::Override);
+    }
+    locate(runtime, None, paths).map(|located| located.source)
+}
+
 pub(crate) fn executable_on_path(name: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|path| {
         std::env::split_paths(&path)
@@ -933,7 +941,7 @@ pub(crate) fn install(
         path: executable,
         source: Source::Managed,
     };
-    report_found(ui, runtime, &located)?;
+    report_found(ui, runtime, &located, paths)?;
     Ok(Some(located))
 }
 
@@ -941,7 +949,12 @@ pub(crate) fn install(
 
 /// Print the executable that will run, and check it is usable before anyone
 /// picks a model. Returns the version when the runtime reports one.
-pub(crate) fn report_found(ui: TerminalUi, runtime: Runtime, located: &Located) -> Result<()> {
+pub(crate) fn report_found(
+    ui: TerminalUi,
+    runtime: Runtime,
+    located: &Located,
+    paths: &Paths,
+) -> Result<()> {
     let adapter = runtime.adapter();
     let capabilities = adapter.probe(&located.path).with_context(|| {
         format!(
@@ -963,6 +976,14 @@ pub(crate) fn report_found(ui: TerminalUi, runtime: Runtime, located: &Located) 
         ui.muted(located.source.describe()),
     );
     println!("  {}", ui.neutral(compact_path(&located.path)));
+    // From what the last lookup found; the one started here is for next time,
+    // so finding a runtime never waits for the network.
+    if runtime == Runtime::Basert {
+        let watch = crate::basert_updates::Watch::start(paths);
+        if let Some(advice) = watch.advice(&capabilities, located.source) {
+            crate::basert_updates::print_advice(ui, &advice);
+        }
+    }
     Ok(())
 }
 
@@ -984,7 +1005,7 @@ pub(crate) fn ensure_runtime(
     let adapter = runtime.adapter();
     loop {
         let problem = match locate(runtime, override_path.clone(), paths) {
-            Ok(located) => match report_found(ui, runtime, &located) {
+            Ok(located) => match report_found(ui, runtime, &located, paths) {
                 Ok(()) => return Ok(RuntimeSetup::Ready(located.path)),
                 Err(error) => format!("{error:#}"),
             },

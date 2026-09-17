@@ -62,6 +62,23 @@ impl ReportRow {
     }
 }
 
+/// Where a run is decided, what an older BaseRT will sign gets one row.
+fn protocol_row(advice: Option<&crate::basert_updates::Advice>) -> Option<(&'static str, String)> {
+    let advice = advice?;
+    let note = advice.plan_note?;
+    Some((
+        "Protocol",
+        format!(
+            "{note}\n{}",
+            if advice.installable {
+                "Update BaseRT from the menu (Esc, then u) for the current one"
+            } else {
+                "A newer BaseRT harness signs the current one"
+            }
+        ),
+    ))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReportMode {
     Verify,
@@ -206,6 +223,17 @@ pub(crate) struct App {
     /// offered for submission.
     pub(crate) pending_submission: Option<PathBuf>,
     update_check: Option<crate::updates::UpdateCheck>,
+    /// What the runtime in use says it supports and how it was found, kept
+    /// from the probe that made it usable.
+    runtime_descriptor: Option<(serde_json::Value, runtimes::Source)>,
+    /// BaseRT's newest release; looked up the first time BaseRT is entered.
+    basert_watch: Option<crate::basert_updates::Watch>,
+    /// Set by the first `u` on the menu: updating replaces an installation,
+    /// so it takes a second press.
+    update_armed: bool,
+    /// Whether a prebuilt BaseRT exists for this machine, so an update can be
+    /// installed from here.
+    prebuilt_basert: bool,
 }
 
 impl App {
@@ -235,6 +263,10 @@ impl App {
             completed_report: Arc::new(Mutex::new(None)),
             pending_submission: None,
             update_check,
+            runtime_descriptor: None,
+            basert_watch: None,
+            update_armed: false,
+            prebuilt_basert: crate::basert_updates::prebuilt_for_this_platform(),
         };
         app.refresh_account();
         // The same rule as the printed session: only ask which runtime to use
@@ -281,15 +313,24 @@ impl App {
     /// screen explaining how to obtain it.
     fn enter_runtime(&mut self) -> Result<()> {
         let adapter = self.runtime.adapter();
-        match runtimes::locate(self.runtime, self.harness_override.clone(), &self.paths)
-            .and_then(|located| adapter.probe(&located.path).map(|_| located.path))
-        {
-            Ok(path) => {
-                self.executable = Some(path);
+        match runtimes::locate(self.runtime, self.harness_override.clone(), &self.paths).and_then(
+            |located| {
+                adapter
+                    .probe(&located.path)
+                    .map(|descriptor| (located, descriptor))
+            },
+        ) {
+            Ok((located, descriptor)) => {
+                self.executable = Some(located.path);
+                self.runtime_descriptor = Some((descriptor, located.source));
+                if self.runtime == Runtime::Basert && self.basert_watch.is_none() {
+                    self.basert_watch = Some(crate::basert_updates::Watch::start(&self.paths));
+                }
                 self.screens.push(Screen::Menu { cursor: 0 });
             }
             Err(error) => {
                 self.executable = None;
+                self.runtime_descriptor = None;
                 self.screens.push(Screen::Setup {
                     problem: format!("{error:#}"),
                     instructions: manual_instructions(self.runtime),
@@ -298,6 +339,30 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// What is worth saying about the BaseRT in use: a newer release, or a
+    /// harness that predates the current benchmark protocol.
+    pub(crate) fn basert_advice(&self) -> Option<crate::basert_updates::Advice> {
+        if self.runtime != Runtime::Basert {
+            return None;
+        }
+        let (descriptor, source) = self.runtime_descriptor.as_ref()?;
+        crate::basert_updates::advice(
+            descriptor,
+            self.basert_watch.as_ref().and_then(|watch| watch.latest()),
+            *source,
+            self.prebuilt_basert,
+        )
+    }
+
+    /// Whether the menu offers `u`: there is something to gain, and installing
+    /// the latest release is what gains it.
+    pub(crate) fn update_offered(&self) -> bool {
+        matches!(self.screen(), Screen::Menu { .. })
+            && self
+                .basert_advice()
+                .is_some_and(|advice| advice.installable)
     }
 
     pub(crate) fn runtime_label(&self) -> String {
@@ -337,6 +402,9 @@ impl App {
                 self.status = notice.message();
                 changed = true;
             }
+        }
+        if let Some(watch) = self.basert_watch.as_mut() {
+            changed |= watch.refresh();
         }
         if let Some(pending) = self.pending.as_ref() {
             match pending.receiver.try_recv() {
@@ -412,7 +480,8 @@ impl App {
         )
         .map(|(_, model)| model)?;
         let request = self.benchmark_request(&model);
-        let rows = plan_rows(self.runtime, &request)?;
+        let mut rows = plan_rows(self.runtime, &request)?;
+        rows.extend(protocol_row(self.basert_advice().as_ref()));
         let options = profile_options(self.runtime, &request)?;
         self.screens.push(Screen::Plan {
             model,
@@ -858,6 +927,12 @@ impl App {
             return Ok(());
         }
         self.status.clear();
+        // Armed only until the next key, whatever that key is.
+        let update_armed = std::mem::take(&mut self.update_armed);
+        if matches!(key.code, KeyCode::Char('u')) && self.update_offered() {
+            self.confirm_or_start_update(update_armed);
+            return Ok(());
+        }
         match key.code {
             KeyCode::Char(character) => self.on_char(character)?,
             KeyCode::Up => self.move_cursor(-1),
@@ -872,6 +947,26 @@ impl App {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Updating downloads a release and replaces the installed bundle, so the
+    /// first `u` says what will happen and the second one does it.
+    fn confirm_or_start_update(&mut self, armed: bool) {
+        if armed {
+            self.start_install();
+            return;
+        }
+        self.update_armed = true;
+        let release = match self.basert_watch.as_ref().and_then(|watch| watch.latest()) {
+            Some(latest) => format!("BaseRT {latest}"),
+            None => "the latest BaseRT".to_string(),
+        };
+        let directory = runtimes::basert_install_dir()
+            .map(|directory| compact_path(&directory))
+            .unwrap_or_else(|| "its install directory".to_string());
+        self.status = format!(
+            "Press u again to download {release} into {directory}, replacing the BaseRT files there"
+        );
     }
 
     fn on_char(&mut self, character: char) -> Result<()> {
@@ -1453,6 +1548,10 @@ mod tests {
             completed_report: Arc::new(Mutex::new(None)),
             pending_submission: None,
             update_check: None,
+            runtime_descriptor: None,
+            basert_watch: None,
+            update_armed: false,
+            prebuilt_basert: true,
         }
     }
 
@@ -1478,6 +1577,117 @@ mod tests {
             valid: true,
             submission_blocker: submission_blocker.map(str::to_string),
         }
+    }
+
+    fn old_basert() -> serde_json::Value {
+        serde_json::json!({"runtime": {"name": "basert", "version": "0.2.4"}, "features": {}})
+    }
+
+    fn current_basert() -> serde_json::Value {
+        serde_json::json!({
+            "runtime": {"name": "basert", "version": "0.2.5"},
+            "capacity_protocol_schema": "basert-throughput-protocol/2",
+            "features": {"headline_context_capacity": true}
+        })
+    }
+
+    fn press(app: &mut App, character: char) {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        app.on_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            .unwrap();
+    }
+
+    #[test]
+    fn an_older_basert_is_named_on_the_menu_and_updating_takes_two_presses() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path(), None);
+        app.runtime = Runtime::Basert;
+        app.screens.push(Screen::Menu { cursor: 0 });
+        assert_eq!(app.basert_advice(), None, "nothing is known yet");
+
+        app.runtime_descriptor = Some((old_basert(), runtimes::Source::KnownLocation));
+        let advice = app.basert_advice().unwrap();
+        assert_eq!(
+            advice.summary,
+            "BaseRT 0.2.4 predates the current benchmark protocol."
+        );
+        let row = protocol_row(Some(&advice)).unwrap();
+        assert_eq!(row.0, "Protocol");
+        assert!(row
+            .1
+            .starts_with("Older BaseRT protocol: signed as not comparable\n"));
+        assert!(row.1.lines().all(|line| line.chars().count() <= 64));
+
+        // The first press only says what a second one would do.
+        assert!(app.update_offered());
+        press(&mut app, 'u');
+        assert!(app.update_armed);
+        assert!(app.job.is_none());
+        assert!(app
+            .status
+            .starts_with("Press u again to download the latest BaseRT into "));
+        assert!(app.status.ends_with("replacing the BaseRT files there"));
+        // Any other key stands it down.
+        press(&mut app, 'j');
+        assert!(!app.update_armed);
+        assert!(app.job.is_none());
+
+        // With the feed's answer the confirmation names the release.
+        app.basert_watch = Some(crate::basert_updates::Watch::known(Some(
+            crate::updates::release_for_tests("0.2.6"),
+        )));
+        press(&mut app, 'u');
+        assert!(app
+            .status
+            .starts_with("Press u again to download BaseRT 0.2.6 into "));
+    }
+
+    #[test]
+    fn updating_is_offered_only_where_it_helps() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path(), None);
+        app.runtime = Runtime::Basert;
+        app.screens.push(Screen::Menu { cursor: 0 });
+
+        // A current BaseRT with nothing newer: no notice, and `u` is inert.
+        app.runtime_descriptor = Some((current_basert(), runtimes::Source::Managed));
+        app.basert_watch = Some(crate::basert_updates::Watch::known(Some(
+            crate::updates::release_for_tests("0.2.5"),
+        )));
+        assert_eq!(app.basert_advice(), None);
+        assert!(protocol_row(app.basert_advice().as_ref()).is_none());
+        press(&mut app, 'u');
+        assert!(!app.update_armed);
+
+        // A newer release is an update, but says nothing about the protocol.
+        app.basert_watch = Some(crate::basert_updates::Watch::known(Some(
+            crate::updates::release_for_tests("0.2.6"),
+        )));
+        assert!(app.update_offered());
+        assert!(protocol_row(app.basert_advice().as_ref()).is_none());
+
+        // A harness chosen by hand is not replaced by an install.
+        app.runtime_descriptor = Some((old_basert(), runtimes::Source::Override));
+        assert!(app.basert_advice().is_some());
+        assert!(!app.update_offered());
+        let row = protocol_row(app.basert_advice().as_ref()).unwrap();
+        assert!(row
+            .1
+            .ends_with("A newer BaseRT harness signs the current one"));
+
+        // Nor on a platform without a prebuilt BaseRT.
+        app.runtime_descriptor = Some((old_basert(), runtimes::Source::Path));
+        app.prebuilt_basert = false;
+        assert!(!app.update_offered());
+
+        // Only on the menu, and never for llama.cpp.
+        app.prebuilt_basert = true;
+        assert!(app.update_offered());
+        app.screens.push(Screen::Account { cursor: 0 });
+        assert!(!app.update_offered());
+        app.screens.pop();
+        app.runtime = Runtime::LlamaCpp;
+        assert_eq!(app.basert_advice(), None);
     }
 
     #[test]

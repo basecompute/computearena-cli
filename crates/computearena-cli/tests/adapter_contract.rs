@@ -571,11 +571,58 @@ impl Fixture {
             .args(["--data-dir"])
             .arg(self.dir.path().join("data"))
             .env("COMPUTEARENA_API_URL", "http://127.0.0.1:1/api/v1")
+            // No test may ask GitHub which BaseRT is newest: the lookup is
+            // pointed at a closed port unless a test serves its own answer.
+            .env(
+                "COMPUTEARENA_BASERT_RELEASE_API",
+                "http://127.0.0.1:1/latest",
+            )
             .stdin(Stdio::null());
         cmd
     }
 
     fn run(&self, extra: &[&str]) -> Output {
+        self.run_command(extra).output().unwrap()
+    }
+
+    /// What the last BaseRT release lookup is remembered to have found.
+    fn remember_latest_basert(&self, version: &str) {
+        let data = self.dir.path().join("data");
+        fs::create_dir_all(&data).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        fs::write(
+            data.join("basert-update-check.json"),
+            serde_json::to_vec(&json!({
+                "checkedAtUnixSeconds": now,
+                "latestVersion": version,
+                "releaseUrl": "https://example.test/release"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// A BaseRT harness that advertises the headline-first protocol.
+    fn install_headline_capable(&self) {
+        let mut result = self.result();
+        result["params"]["ctx"] = json!(4096);
+        result["protocol"] = json!({"schema":"basert-throughput-protocol/2","profile":"basert-bench-capacity/1",
+            "context_isolation":"headline_then_per_prefill","context_capacity_policy":"basert_bench_default",
+            "model_load_in_timing":false,"execution_layout":"headline_then_prefill_processes",
+            "execution_order":["pp512","tg128","pp128"],
+            "prefill":{"128":{"initial_context_tokens":0,"context_capacity_tokens":4096},
+                "512":{"initial_context_tokens":0,"context_capacity_tokens":4096}},
+            "decode":{"initial_context_tokens":1,"context_capacity_tokens":4096,"seed_prefill_in_timing":false},
+            "measurement":{"timed_repetitions":2,"requested_warmup_repetitions":3,
+                "warmup_policy":"fixed_repetitions","minimum_warmup_s":0,
+                "telemetry":"disabled","cooldown":false,"timing":"harness_existing_token_operations"}});
+        self.install(&result, "");
+    }
+
+    fn run_command(&self, extra: &[&str]) -> Command {
         let mut command = self.command();
         command.arg(self.runtime).arg("run").arg(&self.model);
         if !self.is_default_sweep() {
@@ -590,9 +637,8 @@ impl Fixture {
         command
             .args(["--reps", "2", "--yes", "--output"])
             .arg(&self.report)
-            .args(extra)
-            .output()
-            .unwrap()
+            .args(extra);
+        command
     }
 
     fn signed(&self) -> Value {
@@ -735,19 +781,8 @@ fn basert_native_same_run_telemetry_is_selected_by_capability_not_version() {
 #[test]
 fn headline_capable_basert_signs_new_metadata_without_changing_requested_repetitions() {
     let f = Fixture::new("basert");
-    let mut result = f.result();
-    result["params"]["ctx"] = json!(4096);
-    result["protocol"] = json!({"schema":"basert-throughput-protocol/2","profile":"basert-bench-capacity/1",
-        "context_isolation":"headline_then_per_prefill","context_capacity_policy":"basert_bench_default",
-        "model_load_in_timing":false,"execution_layout":"headline_then_prefill_processes",
-        "execution_order":["pp512","tg128","pp128"],
-        "prefill":{"128":{"initial_context_tokens":0,"context_capacity_tokens":4096},
-            "512":{"initial_context_tokens":0,"context_capacity_tokens":4096}},
-        "decode":{"initial_context_tokens":1,"context_capacity_tokens":4096,"seed_prefill_in_timing":false},
-        "measurement":{"timed_repetitions":2,"requested_warmup_repetitions":3,
-            "warmup_policy":"fixed_repetitions","minimum_warmup_s":0,
-            "telemetry":"disabled","cooldown":false,"timing":"harness_existing_token_operations"}});
-    f.install(&result, "");
+    f.install_headline_capable();
+    let result = f.result();
     let signed = f.signed();
     assert_eq!(
         signed["benchmark"]["protocol"]["id"],
@@ -1389,6 +1424,218 @@ fn saved_report_lists_mark_partial_runs_as_local_only() {
         .as_str()
         .unwrap()
         .starts_with("Partial run, not submittable"));
+}
+
+/// Serves one "latest release" answer the way GitHub does, on a loopback port.
+fn release_feed(tag: &str) -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/latest", listener.local_addr().unwrap());
+    let body = json!({"tag_name": tag, "html_url": "https://example.test/release"}).to_string();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut buffer).unwrap();
+            assert!(read > 0);
+            request.extend_from_slice(&buffer[..read]);
+        }
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    });
+    (url, handle)
+}
+
+/// How the advice ends depends on whether BaseRT publishes a bundle for the
+/// machine running the tests; both endings are correct.
+fn names_a_way_to_update(printed: &str) -> bool {
+    printed.contains("Update with `computearena basert install`")
+        || printed.contains("No prebuilt BaseRT is published for this platform")
+}
+
+#[test]
+fn an_older_basert_is_named_before_the_plan_with_what_it_signs_and_how_to_update() {
+    let f = Fixture::new("basert");
+    let output = f.run(&[]);
+    success(&output);
+    let printed = text(&output);
+    let summary = "BaseRT 0.2.4 predates the current benchmark protocol.";
+    let notice = printed.find(summary).expect(&printed);
+    assert!(
+        notice < printed.find("Benchmark plan").unwrap(),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("signed as computearena-throughput-legacy/1, marked not comparable"),
+        "{printed}"
+    );
+    // Offline, the release to move to is the first one with the protocol.
+    assert!(
+        printed.contains("BaseRT 0.2.5 or newer measures PP512 and TG128 first"),
+        "{printed}"
+    );
+    assert!(names_a_way_to_update(&printed), "{printed}");
+    // Said once: the end of the run does not repeat it.
+    assert_eq!(printed.matches(summary).count(), 1, "{printed}");
+    // It is advice, not a gate: the report is signed as before.
+    let report: Value = serde_json::from_slice(&fs::read(&f.report).unwrap()).unwrap();
+    assert_eq!(
+        report["benchmark"]["protocol"]["id"],
+        "computearena-throughput-legacy/1"
+    );
+    success(&f.verify());
+
+    // With the newest release known, the advice names it.
+    let f = Fixture::new("basert");
+    f.remember_latest_basert("0.2.6");
+    let printed = text(&f.run(&[]));
+    assert!(
+        printed.contains("BaseRT 0.2.6 measures PP512 and TG128 first"),
+        "{printed}"
+    );
+
+    // llama.cpp has nothing to do with any of this.
+    let llama = Fixture::new("llama-cpp");
+    llama.remember_latest_basert("9.9.9");
+    let printed = text(&llama.run(&[]));
+    assert!(!printed.contains("BaseRT"), "{printed}");
+}
+
+#[test]
+fn a_current_basert_is_told_about_a_newer_release_and_nothing_else() {
+    let f = Fixture::new("basert");
+    f.install_headline_capable();
+    f.remember_latest_basert("0.2.4");
+    let output = f.run(&[]);
+    success(&output);
+    let printed = text(&output);
+    assert!(!printed.contains("is available"), "{printed}");
+    assert!(!printed.contains("predates"), "{printed}");
+
+    fs::remove_file(&f.report).unwrap();
+    f.remember_latest_basert("9.9.9");
+    let output = f.run(&[]);
+    success(&output);
+    let printed = text(&output);
+    let notice = printed
+        .find("BaseRT 9.9.9 is available (installed: 0.2.4).")
+        .expect(&printed);
+    assert!(
+        notice < printed.find("Benchmark plan").unwrap(),
+        "{printed}"
+    );
+    assert!(!printed.contains("predates"), "{printed}");
+    assert!(names_a_way_to_update(&printed), "{printed}");
+
+    // A harness named by hand is not something an install would replace.
+    fs::remove_file(&f.report).unwrap();
+    let output = f
+        .run_command(&["--runtime-path", f.executable.to_str().unwrap()])
+        .output()
+        .unwrap();
+    success(&output);
+    let printed = text(&output);
+    assert!(
+        printed.contains("This harness was chosen with --runtime-path"),
+        "{printed}"
+    );
+}
+
+#[test]
+fn the_release_lookup_runs_beside_the_benchmark_and_is_remembered() {
+    let f = Fixture::new("basert");
+    f.install_headline_capable();
+    let (feed, served) = release_feed("v9.9.9");
+    let output = f
+        .run_command(&[])
+        .env("COMPUTEARENA_BASERT_RELEASE_API", &feed)
+        .output()
+        .unwrap();
+    success(&output);
+    served.join().unwrap();
+    let printed = text(&output);
+    // Whether the answer arrived before the plan or during the run, it is
+    // said exactly once.
+    assert_eq!(
+        printed
+            .matches("BaseRT 9.9.9 is available (installed: 0.2.4).")
+            .count(),
+        1,
+        "{printed}"
+    );
+    let remembered: Value = serde_json::from_slice(
+        &fs::read(f.dir.path().join("data/basert-update-check.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(remembered["latestVersion"], "9.9.9");
+
+    // The next run answers from that, without a lookup: the feed is gone.
+    fs::remove_file(&f.report).unwrap();
+    let output = f
+        .run_command(&[])
+        .env("COMPUTEARENA_BASERT_RELEASE_API", &feed)
+        .output()
+        .unwrap();
+    success(&output);
+    let printed = text(&output);
+    let notice = printed
+        .find("BaseRT 9.9.9 is available (installed: 0.2.4).")
+        .expect(&printed);
+    assert!(
+        notice < printed.find("Benchmark plan").unwrap(),
+        "{printed}"
+    );
+}
+
+#[test]
+fn an_unreachable_release_feed_never_delays_or_fails_a_run() {
+    let f = Fixture::new("basert");
+    f.install_headline_capable();
+    let started = Instant::now();
+    let output = f.run(&[]);
+    success(&output);
+    assert!(started.elapsed() < Duration::from_secs(20));
+    let printed = text(&output);
+    assert!(!printed.contains("is available"), "{printed}");
+    assert!(!f.dir.path().join("data/basert-update-check.json").exists());
+}
+
+#[test]
+fn the_printed_session_names_an_older_basert_when_it_finds_it() {
+    let f = Fixture::new("basert");
+    f.remember_latest_basert("0.2.6");
+    let mut child = f
+        .command()
+        .arg("basert")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"6\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+    success(&output);
+    let printed = text(&output);
+    let found = printed.find("Found BaseRT 0.2.4").expect(&printed);
+    let notice = printed
+        .find("BaseRT 0.2.4 predates the current benchmark protocol.")
+        .expect(&printed);
+    assert!(found < notice, "{printed}");
+    assert!(
+        notice < printed.find("Run benchmarks").unwrap(),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("BaseRT 0.2.6 measures PP512 and TG128 first"),
+        "{printed}"
+    );
 }
 
 #[test]

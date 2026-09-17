@@ -123,6 +123,11 @@ fn basert_uses_the_same_signed_binary_identity_flow() {
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
     let report = dir.path().join("report.json");
     let output = Command::new(env!("CARGO_BIN_EXE_computearena"))
+        // Tests never ask GitHub which BaseRT release is newest.
+        .env(
+            "COMPUTEARENA_BASERT_RELEASE_API",
+            "http://127.0.0.1:1/latest",
+        )
         .args(["basert", "--runtime-path"])
         .arg(&executable)
         .arg("--data-dir")
