@@ -539,7 +539,9 @@ pub(crate) fn report_identity_notice(model: &Value) -> String {
         (false, _, Some(repository)) => format!(
             "The model bytes were recorded from {repository} without an exact file; the server will match their hash against artifacts it has already verified."
         ),
-        (false, _, None) => "Model identity is unresolved. The signed report remains submittable and will be labelled unverified; use computearena identify to bind manually acquired bytes to an exact Hugging Face file.".to_string(),
+        // Says only what identity decides: whether the run itself can be
+        // submitted depends on its sweep, and is reported separately.
+        (false, _, None) => "Model identity is unresolved. That alone does not block a submission: the run is labelled unverified. Use computearena identify to bind manually acquired bytes to an exact Hugging Face file.".to_string(),
     }
 }
 

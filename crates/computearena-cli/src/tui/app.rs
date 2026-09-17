@@ -52,6 +52,14 @@ pub(crate) struct ReportRow {
     pub(crate) detail: String,
     pub(crate) path: PathBuf,
     pub(crate) valid: bool,
+    /// Why a valid report cannot be uploaded: a partial run is local only.
+    pub(crate) submission_blocker: Option<String>,
+}
+
+impl ReportRow {
+    pub(crate) fn submittable(&self) -> bool {
+        self.valid && self.submission_blocker.is_none()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -514,7 +522,7 @@ impl App {
                 // intent.
                 let marks = rows
                     .iter()
-                    .map(|row| mode == ReportMode::Submit && row.valid)
+                    .map(|row| mode == ReportMode::Submit && row.submittable())
                     .collect();
                 self.screens.push(Screen::Reports {
                     rows,
@@ -568,7 +576,9 @@ impl App {
                 // A report that fails its checks is listed and left out; it
                 // must not stop the others from being uploaded.
                 let summary = submit_reports(&paths, &reports, &api_url, true, true)?;
-                Ok(if summary.skipped == 0 && summary.duplicates == 0 {
+                // Anything short of every selected report being uploaded
+                // (a duplicate, an invalid report, a partial run) is spelled out.
+                Ok(if summary.submitted == count {
                     format!("Submitted {count} benchmark(s)")
                 } else {
                     summary.describe()
@@ -1046,8 +1056,15 @@ impl App {
             mode,
         } = self.screen_mut()
         {
-            if *mode == ReportMode::Submit && rows[*cursor].valid {
+            if *mode == ReportMode::Submit && rows[*cursor].submittable() {
                 marks[*cursor] = !marks[*cursor];
+                return;
+            }
+            let blocker = (*mode == ReportMode::Submit)
+                .then(|| rows[*cursor].submission_blocker.clone())
+                .flatten();
+            if let Some(blocker) = blocker {
+                self.status = blocker;
             }
         }
     }
@@ -1058,9 +1075,15 @@ impl App {
         } = self.screen_mut()
         {
             if *mode == ReportMode::Submit {
-                let target = !marks.iter().all(|marked| *marked);
+                // Rows that can never be ticked (invalid reports, partial
+                // runs) must not keep "all" from ever being reached.
+                let target = !marks
+                    .iter()
+                    .zip(rows.iter())
+                    .filter(|(_, row)| row.submittable())
+                    .all(|(marked, _)| *marked);
                 for (mark, row) in marks.iter_mut().zip(rows.iter()) {
-                    *mark = target && row.valid;
+                    *mark = target && row.submittable();
                 }
             }
         }
@@ -1245,7 +1268,12 @@ impl App {
                         .map(|(row, _)| row.path.clone())
                         .collect();
                     if selected.is_empty() {
-                        self.status = "Select at least one valid benchmark with Space".to_string();
+                        // Pressing Enter on a partial run explains that row
+                        // rather than asking for a selection it cannot join.
+                        self.status =
+                            rows[*cursor].submission_blocker.clone().unwrap_or_else(|| {
+                                "Select at least one valid benchmark with Space".to_string()
+                            });
                     } else {
                         self.open_preview(selected)?;
                     }
@@ -1395,6 +1423,7 @@ fn report_rows(paths: &Paths) -> Result<Vec<ReportRow>> {
             ),
             path: PathBuf::from(report["path"].as_str().unwrap_or_default()),
             valid: report["status"].as_str() == Some("valid"),
+            submission_blocker: report["submission_blocker"].as_str().map(str::to_string),
         })
         .collect())
 }
@@ -1439,6 +1468,53 @@ mod tests {
         job.kind = kind;
         job.outcome = Some(Ok("done".to_string()));
         job
+    }
+
+    fn report_row(name: &str, submission_blocker: Option<&str>) -> ReportRow {
+        ReportRow {
+            label: name.to_string(),
+            detail: String::new(),
+            path: PathBuf::from(format!("{name}.json")),
+            valid: true,
+            submission_blocker: submission_blocker.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_partial_run_cannot_be_ticked_and_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path(), Some("isu"));
+        let blocker = "Partial run, not submittable: it is missing PP128.";
+        app.screens.push(Screen::Reports {
+            rows: vec![
+                report_row("full", None),
+                report_row("partial", Some(blocker)),
+            ],
+            marks: vec![false, false],
+            cursor: 1,
+            mode: ReportMode::Submit,
+        });
+        let marks = |app: &App| match app.screen() {
+            Screen::Reports { marks, .. } => marks.clone(),
+            _ => unreachable!(),
+        };
+
+        // Space on the partial run explains it instead of ticking it.
+        app.toggle_mark();
+        assert_eq!(marks(&app), [false, false]);
+        assert_eq!(app.status, blocker);
+
+        // So does Enter, when nothing else is selected.
+        app.status.clear();
+        app.activate().unwrap();
+        assert_eq!(app.status, blocker);
+        assert!(matches!(app.screen(), Screen::Reports { .. }));
+
+        // "All" means every report that can be submitted, and still toggles.
+        app.mark_all();
+        assert_eq!(marks(&app), [true, false]);
+        app.mark_all();
+        assert_eq!(marks(&app), [false, false]);
     }
 
     #[test]

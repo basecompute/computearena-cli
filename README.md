@@ -146,6 +146,12 @@ computearena basert run model.base --pp 512,2048 --tg 128 --reps 5
 computearena llama-cpp run model.gguf --yes --output ./report.json
 ```
 
+Only a run with the full default sweep (PP128 to PP16384 and TG128) can be
+submitted, so every model and chip is comparable at every size. A custom `--pp`
+or `--tg` still produces a valid signed report for local use: the client says
+it will be local only before the run starts, shows such reports as `LOCAL ONLY`
+in its lists, and leaves them out of a submission with what is missing.
+
 Two profiles are offered before a run starts. Standard runs without an external
 cooldown wait. With the currently released BaseRT harness, thermally controlled
 (`--cooldown`) waits once before the complete harness run; llama.cpp waits before

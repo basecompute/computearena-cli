@@ -46,6 +46,7 @@ They do not run GPU workloads. See [telemetry.md](telemetry.md) for collector co
 | Run identity | New runs get distinct IDs while preserving the installation key |
 | Submission | Actual JSON upload body equals the signed report; anonymous submission; public-access notice; informational checksum mismatch/download guidance; duplicate HTTP 200 is successful |
 | Batch handling | Invalid reports require explicit skip for noninteractive partial uploads; only valid reports sent; all-invalid batches rejected locally |
+| Full sweep only | The default run is submittable; a custom `--pp`/`--tg` run is announced as local only in the plan and after the run, listed as `LOCAL ONLY`, and refused at submission with the missing workloads before login or any upload; in a batch it is left local while complete runs upload |
 | Failure recovery | HTTP 422 allows the next report; HTTP 429/500 stop the queue; saved reports remain available |
 
 ## What passing tests do not prove
