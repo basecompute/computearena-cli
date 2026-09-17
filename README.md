@@ -144,7 +144,14 @@ turns on llama-bench's native warmup rather than setting a count.
 ```sh
 computearena basert run model.base --pp 512,2048 --tg 128 --reps 5
 computearena llama-cpp run model.gguf --yes --output ./report.json
+computearena llama-cpp run model.gguf -- -sm graph -ts 1/1/1/1
 ```
+
+Anything after `--` goes to llama-bench as it is, for settings such as a
+multi-GPU split, flash attention or the KV cache type. The options that define
+the measurement (model, workloads, repetitions, warmup, output format) stay
+ComputeArena's and are refused there. The settings llama-bench reports back
+are part of the signed report, as for any run.
 
 Only a run with the full default sweep (PP128 to PP16384 and TG128) can be
 submitted, so every model and chip is comparable at every size. A custom `--pp`

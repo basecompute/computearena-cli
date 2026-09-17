@@ -13,6 +13,38 @@ pub(crate) struct LlamaCppAdapter;
 const DOWNLOAD: &str = "https://github.com/ggml-org/llama.cpp/releases";
 const IK_LLAMA_CPP: &str = "ik_llama.cpp";
 
+/// llama-bench options of the visitor's own after `--`, such as
+/// `-sm graph -ts 1/1/1/1` on a multi-GPU machine. The options that define
+/// the workload stay the adapter's; the settings llama-bench then reports are
+/// signed as usual.
+fn validate_runtime_args(arguments: &[String]) -> Result<()> {
+    const RESERVED: &[&str] = &[
+        "-m",
+        "--model",
+        "-p",
+        "--n-prompt",
+        "-n",
+        "--n-gen",
+        "-pg",
+        "-gp",
+        "-d",
+        "--n-depth",
+        "-r",
+        "--repetitions",
+        "-o",
+        "--output",
+        "-oe",
+        "--output-err",
+        "-w",
+        "--warmup",
+        "--no-warmup",
+    ];
+    if let Some(reserved) = arguments.iter().find(|a| RESERVED.contains(&a.as_str())) {
+        bail!("{reserved} cannot be passed to llama-bench: ComputeArena chooses the model, workloads, repetitions, warmup and output format.");
+    }
+    Ok(())
+}
+
 /// Which project built this llama-bench. ik_llama.cpp's fork measures the same
 /// workloads with the same `samples_ns` timing, but has no `-d`: it seeds
 /// decode with `-gp <depth>,<tg>`, disables warmup with `-w 0`, and reports
@@ -120,6 +152,7 @@ impl RuntimeAdapter for LlamaCppAdapter {
         if r.tg == 0 || r.reps == 0 || r.reps > 100 {
             bail!("Use positive token sizes and between 1 and 100 repetitions.");
         }
+        validate_runtime_args(r.runtime_args)?;
         crate::benchmark::confirm_llama_profile(r, yes)
     }
 
@@ -131,6 +164,7 @@ impl RuntimeAdapter for LlamaCppAdapter {
     ) -> Result<RuntimeOutput> {
         validate_model(r.model)?;
         let dialect = Dialect::of(descriptor);
+        validate_runtime_args(r.runtime_args)?;
         let ui = TerminalUi::detect();
         println!("{}", ui.neutral("Telemetry: observing each runtime process and available device sensors (1-second sampling)."));
         let (rows, telemetry) = if r.cooldown {
@@ -204,7 +238,7 @@ fn run_native(
     depth: u32,
 ) -> Result<(Value, Value)> {
     let mut command = Command::new(executable);
-    command.arg("-m").arg(r.model);
+    command.arg("-m").arg(r.model).args(r.runtime_args);
     match dialect {
         Dialect::Upstream => command
             .args(["-p", pp, "-n"])
@@ -765,6 +799,7 @@ printf '[{"build_commit":"abc123","build_number":123,"model_type":"Qwen Q4","mod
             reps: 2,
             warmup: 3,
             cooldown: false,
+            runtime_args: &[],
         }
     }
     fn rows() -> Value {

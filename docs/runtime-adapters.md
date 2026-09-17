@@ -52,6 +52,10 @@ of repetitions. The plan states this before execution. Standard mode uses a PP51
 process, then a TG process, then a remaining-PP-sweep process; optional cooldown uses one fresh process per
 workload (see benchmark-profiles.md). Automatic external telemetry is collected
 for each process and native effective settings are preserved.
+`run model.gguf -- <options>` passes the visitor's own llama-bench options to every
+process. -m, -p, -n, -pg, -gp, -d, -r, -o, -oe, -w and --no-warmup (and their long
+forms) are refused; an option given several values fails the usual validation, because
+its rows no longer agree.
 No equivalence between BaseRT and GGUF quantization names is assumed. Both adapters emit
 the runtime-neutral `computearena-model/1` identity described in model-identity.md.
 

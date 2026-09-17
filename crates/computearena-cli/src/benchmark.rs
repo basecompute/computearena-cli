@@ -83,6 +83,15 @@ pub(crate) fn plan_rows(
             "Signed JSON report saved locally\nNothing is uploaded automatically".to_string(),
         ),
     ];
+    if !r.runtime_args.is_empty() {
+        rows.push((
+            "Options",
+            format!(
+                "{}\nPassed to llama-bench; the settings it reports back are signed",
+                r.runtime_args.join(" ")
+            ),
+        ));
+    }
     // Only a custom sweep gets this row: the default plan stays as short as
     // it was, and a run that cannot be uploaded says so where it is decided.
     if crate::sweep::requested_gap(r.pp, r.tg).is_some() {
@@ -290,6 +299,7 @@ pub(crate) fn confirm_benchmark_run(
         reps,
         warmup,
         cooldown: cooldown_requested,
+        runtime_args: &[],
     };
     print_benchmark_plan(Runtime::Basert, &request)?;
 
@@ -518,6 +528,7 @@ pub(crate) fn run_benchmark(
     reps: u32,
     warmup: u32,
     cooldown_enabled: bool,
+    runtime_args: &[String],
     output: Option<PathBuf>,
 ) -> Result<PathBuf> {
     if !model.is_file() {
@@ -575,6 +586,7 @@ pub(crate) fn run_benchmark(
             reps,
             warmup,
             cooldown: cooldown_enabled,
+            runtime_args,
         },
         &descriptor,
     )?;

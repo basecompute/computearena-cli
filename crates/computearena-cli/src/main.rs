@@ -140,6 +140,9 @@ enum Action {
         /// Write to this path instead of the local report directory.
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// Options for llama-bench itself, after `--`: -- -sm graph -ts 1/1/1/1
+        #[arg(last = true, value_name = "LLAMA_BENCH_ARGS")]
+        runtime_args: Vec<String>,
     },
     /// List reports available on this installation.
     List {
@@ -362,7 +365,11 @@ fn execute(
             cooldown,
             yes,
             output,
+            runtime_args,
         } => {
+            if runtime == Runtime::Basert && !runtime_args.is_empty() {
+                bail!("Options after `--` are passed to llama-bench; BaseRT takes none.");
+            }
             let model = match model {
                 Some(path) => path,
                 None => match runtime.adapter().select_model(paths)? {
@@ -393,6 +400,7 @@ fn execute(
                     reps,
                     warmup,
                     cooldown,
+                    runtime_args: &runtime_args,
                 },
                 yes,
             )?
@@ -410,6 +418,7 @@ fn execute(
                 reps,
                 warmup,
                 cooldown_enabled,
+                &runtime_args,
                 output,
             )?;
             print_submission_hint(paths, api_url, &report)?;
@@ -564,6 +573,7 @@ fn interactive(
                         reps: DEFAULT_REPETITIONS,
                         warmup: DEFAULT_WARMUP_REPETITIONS,
                         cooldown: false,
+                        runtime_args: &[],
                     },
                     false,
                 );
@@ -588,6 +598,7 @@ fn interactive(
                     DEFAULT_REPETITIONS,
                     DEFAULT_WARMUP_REPETITIONS,
                     cooldown_enabled,
+                    &[],
                     None,
                 ) {
                     Ok(report) => print_submission_hint(paths, api_url, &report)?,

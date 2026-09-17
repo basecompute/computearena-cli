@@ -1745,3 +1745,35 @@ fn an_ik_llama_cpp_build_runs_the_same_protocol_and_is_named_in_the_signed_repor
         "{args}"
     );
 }
+
+#[test]
+fn options_after_a_double_dash_reach_llama_bench() {
+    let f = Fixture::new("llama-cpp");
+    let mut command = f.run_command(&[]);
+    command.args(["--", "-sm", "graph", "-ts", "1/1/1/1"]);
+    let output = command.output().unwrap();
+    success(&output);
+    // The plan says what llama-bench will be given before anything runs.
+    assert!(text(&output).contains("-sm graph -ts 1/1/1/1"));
+    let args = fs::read_to_string(f.dir.path().join("args")).unwrap();
+    assert_eq!(
+        args.matches("-sm\ngraph\n-ts\n1/1/1/1\n").count(),
+        3,
+        "{args}"
+    );
+    success(&f.verify());
+
+    // The workload is ComputeArena's to choose, and BaseRT takes no options.
+    let f = Fixture::new("llama-cpp");
+    let mut command = f.run_command(&[]);
+    command.args(["--", "-r", "1"]);
+    failure(
+        &command.output().unwrap(),
+        "-r cannot be passed to llama-bench",
+    );
+    assert!(!f.report.exists() && !f.dir.path().join("args").exists());
+    let f = Fixture::new("basert");
+    let mut command = f.run_command(&[]);
+    command.args(["--", "-sm", "graph"]);
+    failure(&command.output().unwrap(), "BaseRT takes none");
+}
