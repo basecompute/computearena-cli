@@ -45,12 +45,24 @@ pub(crate) struct TerminalUi {
     color: bool,
 }
 
+/// NO_COLOR (even empty) and dumb terminals turn styling off everywhere.
+fn colour_allowed() -> bool {
+    std::env::var_os("NO_COLOR").is_none() && std::env::var("TERM").as_deref() != Ok("dumb")
+}
+
 impl TerminalUi {
     pub(crate) fn detect() -> Self {
         Self {
-            color: io::stdout().is_terminal()
-                && std::env::var_os("NO_COLOR").is_none()
-                && std::env::var("TERM").as_deref() != Ok("dumb"),
+            color: io::stdout().is_terminal() && colour_allowed(),
+        }
+    }
+
+    /// For text written to stderr. It follows stderr rather than stdout, so a
+    /// redirected log stays free of escape codes while `list --json > file`
+    /// still styles what reaches the terminal.
+    pub(crate) fn detect_stderr() -> Self {
+        Self {
+            color: io::stderr().is_terminal() && colour_allowed(),
         }
     }
 
@@ -102,6 +114,12 @@ impl TerminalUi {
         println!("{}", self.brand_bold(title));
         println!("{}", self.muted(rule('─')));
     }
+}
+
+/// A low-priority notice on stderr: kept for the record, dimmed so it does
+/// not compete with what the command was run for.
+pub(crate) fn notice(message: impl Display) {
+    eprintln!("{}", TerminalUi::detect_stderr().muted(message));
 }
 
 pub(crate) fn start_activity(ui: TerminalUi, message: impl Display) -> Instant {
@@ -357,5 +375,20 @@ pub(crate) fn print_fields(ui: TerminalUi, rows: &[(&str, String)]) {
         for line in lines {
             println!("  {}  {line}", " ".repeat(width));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TerminalUi;
+
+    #[test]
+    fn muted_text_is_plain_without_colour_and_dimmed_with_it() {
+        assert_eq!(TerminalUi { color: false }.muted("note"), "note");
+        let styled = TerminalUi { color: true }.muted("note");
+        assert!(
+            styled.starts_with("\u{1b}[2m") && styled.contains("note"),
+            "{styled:?}"
+        );
     }
 }
