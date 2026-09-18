@@ -1679,3 +1679,106 @@ fn model_identity_cannot_be_overridden_in_either_runtime() {
         failure(&f.verify(), "signature verification failed");
     }
 }
+
+/// ik_llama.cpp's llama-bench: no `-d`, decode seeded with `-gp`, warmup
+/// switched with `-w`, capability booleans instead of `backends`.
+const IK_LLAMA_BENCH: &str = r##"#!/bin/sh
+if [ "$1" = --help ]; then
+printf '%s\n' '-p, --n-prompt <n> -n, --n-gen <n> -gp <pp,tg> -r, --repetitions <n> -o, --output <csv|json|md|sql> -w, --warmup <0|1>'
+exit 0
+fi
+printf '%s\n' "$@" >> "$ARENA_TEST_ARGS"
+pp=0
+gp=
+while [ "$#" -gt 0 ]; do
+case "$1" in
+-p) shift; pp="$1";;
+-gp) shift; gp="$1";;
+esac
+shift
+done
+row() {
+printf '%s{"build_commit":"def456","build_number":456,"model_type":"Qwen3 Q4_K_M","model_size":24,"model_n_params":4000000000,"cuda":false,"vulkan":false,"metal":false,"sycl":false,"n_gpu_layers":0,"fused_moe":true,"cpu_info":"Test CPU","gpu_info":"","n_prompt":%s,"n_gen":%s,"test":"%s","samples_ns":[100000000,200000000]}' "$@"
+}
+printf '['
+if [ -n "$gp" ]; then
+row '' "${gp%,*}" "${gp#*,}" "tg${gp#*,}@pp${gp%,*}"
+else
+sep=
+IFS=,
+for size in $pp; do row "$sep" "$size" 0 "pp$size"; sep=,; done
+fi
+printf ']'
+"##;
+
+#[test]
+fn an_ik_llama_cpp_build_runs_the_same_protocol_and_is_named_in_the_signed_report() {
+    let f = Fixture::full_sweep("llama-cpp");
+    fs::write(&f.executable, IK_LLAMA_BENCH).unwrap();
+    fs::set_permissions(&f.executable, fs::Permissions::from_mode(0o755)).unwrap();
+    success(&f.run(&[]));
+    let args = fs::read_to_string(f.dir.path().join("args")).unwrap();
+    assert!(args.contains("-p\n512\n-n\n0\n"), "{args}");
+    assert!(args.contains("-p\n0\n-n\n0\n-gp\n1,128\n"), "{args}");
+    assert!(!args.contains("-d\n") && !args.contains("-w\n"), "{args}");
+    let report: Value = serde_json::from_slice(&fs::read(&f.report).unwrap()).unwrap();
+    assert_eq!(report["runtime"]["name"], "llama-cpp");
+    assert_eq!(
+        report["runtime"]["binary"]["descriptor"]["dialect"],
+        "ik_llama.cpp"
+    );
+    let benchmark = &report["benchmark"];
+    assert_eq!(benchmark["runtime_version"], "ik_llama.cpp b456 (def456)");
+    assert_eq!(benchmark["protocol"]["id"], "computearena-throughput/2");
+    assert_eq!(benchmark["params"]["decode_context_tokens"], 1);
+    assert_eq!(benchmark["metrics"]["pp512_t_s"], 3840.0);
+    assert_eq!(benchmark["metrics"]["decode_t_s"], 960.0);
+    assert_eq!(benchmark["runtime_configuration"]["fused_moe"], true);
+    success(&f.verify());
+
+    fs::remove_file(&f.report).unwrap();
+    fs::remove_file(f.dir.path().join("args")).unwrap();
+    success(&f.run(&["--warmup", "0"]));
+    let args = fs::read_to_string(f.dir.path().join("args")).unwrap();
+    assert!(
+        args.contains("-w\n0\n") && !args.contains("--no-warmup"),
+        "{args}"
+    );
+}
+
+#[test]
+fn options_after_a_double_dash_reach_llama_bench_and_are_signed() {
+    let f = Fixture::new("llama-cpp");
+    let mut command = f.run_command(&[]);
+    command.args(["--", "-sm", "graph", "-ts", "1/1/1/1"]);
+    let output = command.output().unwrap();
+    success(&output);
+    // The plan says what llama-bench will be given before anything runs.
+    assert!(text(&output).contains("-sm graph -ts 1/1/1/1"));
+    let args = fs::read_to_string(f.dir.path().join("args")).unwrap();
+    assert_eq!(
+        args.matches("-sm\ngraph\n-ts\n1/1/1/1\n").count(),
+        3,
+        "{args}"
+    );
+    let report: Value = serde_json::from_slice(&fs::read(&f.report).unwrap()).unwrap();
+    assert_eq!(
+        report["benchmark"]["protocol"]["runtime_protocol"]["extra_arguments"],
+        json!(["-sm", "graph", "-ts", "1/1/1/1"])
+    );
+    success(&f.verify());
+
+    // The workload is ComputeArena's to choose, and BaseRT takes no options.
+    let f = Fixture::new("llama-cpp");
+    let mut command = f.run_command(&[]);
+    command.args(["--", "-r", "1"]);
+    failure(
+        &command.output().unwrap(),
+        "-r cannot be passed to llama-bench",
+    );
+    assert!(!f.report.exists() && !f.dir.path().join("args").exists());
+    let f = Fixture::new("basert");
+    let mut command = f.run_command(&[]);
+    command.args(["--", "-sm", "graph"]);
+    failure(&command.output().unwrap(), "BaseRT takes none");
+}

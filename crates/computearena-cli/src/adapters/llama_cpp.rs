@@ -11,6 +11,88 @@ use std::process::Command;
 
 pub(crate) struct LlamaCppAdapter;
 const DOWNLOAD: &str = "https://github.com/ggml-org/llama.cpp/releases";
+const IK_LLAMA_CPP: &str = "ik_llama.cpp";
+
+/// llama-bench options of the visitor's own after `--`, such as
+/// `-sm graph -ts 1/1/1/1` on a multi-GPU machine. The options that define
+/// the workload stay the adapter's; the settings llama-bench then reports are
+/// signed as usual.
+fn validate_runtime_args(arguments: &[String]) -> Result<()> {
+    const RESERVED: &[&str] = &[
+        "-m",
+        "--model",
+        "-p",
+        "--n-prompt",
+        "-n",
+        "--n-gen",
+        "-pg",
+        "-gp",
+        "-d",
+        "--n-depth",
+        "-r",
+        "--repetitions",
+        "-o",
+        "--output",
+        "-oe",
+        "--output-err",
+        "-w",
+        "--warmup",
+        "--no-warmup",
+    ];
+    if let Some(reserved) = arguments.iter().find(|a| RESERVED.contains(&a.as_str())) {
+        bail!("{reserved} cannot be passed to llama-bench: ComputeArena chooses the model, workloads, repetitions, warmup and output format.");
+    }
+    Ok(())
+}
+
+/// Which project built this llama-bench. ik_llama.cpp's fork measures the same
+/// workloads with the same `samples_ns` timing, but has no `-d`: it seeds
+/// decode with `-gp <depth>,<tg>`, disables warmup with `-w 0`, and reports
+/// backend capability booleans instead of a `backends` string.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dialect {
+    Upstream,
+    Ik,
+}
+
+impl Dialect {
+    fn detect(help: &str) -> Self {
+        if Self::Ik.features().iter().all(|flag| help.contains(flag)) {
+            Self::Ik
+        } else {
+            Self::Upstream
+        }
+    }
+
+    fn of(descriptor: &Value) -> Self {
+        if descriptor["dialect"] == IK_LLAMA_CPP {
+            Self::Ik
+        } else {
+            Self::Upstream
+        }
+    }
+
+    fn features(self) -> &'static [&'static str] {
+        match self {
+            Self::Upstream => &[
+                "--n-prompt",
+                "--n-gen",
+                "--n-depth",
+                "--repetitions",
+                "--no-warmup",
+                "json",
+            ],
+            Self::Ik => &[
+                "--n-prompt",
+                "--n-gen",
+                "-gp <pp,tg>",
+                "--repetitions",
+                "--warmup <0|1>",
+                "json",
+            ],
+        }
+    }
+}
 
 impl RuntimeAdapter for LlamaCppAdapter {
     fn name(&self) -> &'static str {
@@ -43,24 +125,20 @@ impl RuntimeAdapter for LlamaCppAdapter {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        for feature in [
-            "--n-prompt",
-            "--n-gen",
-            "--n-depth",
-            "--repetitions",
-            "--no-warmup",
-            "json",
-        ] {
+        let dialect = Dialect::detect(&help);
+        for feature in dialect.features() {
             if !output.status.success() || !help.contains(feature) {
                 bail!("This llama.cpp build does not support {feature}. Download a supported build from {DOWNLOAD}.");
             }
         }
         // llama-bench builds do not consistently implement --version. Its
         // structured benchmark rows are the authoritative build identity.
-        Ok(
-            json!({"adapter": "llama-bench-json/1", "version_source": "benchmark.build_commit",
-            "warmup": "runtime_native", "cooldown_supported": true}),
-        )
+        let mut descriptor = json!({"adapter": "llama-bench-json/1", "version_source": "benchmark.build_commit",
+            "warmup": "runtime_native", "cooldown_supported": true});
+        if dialect == Dialect::Ik {
+            descriptor["dialect"] = json!(IK_LLAMA_CPP);
+        }
+        Ok(descriptor)
     }
 
     fn select_model(&self, paths: &crate::reports::Paths) -> Result<Option<PathBuf>> {
@@ -74,6 +152,7 @@ impl RuntimeAdapter for LlamaCppAdapter {
         if r.tg == 0 || r.reps == 0 || r.reps > 100 {
             bail!("Use positive token sizes and between 1 and 100 repetitions.");
         }
+        validate_runtime_args(r.runtime_args)?;
         crate::benchmark::confirm_llama_profile(r, yes)
     }
 
@@ -81,18 +160,36 @@ impl RuntimeAdapter for LlamaCppAdapter {
         &self,
         executable: &Path,
         r: &BenchmarkRequest<'_>,
-        _descriptor: &Value,
+        descriptor: &Value,
     ) -> Result<RuntimeOutput> {
         validate_model(r.model)?;
+        let dialect = Dialect::of(descriptor);
+        validate_runtime_args(r.runtime_args)?;
         let ui = TerminalUi::detect();
         println!("{}", ui.neutral("Telemetry: observing each runtime process and available device sensors (1-second sampling)."));
         let (rows, telemetry) = if r.cooldown {
             let mut cooldown = crate::conditioning::Cooldown::new();
-            run_conditioned(executable, r, |label| cooldown.prepare(label))?
+            run_conditioned(executable, dialect, r, |label| cooldown.prepare(label))?
         } else {
-            run_unconditioned(executable, r)?
+            run_unconditioned(executable, dialect, r)?
         };
         let mut result = normalize(&rows, r)?;
+        if dialect == Dialect::Ik {
+            // The report's runtime name stays llama-cpp; say which engine it
+            // was wherever the version is shown.
+            let version = format!(
+                "{IK_LLAMA_CPP} {}",
+                result.benchmark["runtime_version"]
+                    .as_str()
+                    .unwrap_or_default()
+            );
+            result.benchmark["runtime_version"] = json!(version);
+            result.benchmark["protocol"]["runtime_protocol"]["dialect"] = json!(IK_LLAMA_CPP);
+        }
+        if !r.runtime_args.is_empty() {
+            result.benchmark["protocol"]["runtime_protocol"]["extra_arguments"] =
+                json!(r.runtime_args);
+        }
         ui.section("Benchmark results");
         for pp in r.pp.split(',') {
             if let Some(rate) = result.benchmark["metrics"][format!("pp{pp}_t_s")].as_f64() {
@@ -139,24 +236,35 @@ impl RuntimeAdapter for LlamaCppAdapter {
 
 fn run_native(
     executable: &Path,
+    dialect: Dialect,
     r: &BenchmarkRequest<'_>,
     pp: &str,
     tg: u32,
     depth: u32,
 ) -> Result<(Value, Value)> {
     let mut command = Command::new(executable);
+    command.arg("-m").arg(r.model).args(r.runtime_args);
+    match dialect {
+        Dialect::Upstream => command
+            .args(["-p", pp, "-n"])
+            .arg(tg.to_string())
+            .arg("-d")
+            .arg(depth.to_string()),
+        // `-gp` generates after an untimed prompt of `depth` tokens.
+        Dialect::Ik if tg > 0 => command
+            .args(["-p", "0", "-n", "0", "-gp"])
+            .arg(format!("{depth},{tg}")),
+        Dialect::Ik => command.args(["-p", pp, "-n", "0"]),
+    };
     command
-        .arg("-m")
-        .arg(r.model)
-        .args(["-p", pp, "-n"])
-        .arg(tg.to_string())
-        .arg("-d")
-        .arg(depth.to_string())
         .arg("-r")
         .arg(r.reps.to_string())
         .args(["-o", "json"]);
     if r.warmup == 0 {
-        command.arg("--no-warmup");
+        command.args(match dialect {
+            Dialect::Upstream => &["--no-warmup"][..],
+            Dialect::Ik => &["-w", "0"],
+        });
     }
     let (output, telemetry) =
         crate::telemetry::run_observed(&mut command).context("running llama.cpp benchmark")?;
@@ -168,7 +276,51 @@ fn run_native(
     }
     let rows = serde_json::from_slice(&output.stdout)
         .context("llama.cpp did not return benchmark JSON")?;
-    Ok((rows, telemetry))
+    Ok((
+        match dialect {
+            Dialect::Upstream => rows,
+            Dialect::Ik => upstream_rows(rows, depth)?,
+        },
+        telemetry,
+    ))
+}
+
+/// ik_llama.cpp rows in upstream's vocabulary, so one validator serves both.
+fn upstream_rows(mut rows: Value, depth: u32) -> Result<Value> {
+    for row in rows.as_array_mut().into_iter().flatten() {
+        let tg = row["n_gen"].as_u64().unwrap_or(0);
+        if tg == 0 {
+            // Prefill always starts from a cleared cache.
+            row["n_depth"] = json!(0);
+        } else {
+            // The label tells `-gp` apart from `-pg`, which times its prompt.
+            if row["test"] != format!("tg{tg}@pp{depth}") {
+                bail!("{IK_LLAMA_CPP} did not seed decode with {depth} untimed token(s)");
+            }
+            row["n_prompt"] = json!(0);
+            row["n_depth"] = json!(depth);
+        }
+        // Same priority as ik's own table output. A ROCm build also reports
+        // `cuda`, which the JSON rows cannot tell apart.
+        let backend = [
+            ("cuda", "CUDA"),
+            ("vulkan", "Vulkan"),
+            ("metal", "Metal"),
+            ("sycl", "SYCL"),
+        ]
+        .iter()
+        .find(|(flag, _)| row[*flag] == true)
+        .map_or("CPU", |(_, name)| name);
+        row["backends"] = json!(backend);
+        // ik names the GPU for CUDA and SYCL builds only, and the CPU on
+        // Linux only. "unknown" leaves the device to the shared host lookup.
+        for device in ["cpu_info", "gpu_info"] {
+            if row[device] == "" {
+                row[device] = json!("unknown");
+            }
+        }
+    }
+    Ok(rows)
 }
 
 fn aggregate_observations(
@@ -226,11 +378,16 @@ fn aggregate_observations(
     telemetry
 }
 
-fn run_unconditioned(executable: &Path, r: &BenchmarkRequest<'_>) -> Result<(Value, Value)> {
+fn run_unconditioned(
+    executable: &Path,
+    dialect: Dialect,
+    r: &BenchmarkRequest<'_>,
+) -> Result<(Value, Value)> {
     let headline = crate::protocol::headline_prefill(r.pp);
-    let (prefill, prefill_telemetry) = run_native(executable, r, headline, 0, 0)?;
+    let (prefill, prefill_telemetry) = run_native(executable, dialect, r, headline, 0, 0)?;
     let (decode, decode_telemetry) = run_native(
         executable,
+        dialect,
         r,
         "0",
         r.tg,
@@ -257,7 +414,7 @@ fn run_unconditioned(executable: &Path, r: &BenchmarkRequest<'_>) -> Result<(Val
             .collect::<Vec<_>>()
             .join(",");
     if !remaining.is_empty() {
-        let (sweep, telemetry) = run_native(executable, r, &remaining, 0, 0)?;
+        let (sweep, telemetry) = run_native(executable, dialect, r, &remaining, 0, 0)?;
         rows.extend(
             sweep
                 .as_array()
@@ -273,6 +430,7 @@ fn run_unconditioned(executable: &Path, r: &BenchmarkRequest<'_>) -> Result<(Val
 
 fn run_conditioned(
     executable: &Path,
+    dialect: Dialect,
     r: &BenchmarkRequest<'_>,
     mut prepare: impl FnMut(&str) -> Value,
 ) -> Result<(Value, Value)> {
@@ -315,7 +473,7 @@ fn run_conditioned(
                 r.reps
             ))
         );
-        let (native, telemetry) = run_native(executable, r, &pp.to_string(), *tg, *depth)?;
+        let (native, telemetry) = run_native(executable, dialect, r, &pp.to_string(), *tg, *depth)?;
         let native = native
             .as_array()
             .context("llama.cpp benchmark output must be an array")?;
@@ -418,11 +576,39 @@ pub(crate) fn normalize(value: &Value, r: &BenchmarkRequest<'_>) -> Result<Runti
         "embeddings",
         "backends",
     ];
+    // ik_llama.cpp's own knobs, recorded when its rows carry them.
+    const IK_SETTINGS: &[&str] = &[
+        "rpc",
+        "mla_attn",
+        "attn_max_batch",
+        "ser",
+        "reuse",
+        "use_mmap",
+        "repack",
+        "mqkv",
+        "muge",
+        "defer_experts",
+        "fused_moe",
+        "grouped_er",
+        "no_fused_up_gate",
+        "use_thp",
+        "no_ooae",
+        "rcache",
+        "sas",
+        "max_gpu",
+        "cuda_params",
+        "override_tensor",
+    ];
     for field in SETTINGS {
         settings.insert((*field).into(), first[*field].clone());
     }
+    for field in IK_SETTINGS {
+        if let Some(value) = first.get(*field) {
+            settings.insert((*field).into(), value.clone());
+        }
+    }
     for row in rows {
-        for field in SETTINGS.iter().copied().chain([
+        for field in SETTINGS.iter().chain(IK_SETTINGS).copied().chain([
             "build_commit",
             "build_number",
             "model_type",
@@ -586,12 +772,13 @@ printf '[{"build_commit":"abc123","build_number":123,"model_type":"Qwen Q4","mod
         let mut request = request();
         request.cooldown = true;
         let mut order = Vec::new();
-        let (rows,telemetry)=run_conditioned(&executable,&request,|label|{
+        let (rows,telemetry)=run_conditioned(&executable,Dialect::Upstream,&request,|label|{
             order.push(label.to_owned());
             json!({"method":"timed_fallback","target_reached":false,"timed_out":false,"waited_s":30.0,"sample_count":1})
         }).unwrap();
         assert_eq!(order, vec!["pp512", "tg128", "pp128"]);
-        let (standard_rows, _) = run_unconditioned(&executable, &request).unwrap();
+        let (standard_rows, _) =
+            run_unconditioned(&executable, Dialect::Upstream, &request).unwrap();
         assert_eq!(
             standard_rows, rows,
             "standard and cooldown retain the same headline-first order"
@@ -617,6 +804,7 @@ printf '[{"build_commit":"abc123","build_number":123,"model_type":"Qwen Q4","mod
             reps: 2,
             warmup: 3,
             cooldown: false,
+            runtime_args: &[],
         }
     }
     fn rows() -> Value {
@@ -675,5 +863,36 @@ printf '[{"build_commit":"abc123","build_number":123,"model_type":"Qwen Q4","mod
         let mut value = rows();
         value[2]["samples_ns"] = json!([100]);
         assert!(normalize(&value, &request()).is_err());
+    }
+
+    /// One row as ik_llama.cpp's llama-bench prints it on Apple silicon,
+    /// where it names neither the CPU nor the GPU.
+    fn ik_row(n_prompt: u64, n_gen: u64, test: &str) -> Value {
+        json!({"build_commit":"def456","build_number":456,"model_type":"qwen2 4B Q4_K - Medium",
+            "model_filename":"/private/models/Qwen3-4B.gguf","cpu_info":"","gpu_info":"",
+            "cuda":false,"vulkan":false,"metal":true,"sycl":false,"n_gpu_layers":99,"mla_attn":3,
+            "n_prompt":n_prompt,"n_gen":n_gen,"test":test,"samples_ns":[100000000,200000000],
+            "model_size":123,"model_n_params":4000000000u64})
+    }
+
+    #[test]
+    fn ik_rows_pass_the_same_validation_once_translated() {
+        let prefill = json!([ik_row(512, 0, "pp512"), ik_row(128, 0, "pp128")]);
+        let mut rows = upstream_rows(prefill, 0).unwrap();
+        let decode = upstream_rows(json!([ik_row(1, 128, "tg128@pp1")]), 1).unwrap();
+        rows.as_array_mut().unwrap().push(decode[0].clone());
+        let result = normalize(&rows, &request()).unwrap();
+        assert_eq!(result.benchmark["backend"], "Metal");
+        // Resolved from the host before signing, as for any unnamed device.
+        assert_eq!(result.benchmark["chip"], "unknown");
+        assert_eq!(result.benchmark["metrics"]["decode_t_s"], json!(960.0));
+        assert_eq!(result.benchmark["runtime_configuration"]["mla_attn"], 3);
+        assert_eq!(
+            result.benchmark["protocol"]["context_requests"]["tg128"]
+                ["requested_context_capacity_tokens"],
+            129
+        );
+        // `-pg 1,128` would time the prompt together with the generation.
+        assert!(upstream_rows(json!([ik_row(1, 128, "pp1+tg128")]), 1).is_err());
     }
 }

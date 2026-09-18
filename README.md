@@ -144,7 +144,14 @@ turns on llama-bench's native warmup rather than setting a count.
 ```sh
 computearena basert run model.base --pp 512,2048 --tg 128 --reps 5
 computearena llama-cpp run model.gguf --yes --output ./report.json
+computearena llama-cpp run model.gguf -- -sm graph -ts 1/1/1/1
 ```
+
+Anything after `--` goes to llama-bench as it is, for settings such as a
+multi-GPU split, flash attention or the KV cache type. The options that define
+the measurement (model, workloads, repetitions, warmup, output format) stay
+ComputeArena's and are refused there. The passed options and the settings
+llama-bench reports back are both part of the signed report.
 
 Only a run with the full default sweep (PP128 to PP16384 and TG128) can be
 submitted, so every model and chip is comparable at every size. A custom `--pp`
@@ -252,6 +259,11 @@ warmup and context requests are signed in the JSON. There is no claim of exact
 cross-runtime equivalence. Existing reports remain verifiable and submittable;
 protocol differences are not a new leaderboard filter.
 The measurement contract is in [docs/runtime-adapters.md](docs/runtime-adapters.md).
+
+A llama-bench built from [ik_llama.cpp](https://github.com/ikawrakow/ik_llama.cpp)
+works the same way: point `--runtime-path` at it, or put it on `PATH`. The
+client recognises the fork from its `--help`, runs the same workloads with
+ik's own flags, and names the fork in the signed report.
 
 ## Reports and signatures
 

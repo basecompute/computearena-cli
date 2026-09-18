@@ -52,6 +52,10 @@ of repetitions. The plan states this before execution. Standard mode uses a PP51
 process, then a TG process, then a remaining-PP-sweep process; optional cooldown uses one fresh process per
 workload (see benchmark-profiles.md). Automatic external telemetry is collected
 for each process and native effective settings are preserved.
+`run model.gguf -- <options>` passes the visitor's own llama-bench options to every
+process and signs them as protocol.runtime_protocol.extra_arguments. -m, -p, -n, -pg,
+-gp, -d, -r, -o, -oe, -w and --no-warmup (and their long forms) are refused; an option
+given several values fails the usual validation, because its rows no longer agree.
 No equivalence between BaseRT and GGUF quantization names is assumed. Both adapters emit
 the runtime-neutral `computearena-model/1` identity described in model-identity.md.
 
@@ -69,6 +73,33 @@ or unsupported flag is introduced. Both runtimes run the requested headline
 first when supported, and use their existing native warmup/timing policies.
 Consumers retain runtime, quantization, protocol and signed runtime evidence.
 Existing measurements are not retroactively relabelled or excluded from rankings.
+
+## ik_llama.cpp builds
+
+The llama.cpp adapter also drives the llama-bench of ik_llama.cpp, recognised at the
+--help probe by `-gp <pp,tg>` and `--warmup <0|1>`. There is no separate runtime
+selector: both projects name their executable llama-bench, so the one that was found
+is identified rather than guessed. The workloads, order, processes and samples_ns
+timing are unchanged; only their spelling differs:
+
+| | llama.cpp | ik_llama.cpp |
+| --- | --- | --- |
+| TG from one untimed seed token | `-p 0 -n 128 -d 1` | `-p 0 -n 0 -gp 1,128`; the row must be labelled `tg128@pp1` |
+| PP from an empty context | `-d 0` | always (no depth option) |
+| Disable warmup | `--no-warmup` | `-w 0` |
+| Backend | `backends` | first of the `cuda`, `vulkan`, `metal`, `sycl` flags, else CPU |
+
+ik rows are translated into llama.cpp's fields before the shared validation, and
+ik's own settings (`mla_attn`, `fused_moe`, `ser`, ...) are kept in
+runtime_configuration. ik names the GPU for CUDA and SYCL builds only, and the CPU on
+Linux only. An unnamed device is reported as `unknown` and resolved by the shared host
+lookup before signing (Apple silicon through sysctl, recorded in chip_detection); where
+that lookup declines to guess, as for Vulkan, the chip stays unresolved. A ROCm build
+reports the `cuda` flag and is recorded as CUDA.
+
+The report's runtime name stays `llama-cpp`. The signed descriptor carries
+`dialect: "ik_llama.cpp"`, as does `protocol.runtime_protocol`, and runtime_version
+reads `ik_llama.cpp b<build> (<commit>)`, so the server can tell the two apart.
 
 ## Binary provenance
 

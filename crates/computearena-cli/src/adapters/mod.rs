@@ -35,6 +35,8 @@ pub(crate) struct BenchmarkRequest<'a> {
     pub reps: u32,
     pub warmup: u32,
     pub cooldown: bool,
+    /// Options for the runtime's own executable, given after `--`.
+    pub runtime_args: &'a [String],
 }
 
 pub(crate) struct RuntimeOutput {

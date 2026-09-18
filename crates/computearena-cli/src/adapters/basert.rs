@@ -405,6 +405,7 @@ mod tests {
             reps: 3,
             warmup: 0,
             cooldown: false,
+            runtime_args: &[],
         };
         let original = json!({"params":{"ctx":4096},"protocol":{
             "schema":"basert-throughput-protocol/2","profile":"basert-bench-capacity/1",
@@ -550,6 +551,7 @@ mod tests {
             reps: 3,
             warmup: 3,
             cooldown: false,
+            runtime_args: &[],
         };
         let mut benchmark = json!({
             "params":{},

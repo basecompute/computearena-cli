@@ -447,6 +447,7 @@ impl App {
             reps: DEFAULT_REPETITIONS,
             warmup: DEFAULT_WARMUP_REPETITIONS,
             cooldown: false,
+            runtime_args: &[],
         }
     }
 
@@ -513,6 +514,7 @@ impl App {
                     DEFAULT_REPETITIONS,
                     DEFAULT_WARMUP_REPETITIONS,
                     cooldown,
+                    &[],
                     None,
                 )?;
                 *completed.lock().unwrap_or_else(PoisonError::into_inner) = Some(path.clone());
