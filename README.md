@@ -1,6 +1,8 @@
 # ComputeArena CLI
 
 `computearena` is the command-line client for [ComputeArena](https://computearena.ai),
+
+[![ComputeArena on StartupScores](https://startupscores.com/badge/computearena.svg?style=shield&v=combo&theme=dark)](https://startupscores.com/open-source/computearena)
 a community leaderboard of benchmarks for AI models running on edge devices. It
 runs prefill and decode benchmarks through a local inference runtime, saves
 each result on your machine as a signed report, lets you inspect and verify
